@@ -153,6 +153,12 @@ def compute_curvature(pcd, k_neighbors):
         curv[i] = eigvals[0] / eigvals.sum()   # smallest eigenvalue ratio
     return curv
 
+def mask_point_cloud(pcd, mask):
+    masked_pcd = o3d.geometry.PointCloud()
+    masked_pcd.points = o3d.utility.Vector3dVector(np.asarray(pcd.points)[mask])
+    masked_pcd.normals = o3d.utility.Vector3dVector(np.asarray(pcd.normals)[mask])
+    return masked_pcd
+
 def orient_normals_using_cameras(pcd, cam_positions):
     pts = np.asarray(pcd.points)
     nrm = np.asarray(pcd.normals)
@@ -167,87 +173,6 @@ def orient_normals_using_cameras(pcd, cam_positions):
     nrm[flip] *= -1.0
     pcd.normals = o3d.utility.Vector3dVector(nrm)
 
-# def write_mechmind_ply(pcd, ply_path):
-
-#     points = np.asarray(pcd.points, dtype=np.float32)
-#     normals = np.asarray(pcd.normals, dtype=np.float32)
-#     # print(f"first point: {points[0]}, first normal: {normals[0]}")
-
-#     if len(points) == 0:
-#         raise ValueError("Empty point cloud")
-#     if normals.shape[0] != points.shape[0]:
-#         raise ValueError("Normals missing or size mismatch")
-#     validate_normals(pcd)
-
-#     curvature = np.zeros((points.shape[0], 1), dtype=np.float32)
-#     vertex_data = np.hstack([points, normals, curvature])
-#     # print(f"first vertex data row: {vertex_data[0]}")
-
-#     with open(ply_path, "wb") as f:
-#         header = f"""ply
-# format binary_little_endian 1.0
-# comment PCL generated
-# element vertex {len(vertex_data)}
-# property float x
-# property float y
-# property float z
-# property float nx
-# property float ny
-# property float nz
-# property float curvature
-# element face 0
-# element camera 1
-# property float view_px
-# property float view_py
-# property float view_pz
-# property float x_axisx
-# property float x_axisy
-# property float x_axisz
-# property float y_axisx
-# property float y_axisy
-# property float y_axisz
-# property float z_axisx
-# property float z_axisy
-# property float z_axisz
-# property float focal
-# property float scalex
-# property float scaley
-# property float centerx
-# property float centery
-# property int viewportx
-# property int viewporty
-# property float k1
-# property float k2
-# end_header
-# """
-#         f.write(header.encode("ascii"))
-
-#         # --- Vertex block ---
-#         for i, row in enumerate(vertex_data):
-#             # print(f"writing vertex row: {row}") if i < 5 else None
-#             f.write(struct.pack("<7f", *row))
-
-#         # --- Camera block (MUST MATCH HEADER ORDER EXACTLY) ---
-#         camera_floats = [
-#             0.0, 0.0, 1.0,      # view_px, view_py, view_pz  (camera outside model!)
-#             1.0, 0.0, 0.0,      # x_axis
-#             0.0, 1.0, 0.0,      # y_axis
-#             0.0, 0.0, 1.0,      # z_axis
-#             525.0,             # focal
-#             1.0,               # scalex
-#             1.0,               # scaley
-#             320.0,             # centerx
-#             240.0              # centery
-#         ]
-
-#         for v in camera_floats:
-#             f.write(struct.pack("<f", v))
-
-#         f.write(struct.pack("<i", 640))   # viewportx
-#         f.write(struct.pack("<i", 480))   # viewporty
-#         f.write(struct.pack("<f", 0.0))   # k1
-#         f.write(struct.pack("<f", 0.0))   # k2
-        
 def write_mechmind_ply(pcd, ply_path):
     points = np.asarray(pcd.points, dtype=np.float32)
     normals = np.asarray(pcd.normals, dtype=np.float32)
