@@ -10,6 +10,7 @@ from utilities import *
 import time
 import logging
 import copy
+import threading
 
 # ===============================
 # Stage definition
@@ -33,7 +34,9 @@ class MeshSamplingApp:
 
     def __init__(self):
         self.stage = Stage.IMPORT_MESH
-        self.window = gui.Application.instance.create_window("Mesh Sampling Tool", 1440, 900)
+        self.window_width = 1440
+        self.window_height = 900
+        self.window = gui.Application.instance.create_window("Mesh Sampling Tool", self.window_width, self.window_height)
 
         # === Data variables ===
         self.mesh = None
@@ -47,16 +50,17 @@ class MeshSamplingApp:
         self.drag_start = None
         self.drag_end = None
         self.selected_indices = []
+
+        # === Materials ===
         self.default_material = rendering.MaterialRecord()
         self.default_material.shader = "defaultLit"
-
         self.default_point_material = rendering.MaterialRecord()
         self.default_point_material.shader = "defaultUnlit"
-        self.default_point_material.point_size = 1.0
-        self.overlay_material.base_color = [1.0, 1.0, 1.0, 1.0]
+        self.default_point_material.point_size = 1.5
+        self.default_point_material.base_color = [1.0, 1.0, 1.0, 1.0]
         self.overlay_material = rendering.MaterialRecord()
         self.overlay_material.shader = "defaultUnlit"
-        self.overlay_material.point_size = 1.0
+        self.overlay_material.point_size = 1.5
         self.overlay_material.base_color = [1.0, 0.5, 0.3, 1.0]
 
         self.stage_init = {}        
@@ -89,7 +93,7 @@ class MeshSamplingApp:
         # ===============================
         # Build Control Panel
         # ===============================
-
+        print("initializing panel")
         em = self.window.theme.font_size
         self.panel = gui.Vert(0.25 * em, gui.Margins(em, em, em, em))
         self.window.add_child(self.panel)
@@ -102,11 +106,11 @@ class MeshSamplingApp:
         self.stage_panels[Stage.DOWNSAMPLE] = self._downsample_panel()
         self.stage_panels[Stage.SAVE] = self._save_panel()
 
-
         for p in self.stage_panels.values():
             p.visible = False
             self.panel.add_child(p)
 
+        self.pb_layout()
         self.set_stage(Stage.IMPORT_MESH)
         # self.safe_scene_update(lambda: self.create_origin_frame())
         # self._reframe()
@@ -135,6 +139,25 @@ class MeshSamplingApp:
         r = self.window.content_rect
         self.scene.frame = r
 
+    def pb_layout(self):
+        self.progress_panel = gui.Vert(0, gui.Margins(10, 10, 10, 10))
+        self.progress_panel.visible = False
+        self.progress_label = gui.Label("Processing...")
+        self.progress_bar = gui.ProgressBar()
+        self.progress_bar.value = 0.0  # range [0, 1]
+        self.progress_panel.add_child(self.progress_label)
+        self.progress_panel.add_child(self.progress_bar)
+        self.window.add_child(self.progress_panel)
+        r = self.window.content_rect
+        self.scene.frame = r
+        panel_width = 300
+        panel_height = 80
+        self.progress_panel.frame = gui.Rect(
+            int((self.window_width - panel_width)/2),
+            int((self.window_height - panel_height)/ 2),
+            panel_width,
+            panel_height
+        )
 
     # ===============================
     # UI helpers
@@ -179,6 +202,27 @@ class MeshSamplingApp:
             is_ortho=False
         )
         print("reframed")
+
+    def show_progress(self, text="Processing..."):
+        def _show():
+            self.progress_label.text = text
+            self.progress_bar.value = 0.0
+            self.progress_panel.visible = True
+        gui.Application.instance.post_to_main_thread(self.window, _show)
+
+
+    def update_progress(self, value):
+        value = max(0.0, min(1.0, value))
+        def _update():
+            self.progress_bar.value = value
+        gui.Application.instance.post_to_main_thread(self.window, _update)
+
+
+    def hide_progress(self):
+        def _hide():
+            self.progress_panel.visible = False
+        gui.Application.instance.post_to_main_thread(self.window, _hide)
+        
     # def _reframe(self, fov_deg=60.0, margin=1.3):
     #     cam = self.scene.scene.camera
 
@@ -326,7 +370,7 @@ class MeshSamplingApp:
                 self.import_mesh()
         elif self.stage == Stage.RAYCAST:
             if key == gui.KeyName.S:
-                self.raycast_mesh()
+                self.start_raycasting()
         elif self.stage == Stage.CROP:
             if key == gui.KeyName.S:
                 self.save_pcd()
@@ -335,7 +379,7 @@ class MeshSamplingApp:
 
         elif self.stage == Stage.DOWNSAMPLE:
             if key == gui.KeyName.S:
-                self.downsample()
+                self.start_downsampling()
             elif key == gui.KeyName.T:
                 self.use_adaptive = not self.use_adaptive
                 self.adaptive_checkbox.checked = not self.adaptive_checkbox.checked
@@ -432,15 +476,8 @@ class MeshSamplingApp:
         self.ray_spacing_slider = gui.Slider(gui.Slider.DOUBLE)
         self.ray_spacing_slider.set_limits(0.5, 3.0)
         self.ray_spacing_slider.double_value = self.ray_spacing_mm
-        # self.ray_margin_slider = gui.Slider(gui.Slider.DOUBLE)
-        # self.ray_margin_slider.set_limits(0.5, 3.0)
-        # self.ray_margin_slider.double_value = self.ray_margin_mm
-
-        # self.image_res_slider = gui.Slider(gui.Slider.INT)
-        # self.image_res_slider.set_limits(100, 2000)
-        # self.image_res_slider.int_value = 1000
         btn_raycast = gui.Button("Raycast")
-        btn_raycast.set_on_clicked(self.raycast_mesh)
+        btn_raycast.set_on_clicked(self.start_raycasting)
 
         btn_reset = gui.Button("Clear Raycast")
         btn_reset.set_on_clicked(self.reset_raycast_stage)
@@ -475,18 +512,21 @@ class MeshSamplingApp:
         self.next_stage_buttons[Stage.RAYCAST].enabled = (self.raw_pcd != None)
         self.safe_scene_update(lambda: self.scene.scene.add_geometry("mesh", self.mesh, self.default_material))
 
-    def raycast_mesh(self):
+    def start_raycasting(self):
+        threading.Thread(target=self._raycasting_worker, daemon=True).start()
+
+    def _raycasting_worker(self):
         if self.mesh is None:
             print("[WARN] No mesh loaded")
             return
         self.camera_distance = self.camera_distance_slider.double_value
         self.num_views = self.num_views_slider.int_value
         self.ray_spacing_mm = self.ray_spacing_slider.double_value
-        # self.ray_margin_mm = self.ray_margin_slider.double_value
 
         # Use the largest extent as the characteristic size of the model.
         print("[INFO] Performing view-based ray casting...")
         print("[INFO] Parameters: camera_distance=", self.camera_distance, " num_views=", self.num_views, "ray spacing=", self.ray_spacing_mm)
+        self.show_progress("Raycasting mesh...")
         bbox = self.mesh.get_axis_aligned_bounding_box()
         effective_scale = bbox.get_extent().max() if bbox.get_extent().max() > 0 else 1.0
 
@@ -495,14 +535,12 @@ class MeshSamplingApp:
         view_dirs = fibonacci_sphere(self.num_views)
         all_points = []
         all_cam_pos = []
-        for view_dir in view_dirs:
+        for view_index, view_dir in enumerate(view_dirs):
             # --------------------------------------------------
             # Camera position
             # --------------------------------------------------
             cam_pos = view_dir * (self.camera_distance * effective_scale)
-
             forward = -cam_pos / np.linalg.norm(cam_pos)
-
             # Stable camera basis
             right = np.cross([0, 0, 1], forward)
             if np.linalg.norm(right) < 1e-6:
@@ -580,6 +618,10 @@ class MeshSamplingApp:
             all_points.append(hit_points)
             all_cam_pos.append(cam_pos_arr)
 
+            # --- Progress update ---
+            progress = (view_index + 1) / self.num_views
+            self.update_progress(progress)
+
         if not all_points:
             logging.warning(f"No points generated from mesh")
             return
@@ -591,12 +633,7 @@ class MeshSamplingApp:
         pcd.points = o3d.utility.Vector3dVector(points)
 
         pcd.remove_non_finite_points()
-        pcd.estimate_normals(
-            search_param=o3d.geometry.KDTreeSearchParamHybrid(
-                radius = 0.005,
-                max_nn = 60
-            )
-        )
+        pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius = 0.005, max_nn = 60))
         pcd=normalize_normals(pcd)
 
         orient_normals_using_cameras(pcd, cam_positions)
@@ -609,6 +646,7 @@ class MeshSamplingApp:
         self.safe_scene_update(lambda: self._clear_scene())
         self.safe_scene_update(lambda: self.scene.scene.add_geometry("raw_pcd", self.raw_pcd, self.default_point_material))
         self.next_stage_buttons[Stage.RAYCAST].enabled = True
+        self.hide_progress()
 
     # ==============================
     # Crop Stage
@@ -774,7 +812,7 @@ class MeshSamplingApp:
         self.curvature_k_neighbors_slider.int_value = self.curvature_k_neighbors
 
         btn_downsample = gui.Button("Downsample")
-        btn_downsample.set_on_clicked(self.downsample)
+        btn_downsample.set_on_clicked(self.start_downsampling)
 
         btn_reset = gui.Button("Restart Downsample")
         btn_reset.set_on_clicked(self.reset_downsample_stage)
@@ -791,6 +829,8 @@ class MeshSamplingApp:
         v.add_child(self.voxel_slider)
         v.add_child(gui.Label("Feature Ratio"))
         v.add_child(self.feature_ratio_slider)
+        v.add_child(gui.Label("Coarse Factor"))
+        v.add_child(self.coarse_factor_slider)
         v.add_child(gui.Label("Curvature K Neighbours"))
         v.add_child(self.curvature_k_neighbors_slider)
 
@@ -814,7 +854,10 @@ class MeshSamplingApp:
         self.down_pcd = None
         self.safe_scene_update(lambda: self.scene.scene.add_geometry("cropped_pcd", self.cropped_pcd, self.default_point_material))
 
-    def downsample(self):
+    def start_downsampling(self):
+        threading.Thread(target=self._downsample_worker, daemon=True).start()
+
+    def _downsample_worker(self):
         self.use_adaptive = self.adaptive_checkbox.checked
         self.voxel_size = self.voxel_slider.double_value / 1000.0  # convert mm to m
         self.feature_ratio = self.feature_ratio_slider.double_value
@@ -837,8 +880,8 @@ class MeshSamplingApp:
     def adaptive_voxel_downsample(self):
         print(f"[INFO] Performing adaptive voxel downsampling on raycasted point cloud {len(self.cropped_pcd.points)} points.")
         print(f"[INFO] Parameters: voxel_size={self.voxel_size}, curvature_k_neighbors={self.curvature_k_neighbors}, feature_ratio={self.feature_ratio}, coarse_factor={self.coarse_factor}")
-        
-        variation = compute_curvature(self.cropped_pcd, self.curvature_k_neighbors)
+        self.show_progress("Downsampling point cloud...")
+        variation = self.compute_curvature(self.cropped_pcd, self.curvature_k_neighbors)
         threshold = np.percentile(variation, 100 * (1 - self.feature_ratio))
         feature_mask = variation >= threshold
 
@@ -849,12 +892,30 @@ class MeshSamplingApp:
 
         self.down_pcd = normalize_normals(pcd_feature + pcd_flat)
 
+        self.update_progress(1.0)
+        self.hide_progress()
+
     def uniform_voxel_downsample(self):
         print("[INFO] Performing uniform voxel downsampling...")
         print(f"[INFO] Parameters: voxel_size={self.voxel_size}")
         self.down_pcd = normalize_normals(self.cropped_pcd.voxel_down_sample(self.voxel_size))
 
+    def compute_curvature(self, pcd, k_neighbors):
+        pts = np.asarray(pcd.points)
+        tree = o3d.geometry.KDTreeFlann(pcd)
+        curv = np.zeros(len(pts))
 
+        for i in range(len(pts)):
+            _, idx, _ = tree.search_knn_vector_3d(pts[i], k_neighbors)
+            nbrs = pts[idx]
+            C = np.cov(nbrs.T)
+            eigvals = np.linalg.eigvalsh(C)
+            curv[i] = eigvals[0] / eigvals.sum()   # smallest eigenvalue ratio
+            # --- Progress update ---
+            progress = (i + 1) / len(pts)
+            self.update_progress(progress)
+
+        return curv
     # ===============================
     # Save PLY Stage
     # ===============================
@@ -869,17 +930,18 @@ class MeshSamplingApp:
         btn_back.set_on_clicked(lambda: self.set_stage(Stage(self.stage.value - 1)))
 
         btn_restart = gui.Button("Restart")
-        btn_restart.set_on_clicked(lambda: self._restart)
+        btn_restart.set_on_clicked(lambda: self._restart())
         
         v.add_child(gui.Label("Export PCL"))
         v.add_child(btn_save)
         v.add_child(btn_back)
         v.add_child(btn_restart)
+
+        print("loaded save panel")
         return v
         
     def save_stage_init(self):
         print("save stage init")
-        pass
 
     def save_pcd(self):
         if self.down_pcd is None:
@@ -896,11 +958,13 @@ class MeshSamplingApp:
             return
 
     def _restart(self):
+        print("restart wizard")
         self.mesh = None
         self.raw_pcd = None
         self.cropped_pcd = None
         self.down_pcd = None
         self.set_stage(Stage.IMPORT_MESH)
+        self.safe_scene_update(self._clear_scene())
 
 # ===============================
 # Entry point

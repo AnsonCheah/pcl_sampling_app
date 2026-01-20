@@ -23,36 +23,6 @@ def center_pointcloud_to_geometric_center(pcd):
     pcd_centered = pcd.transform(T)
     return pcd_centered #, T, centroid
 
-# def uniform_voxel_downsample(pcd, voxel_size):
-#     pcd_uniform_downsampled = pcd.voxel_down_sample(voxel_size)
-#     pcd=normalize_normals(pcd_uniform_downsampled)
-
-#     return pcd
-
-# def adaptive_voxel_downsample(pcd, base_voxel, curvature_k_neighbors=30, feature_ratio=0.3, coarse_factor=3.0):
-#     variation = compute_curvature(pcd, curvature_k_neighbors)
-#     threshold = np.percentile(variation, 100 * (1 - feature_ratio))
-#     feature_mask = variation >= threshold
-#     flat_mask = ~feature_mask
-
-#     pts = np.asarray(pcd.points)
-#     nrm = np.asarray(pcd.normals)
-
-#     pcd_feature = o3d.geometry.PointCloud()
-#     pcd_feature.points = o3d.utility.Vector3dVector(pts[feature_mask])
-#     pcd_feature.normals = o3d.utility.Vector3dVector(nrm[feature_mask])
-#     pcd_flat = o3d.geometry.PointCloud()
-#     pcd_flat.points = o3d.utility.Vector3dVector(pts[flat_mask])
-#     pcd_flat.normals = o3d.utility.Vector3dVector(nrm[flat_mask])
-
-#     pcd_feature = pcd_feature.voxel_down_sample(base_voxel)
-#     pcd_feature = normalize_normals(pcd_feature)
-#     pcd_flat = pcd_flat.voxel_down_sample(base_voxel * coarse_factor)
-#     pcd_flat = normalize_normals(pcd_flat)
-
-#     return pcd_feature + pcd_flat
-
-
 def normalize_normals(pcd):
     """
     Normalize all normals in a point cloud to unit length.
@@ -139,19 +109,6 @@ def fibonacci_sphere(samples):
         z = np.sin(theta) * radius
         points.append([x, y, z])
     return np.array(points)
-
-def compute_curvature(pcd, k_neighbors):
-    pts = np.asarray(pcd.points)
-    tree = o3d.geometry.KDTreeFlann(pcd)
-    curv = np.zeros(len(pts))
-
-    for i in range(len(pts)):
-        _, idx, _ = tree.search_knn_vector_3d(pts[i], k_neighbors)
-        nbrs = pts[idx]
-        C = np.cov(nbrs.T)
-        eigvals = np.linalg.eigvalsh(C)
-        curv[i] = eigvals[0] / eigvals.sum()   # smallest eigenvalue ratio
-    return curv
 
 def mask_point_cloud(pcd, mask):
     masked_pcd = o3d.geometry.PointCloud()
