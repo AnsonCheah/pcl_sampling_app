@@ -42,10 +42,7 @@ def normalize_normals(pcd):
     
     normals = np.asarray(pcd.normals, dtype=np.float64)
     points = np.asarray(pcd.points, dtype=np.float64)
-    
     magnitudes = np.linalg.norm(normals, axis=1)
-    
-    # Identify valid points (non-zero magnitude normals)
     valid_mask = magnitudes > 1e-10
     num_removed = np.sum(~valid_mask)
     
@@ -55,11 +52,7 @@ def normalize_normals(pcd):
         normals = normals[valid_mask]
         magnitudes = magnitudes[valid_mask]
     
-    # Normalize
     normalized = normals / magnitudes[:, np.newaxis]
-    
-    # Update point cloud
-    o3d = __import__('open3d')
     pcd.points = o3d.utility.Vector3dVector(points)
     pcd.normals = o3d.utility.Vector3dVector(normalized)
     
@@ -129,6 +122,83 @@ def orient_normals_using_cameras(pcd, cam_positions):
     flip = dots > 0
     nrm[flip] *= -1.0
     pcd.normals = o3d.utility.Vector3dVector(nrm)
+
+def plot_curvature_cdf(curvature,
+                        threshold=None,
+                        percentile=None,
+                        title="Curvature Cumulative Distribution"):
+        """
+        Plot cumulative distribution function (CDF) of curvature.
+
+        Args:
+            curvature (np.ndarray): curvature values
+            threshold (float, optional): curvature threshold to annotate
+            percentile (float, optional): percentile of threshold (0-100)
+        """
+        import matplotlib.pyplot as plt
+        curvature = np.asarray(curvature)
+        curvature = curvature[np.isfinite(curvature)]
+
+        if len(curvature) == 0:
+            print("[WARN] No valid curvature values to plot.")
+            return
+
+        curv_sorted = np.sort(curvature)
+        cdf = np.linspace(0, 1, len(curv_sorted))
+
+        plt.figure(figsize=(7, 5))
+        plt.plot(curv_sorted, cdf, linewidth=2)
+
+        if threshold is not None:
+            plt.axvline(threshold, linestyle="--", linewidth=2)
+            label = f"Threshold = {threshold:.2e}"
+            if percentile is not None:
+                label += f"\nPercentile = {percentile:.1f}%"
+            plt.text(
+                threshold,
+                0.05,
+                label,
+                rotation=90,
+                verticalalignment="bottom"
+            )
+
+        plt.xlabel("Curvature")
+        plt.ylabel("Cumulative probability")
+        plt.title(title)
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.show()
+
+def find_cdf_knee(curvature):
+    curv = np.asarray(curvature)
+    curv = curv[np.isfinite(curv)]
+    curv_sorted = np.sort(curv)
+
+    n = len(curv_sorted)
+    if n < 10:
+        raise ValueError("Not enough points for knee detection")
+
+    x = (curv_sorted - curv_sorted.min()) / (np.ptp(curv_sorted) + 1e-12)
+    y = np.linspace(0, 1, n)
+
+    p1 = np.array([x[0], y[0]])
+    p2 = np.array([x[-1], y[-1]])
+    line_vec = p2 - p1
+    line_vec /= np.linalg.norm(line_vec)
+
+    distances = np.zeros(n)
+    for i in range(n):
+        p = np.array([x[i], y[i]])
+        proj = p1 + np.dot(p - p1, line_vec) * line_vec
+        distances[i] = np.linalg.norm(p - proj)
+
+    knee_idx = np.argmax(distances)
+
+    threshold = curv_sorted[knee_idx]
+    percentile = 100.0 * knee_idx / (n - 1)
+    print(f"calculated percentile: {percentile}")
+    print(f"rounded percentile: {int(np.floor(percentile))}")
+    return threshold, int(np.floor(percentile)), knee_idx
 
 def write_mechmind_ply(pcd, ply_path):
     points = np.asarray(pcd.points, dtype=np.float32)
