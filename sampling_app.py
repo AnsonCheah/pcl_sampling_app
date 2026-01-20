@@ -40,6 +40,7 @@ class MeshSamplingApp:
         self.raw_pcd = None
         self.cropped_pcd = None
         self.down_pcd = None
+        self.frame_visible = False
 
         self.tool_mode = ToolMode.NONE
         self.is_dragging = False
@@ -48,8 +49,14 @@ class MeshSamplingApp:
         self.selected_indices = []
         self.default_material = rendering.MaterialRecord()
         self.default_material.shader = "defaultLit"
+
+        self.default_point_material = rendering.MaterialRecord()
+        self.default_point_material.shader = "defaultUnlit"
+        self.default_point_material.point_size = 1.0
+        self.overlay_material.base_color = [1.0, 1.0, 1.0, 1.0]
         self.overlay_material = rendering.MaterialRecord()
-        self.overlay_material.shader = "defaultLit"
+        self.overlay_material.shader = "defaultUnlit"
+        self.overlay_material.point_size = 1.0
         self.overlay_material.base_color = [1.0, 0.5, 0.3, 1.0]
 
         self.stage_init = {}        
@@ -62,7 +69,8 @@ class MeshSamplingApp:
         # === State parameters ===
         self.camera_distance = 1.5
         self.num_views = 30
-        self.image_res = 1000
+        self.ray_margin_mm = 10.0
+        self.ray_spacing_mm = 1.0
         self.voxel_size = 0.001
         self.use_adaptive = True
         self.feature_ratio = 0.1
@@ -100,6 +108,8 @@ class MeshSamplingApp:
             self.panel.add_child(p)
 
         self.set_stage(Stage.IMPORT_MESH)
+        # self.safe_scene_update(lambda: self.create_origin_frame())
+        # self._reframe()
 
     # ===============================
     # Control Panel
@@ -135,12 +145,127 @@ class MeshSamplingApp:
     def _clear_scene(self):
         self.scene.scene.clear_geometry()
 
-    def _reframe(self):
-        if self.mesh == None:
-            return
-        bbox = self.mesh.get_axis_aligned_bounding_box()
-        center = bbox.get_center()
-        self.scene.setup_camera(20.0, bbox, center)
+    def _reframe(self, fov_deg=60.0, margin=1.0):
+        """
+        Dynamically frame object based on its bounding box size.
+        """
+        print("reframing")
+        if self.mesh is None:
+            center = np.array([0.0, 0.0, 0.0])
+            distance = 0.5
+            eye = np.array([1.0,1.0,1.0])
+            up = np.array([1, 1, 1])
+
+        else:
+            bbox = self.mesh.get_axis_aligned_bounding_box()
+            center = bbox.get_center()
+            extent = bbox.get_extent()
+            radius = 0.5 * np.linalg.norm(extent)
+            if radius < 1e-6:
+                return
+
+            fov_rad = np.deg2rad(fov_deg)
+            distance = (radius / np.tan(fov_rad / 2.0)) * margin
+            eye = center + np.array([distance, distance, 0])
+            up = np.array([0, 1, 1])
+
+        cam = self.scene.scene.camera
+        cam.look_at(center, eye, up)
+        cam.set_projection(
+            fov_deg,
+            self.scene.scene.viewport.aspect,
+            near=distance * 0.01,
+            far=distance * 10.0,
+            is_ortho=False
+        )
+        print("reframed")
+    # def _reframe(self, fov_deg=60.0, margin=1.3):
+    #     cam = self.scene.scene.camera
+
+    #     # -----------------------------
+    #     # Case 1: No mesh loaded
+    #     # -----------------------------r
+    #     if self.mesh is None:
+    #         # center = np.array([0.0, 0.0, 0.0])
+
+    #         # # Fixed diagonal view
+    #         # distance = 1.5
+    #         # eye = center + distance * np.array([1.0, 1.0, 1.0])
+
+    #         # # Stable world-up
+    #         # up = np.array([0.0, 0.0, 1.0])
+
+    #         # aspect = max(self.scene.scene.viewport.aspect, 1.0)
+
+    #         # cam.look_at(center, eye, up)
+    #         # cam.set_projection(
+    #         #     fov_deg,
+    #         #     aspect,
+    #         #     near=0.01,
+    #         #     far=10.0,
+    #         #     is_ortho=False
+    #         # )
+    #         return
+
+    #     # -----------------------------
+    #     # Case 2: Mesh exists
+    #     # -----------------------------
+    #     bbox = self.mesh.get_axis_aligned_bounding_box()
+    #     center = bbox.get_center()
+
+    #     extent = bbox.get_extent()
+    #     radius = 0.5 * np.linalg.norm(extent)
+
+    #     if radius < 1e-6:
+    #         return
+
+    #     # Camera distance from bounding sphere
+    #     fov_rad = np.deg2rad(fov_deg)
+    #     distance = (radius / np.tan(fov_rad / 2.0)) * margin
+
+    #     # Diagonal view direction (+X, +Y, +Z)
+    #     view_dir = np.array([1.0, 1.0, 1.0])
+    #     view_dir /= np.linalg.norm(view_dir)
+
+    #     eye = center + distance * view_dir
+
+    #     # Stable up (avoid colinearity!)
+    #     up = np.array([0.0, 0.0, 1.0])
+
+    #     aspect = max(self.scene.scene.viewport.aspect, 1.0)
+
+    #     cam.look_at(center, eye, up)
+    #     cam.set_projection(
+    #         fov_deg,
+    #         self.scene.scene.viewport.aspect,
+    #         near=max(distance * 0.01, 0.001),
+    #         far=distance * 10.0,
+    #         is_ortho=False
+    #     )
+
+    # print("[INFO] Camera reframed")
+
+    # def create_origin_frame(self):
+    #     print("creating origin frame")
+    #     mat = o3d.visualization.rendering.MaterialRecord()
+    #     mat.shader = "defaultLit"
+
+    #     if self.mesh:
+    #         print("has mesh")
+    #         self.scene.scene.remove_geometry("__origin_frame__")
+    #         bbox = self.mesh.get_axis_aligned_bounding_box()
+    #         extent = bbox.get_extent()
+    #         size = 0.2 * np.linalg.norm(extent)
+    #     else:
+    #         print("no mesh")
+    #         size=0.3
+    #     frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
+    #         size=size,
+    #         origin=[0.0, 0.0, 0.0]
+    #     )
+    #     print("adding")
+    #     self.scene.scene.add_geometry("__origin_frame__", frame, mat)
+    #     print("added")
 
     def safe_scene_update(self, fn):
         gui.Application.instance.post_to_main_thread(self.window, fn)
@@ -168,9 +293,20 @@ class MeshSamplingApp:
         key = event.key
 
         # --- Global ---
-        if key == gui.KeyName.Q:
-            gui.Application.instance.quit()
+        # if key == gui.KeyName.Q:
+        #     gui.Application.instance.quit()
+        #     return True
+
+        if key == gui.KeyName.R:
+            self._reframe()
             return True
+        
+        # if key == gui.KeyName.F:
+        #     if self.mesh is None:
+        #         return False
+        #     self.frame_visible = not self.frame_visible
+        #     self.safe_scene_update(self.scene.scene.show_geometry("__origin_frame__", self.frame_visible))
+        #     return True
 
         if key == gui.KeyName.N:
             if self.stage.value >=4:
@@ -275,6 +411,7 @@ class MeshSamplingApp:
         self.mesh = mesh
         self.next_stage_buttons[Stage.IMPORT_MESH].enabled = True
         self.safe_scene_update(lambda: self._clear_scene())
+        # self.safe_scene_update(self.create_origin_frame())
         self.safe_scene_update(lambda: self.scene.scene.add_geometry("mesh", self.mesh, self.default_material))
         self._reframe()
 
@@ -291,9 +428,17 @@ class MeshSamplingApp:
         self.num_views_slider = gui.Slider(gui.Slider.INT)
         self.num_views_slider.set_limits(4, 100)
         self.num_views_slider.int_value = 20
-        self.image_res_slider = gui.Slider(gui.Slider.INT)
-        self.image_res_slider.set_limits(100, 2000)
-        self.image_res_slider.int_value = 1000
+
+        self.ray_spacing_slider = gui.Slider(gui.Slider.DOUBLE)
+        self.ray_spacing_slider.set_limits(0.5, 3.0)
+        self.ray_spacing_slider.double_value = self.ray_spacing_mm
+        # self.ray_margin_slider = gui.Slider(gui.Slider.DOUBLE)
+        # self.ray_margin_slider.set_limits(0.5, 3.0)
+        # self.ray_margin_slider.double_value = self.ray_margin_mm
+
+        # self.image_res_slider = gui.Slider(gui.Slider.INT)
+        # self.image_res_slider.set_limits(100, 2000)
+        # self.image_res_slider.int_value = 1000
         btn_raycast = gui.Button("Raycast")
         btn_raycast.set_on_clicked(self.raycast_mesh)
 
@@ -311,8 +456,8 @@ class MeshSamplingApp:
         v.add_child(self.camera_distance_slider)
         v.add_child(gui.Label("Number of Views"))
         v.add_child(self.num_views_slider)
-        v.add_child(gui.Label("Resolution"))
-        v.add_child(self.image_res_slider)
+        v.add_child(gui.Label("Sampling Resolution"))
+        v.add_child(self.ray_spacing_slider)
         v.add_child(btn_raycast)
         v.add_child(btn_reset)
         v.add_child(btn_next)
@@ -336,11 +481,12 @@ class MeshSamplingApp:
             return
         self.camera_distance = self.camera_distance_slider.double_value
         self.num_views = self.num_views_slider.int_value
-        self.image_res = self.image_res_slider.int_value
+        self.ray_spacing_mm = self.ray_spacing_slider.double_value
+        # self.ray_margin_mm = self.ray_margin_slider.double_value
 
         # Use the largest extent as the characteristic size of the model.
         print("[INFO] Performing view-based ray casting...")
-        print("[INFO] Parameters: camera_distance=", self.camera_distance, " num_views=", self.num_views, " image_res=", self.image_res)
+        print("[INFO] Parameters: camera_distance=", self.camera_distance, " num_views=", self.num_views, "ray spacing=", self.ray_spacing_mm)
         bbox = self.mesh.get_axis_aligned_bounding_box()
         effective_scale = bbox.get_extent().max() if bbox.get_extent().max() > 0 else 1.0
 
@@ -349,41 +495,88 @@ class MeshSamplingApp:
         view_dirs = fibonacci_sphere(self.num_views)
         all_points = []
         all_cam_pos = []
+        for view_dir in view_dirs:
+            # --------------------------------------------------
+            # Camera position
+            # --------------------------------------------------
+            cam_pos = view_dir * (self.camera_distance * effective_scale)
 
-        # Raycast from each view
-        for v in view_dirs:
-            # Camera distance is specified relative to object size; multiply by effective_scale
-            cam_pos = v * (self.camera_distance * effective_scale)
-
-            u = np.linspace(-1,1,self.image_res)
-            v = np.linspace(-1,1,self.image_res)
-            du = (2/self.image_res)
-            dv = (2/self.image_res)
-            uu, vv = np.meshgrid(u,v)
-            uu += np.random.uniform(-du/2, du/2, uu.shape)
-            vv += np.random.uniform(-dv/2, dv/2, vv.shape)
-
-            # Camera basis
             forward = -cam_pos / np.linalg.norm(cam_pos)
-            right = np.cross([0, 1, 0], forward)
+
+            # Stable camera basis
+            right = np.cross([0, 0, 1], forward)
             if np.linalg.norm(right) < 1e-6:
-                right = np.cross([1, 0, 0], forward)
+                right = np.cross([0, 1, 0], forward)
             right /= np.linalg.norm(right)
             up = np.cross(forward, right)
 
-            # Ray directions
-            dirs = forward + uu[..., None] * right + vv[..., None] * up
-            dirs /= np.linalg.norm(dirs, axis=-1, keepdims=True)
-            origins = np.repeat(np.repeat(cam_pos[None, None, :], self.image_res, axis=0), self.image_res, axis=1)
-            rays = o3d.core.Tensor(np.concatenate([origins.reshape(-1, 3), dirs.reshape(-1, 3)], axis=1), dtype=o3d.core.Dtype.Float32)
+            # --------------------------------------------------
+            # Compute physical ray grid size from bounding box
+            # --------------------------------------------------
+            bbox = self.mesh.get_axis_aligned_bounding_box()
+            corners = np.asarray(bbox.get_box_points())
+
+            # Project bbox corners onto camera plane
+            rel = corners - cam_pos
+            x_proj = rel @ right
+            y_proj = rel @ up
+
+            x_min, x_max = x_proj.min(), x_proj.max()
+            y_min, y_max = y_proj.min(), y_proj.max()
+
+            # Add margin (convert mm → meters)
+            margin = self.ray_margin_mm * 1e-3
+            x_min -= margin
+            x_max += margin
+            y_min -= margin
+            y_max += margin
+
+            # --------------------------------------------------
+            # Generate ray grid in METERS
+            # --------------------------------------------------
+            spacing = self.ray_spacing_mm * 1e-3
+
+            xs = np.arange(x_min, x_max, spacing)
+            ys = np.arange(y_min, y_max, spacing)
+
+            if len(xs) == 0 or len(ys) == 0:
+                continue
+
+            uu, vv = np.meshgrid(xs, ys)
+
+            # Optional jitter (sub-voxel anti-aliasing)
+            uu += np.random.uniform(-spacing / 2, spacing / 2, uu.shape)
+            vv += np.random.uniform(-spacing / 2, spacing / 2, vv.shape)
+
+            # --------------------------------------------------
+            # Ray origins and directions
+            # --------------------------------------------------
+            origins = (
+                cam_pos
+                + uu[..., None] * right
+                + vv[..., None] * up
+            )
+
+            dirs = forward[None, None, :].repeat(origins.shape[0], axis=0)
+            dirs = dirs.repeat(origins.shape[1], axis=1)
+
+            rays = np.concatenate([origins.reshape(-1, 3), dirs.reshape(-1, 3)],axis=1)
+
+            rays = o3d.core.Tensor(rays, dtype=o3d.core.Dtype.Float32)
+
+            # --------------------------------------------------
+            # Raycast
+            # --------------------------------------------------
             hits = scene.cast_rays(rays)
             hit_mask = hits["t_hit"].isfinite()
+
             if not hit_mask.any():
                 continue
 
-            valid_rays = rays[hit_mask]
-            hit_points = (valid_rays[:, :3] + valid_rays[:, 3:] * hits["t_hit"][hit_mask].reshape(o3d.core.SizeVector([-1, 1]))).numpy()
+            hit_points = (rays[hit_mask][:, :3] + rays[hit_mask][:, 3:] * hits["t_hit"][hit_mask].reshape((-1, 1))).numpy()
+
             cam_pos_arr = np.repeat(cam_pos[None, :], len(hit_points), axis=0)
+
             all_points.append(hit_points)
             all_cam_pos.append(cam_pos_arr)
 
@@ -414,7 +607,7 @@ class MeshSamplingApp:
         self.raw_pcd = pcd
         self.cropped_pcd = copy.deepcopy(self.raw_pcd) # for crop stage
         self.safe_scene_update(lambda: self._clear_scene())
-        self.safe_scene_update(lambda: self.scene.scene.add_geometry("raw_pcd", self.raw_pcd, self.default_material))
+        self.safe_scene_update(lambda: self.scene.scene.add_geometry("raw_pcd", self.raw_pcd, self.default_point_material))
         self.next_stage_buttons[Stage.RAYCAST].enabled = True
 
     # ==============================
@@ -487,13 +680,13 @@ class MeshSamplingApp:
         self.cropped_pcd = copy.deepcopy(self.raw_pcd) if self.cropped_pcd == None else self.cropped_pcd
         print("[INFO] Entering crop stage. Use box selection to select points to delete.")
         self.safe_scene_update(lambda: self._clear_scene())
-        self.safe_scene_update(lambda: self.scene.scene.add_geometry("crop_pcd", self.cropped_pcd, self.default_material))
+        self.safe_scene_update(lambda: self.scene.scene.add_geometry("crop_pcd", self.cropped_pcd, self.default_point_material))
 
     def reset_crop_stage(self):
         self.safe_scene_update(lambda: self._clear_scene())
         self.cropped_pcd = copy.deepcopy(self.raw_pcd)
         self.down_pcd = None
-        self.safe_scene_update(lambda: self.scene.scene.add_geometry("cropped", self.cropped_pcd, self.default_material))
+        self.safe_scene_update(lambda: self.scene.scene.add_geometry("cropped", self.cropped_pcd, self.default_point_material))
 
     def _select_points_screen_space(self):
         valid_idx, screen_pts = self.project_world_to_screen(np.asarray(self.cropped_pcd.points))
@@ -511,7 +704,7 @@ class MeshSamplingApp:
 
         self.safe_scene_update(lambda: self._clear_scene())
         self.safe_scene_update(lambda: self.scene.scene.add_geometry("selected", selected_pcd, self.overlay_material))
-        self.safe_scene_update(lambda: self.scene.scene.add_geometry("non selected", non_selected_pcd, self.default_material))
+        self.safe_scene_update(lambda: self.scene.scene.add_geometry("non selected", non_selected_pcd, self.default_point_material))
         self.next_stage_buttons[Stage.CROP].enabled = True
 
     def delete_selected_points(self):
@@ -521,7 +714,7 @@ class MeshSamplingApp:
         print(f"[INFO] Deleted selected {len(self.selected_indices)} points. Remaining points: {len(self.cropped_pcd.points)}")
         self.selected_indices = []
         self.safe_scene_update(lambda: self._clear_scene())
-        self.safe_scene_update(lambda: self.scene.scene.add_geometry("cropped", self.cropped_pcd, self.default_material))
+        self.safe_scene_update(lambda: self.scene.scene.add_geometry("cropped", self.cropped_pcd, self.default_point_material))
 
     def _enable_box_selection(self):
         if self.btn_box_select.is_on:
@@ -612,14 +805,14 @@ class MeshSamplingApp:
     def downsample_stage_init(self):        
         if self.down_pcd != None:
             self.safe_scene_update(lambda: self._clear_scene())
-            self.safe_scene_update(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_material))
+            self.safe_scene_update(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
         self.next_stage_buttons[Stage.DOWNSAMPLE].enabled = (self.down_pcd != None)
 
     def reset_downsample_stage(self):
         self.next_stage_buttons[Stage.DOWNSAMPLE].enabled = (self.down_pcd != None)
         self.safe_scene_update(lambda: self._clear_scene())
         self.down_pcd = None
-        self.safe_scene_update(lambda: self.scene.scene.add_geometry("cropped_pcd", self.cropped_pcd, self.default_material))
+        self.safe_scene_update(lambda: self.scene.scene.add_geometry("cropped_pcd", self.cropped_pcd, self.default_point_material))
 
     def downsample(self):
         self.use_adaptive = self.adaptive_checkbox.checked
@@ -639,7 +832,7 @@ class MeshSamplingApp:
         self.next_stage_buttons[Stage.DOWNSAMPLE].enabled = (self.down_pcd != None)
         
         self.safe_scene_update(lambda: self._clear_scene())
-        self.safe_scene_update(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_material))
+        self.safe_scene_update(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
     
     def adaptive_voxel_downsample(self):
         print(f"[INFO] Performing adaptive voxel downsampling on raycasted point cloud {len(self.cropped_pcd.points)} points.")
