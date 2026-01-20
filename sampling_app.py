@@ -72,13 +72,12 @@ class MeshSamplingApp:
 
         # === State parameters ===
         self.camera_distance = 1.5
-        self.num_views = 30
+        self.num_views = 20
         self.ray_margin_mm = 10.0
         self.ray_spacing = 0.001
         self.voxel_size = 0.001
         self.use_adaptive = True
-        self.feature_ratio = 0.1
-        self.coarse_factor = 3.0
+        self.coarse_factor = 2
         self.curvature_k_neighbors = 5
         self.bbox_corners = None
 
@@ -112,8 +111,6 @@ class MeshSamplingApp:
 
         self.pb_layout()
         self.set_stage(Stage.IMPORT_MESH)
-        # self.safe_scene_update(lambda: self.create_origin_frame())
-        # self._reframe()
 
     # ===============================
     # Control Panel
@@ -163,7 +160,7 @@ class MeshSamplingApp:
     # UI helpers
     # ===============================
     def _update_title(self):
-        self.window.title = f"Mesh Sampling Pipeline | Stage: {self.stage.name}"
+        self.window.title = f"Mesh Sampling Wizard | Stage: {self.stage.name}"
 
     def _clear_scene(self):
         self.scene.scene.clear_geometry()
@@ -223,94 +220,6 @@ class MeshSamplingApp:
             self.progress_panel.visible = False
         gui.Application.instance.post_to_main_thread(self.window, _hide)
         
-    # def _reframe(self, fov_deg=60.0, margin=1.3):
-    #     cam = self.scene.scene.camera
-
-    #     # -----------------------------
-    #     # Case 1: No mesh loaded
-    #     # -----------------------------r
-    #     if self.mesh is None:
-    #         # center = np.array([0.0, 0.0, 0.0])
-
-    #         # # Fixed diagonal view
-    #         # distance = 1.5
-    #         # eye = center + distance * np.array([1.0, 1.0, 1.0])
-
-    #         # # Stable world-up
-    #         # up = np.array([0.0, 0.0, 1.0])
-
-    #         # aspect = max(self.scene.scene.viewport.aspect, 1.0)
-
-    #         # cam.look_at(center, eye, up)
-    #         # cam.set_projection(
-    #         #     fov_deg,
-    #         #     aspect,
-    #         #     near=0.01,
-    #         #     far=10.0,
-    #         #     is_ortho=False
-    #         # )
-    #         return
-
-    #     # -----------------------------
-    #     # Case 2: Mesh exists
-    #     # -----------------------------
-    #     bbox = self.mesh.get_axis_aligned_bounding_box()
-    #     center = bbox.get_center()
-
-    #     extent = bbox.get_extent()
-    #     radius = 0.5 * np.linalg.norm(extent)
-
-    #     if radius < 1e-6:
-    #         return
-
-    #     # Camera distance from bounding sphere
-    #     fov_rad = np.deg2rad(fov_deg)
-    #     distance = (radius / np.tan(fov_rad / 2.0)) * margin
-
-    #     # Diagonal view direction (+X, +Y, +Z)
-    #     view_dir = np.array([1.0, 1.0, 1.0])
-    #     view_dir /= np.linalg.norm(view_dir)
-
-    #     eye = center + distance * view_dir
-
-    #     # Stable up (avoid colinearity!)
-    #     up = np.array([0.0, 0.0, 1.0])
-
-    #     aspect = max(self.scene.scene.viewport.aspect, 1.0)
-
-    #     cam.look_at(center, eye, up)
-    #     cam.set_projection(
-    #         fov_deg,
-    #         self.scene.scene.viewport.aspect,
-    #         near=max(distance * 0.01, 0.001),
-    #         far=distance * 10.0,
-    #         is_ortho=False
-    #     )
-
-    # print("[INFO] Camera reframed")
-
-    # def create_origin_frame(self):
-    #     print("creating origin frame")
-    #     mat = o3d.visualization.rendering.MaterialRecord()
-    #     mat.shader = "defaultLit"
-
-    #     if self.mesh:
-    #         print("has mesh")
-    #         self.scene.scene.remove_geometry("__origin_frame__")
-    #         bbox = self.mesh.get_axis_aligned_bounding_box()
-    #         extent = bbox.get_extent()
-    #         size = 0.2 * np.linalg.norm(extent)
-    #     else:
-    #         print("no mesh")
-    #         size=0.3
-    #     frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
-    #         size=size,
-    #         origin=[0.0, 0.0, 0.0]
-    #     )
-    #     print("adding")
-    #     self.scene.scene.add_geometry("__origin_frame__", frame, mat)
-    #     print("added")
-
     def safe_scene_update(self, fn):
         gui.Application.instance.post_to_main_thread(self.window, fn)
 
@@ -337,20 +246,9 @@ class MeshSamplingApp:
         key = event.key
 
         # --- Global ---
-        # if key == gui.KeyName.Q:
-        #     gui.Application.instance.quit()
-        #     return True
-
         if key == gui.KeyName.R:
             self._reframe()
             return True
-        
-        # if key == gui.KeyName.F:
-        #     if self.mesh is None:
-        #         return False
-        #     self.frame_visible = not self.frame_visible
-        #     self.safe_scene_update(self.scene.scene.show_geometry("__origin_frame__", self.frame_visible))
-        #     return True
 
         if key == gui.KeyName.N:
             if self.stage.value >=4:
@@ -422,6 +320,9 @@ class MeshSamplingApp:
     
     def load_mesh_stage_init(self):
         self.next_stage_buttons[Stage.IMPORT_MESH].enabled = (self.mesh != None)
+        if self.mesh is not None:
+            self.safe_scene_update(lambda: self._clear_scene())
+            self.safe_scene_update(lambda: self.scene.scene.add_geometry("mesh", self.mesh, self.default_material))
 
     def reset_mesh_stage(self):
         self.mesh = None
@@ -440,7 +341,11 @@ class MeshSamplingApp:
         if mesh.is_empty():
             print("[WARN] Empty mesh")
             return
-
+        
+        self.raw_pcd = None
+        self.cropped_pcd = None
+        self.down_pcd = None
+        
         bbox = mesh.get_axis_aligned_bounding_box()
         extent_max = bbox.get_extent().max()
         unit_conversion = 1.0
@@ -454,17 +359,16 @@ class MeshSamplingApp:
         mesh.translate(-mesh.get_center())
         self.mesh = mesh
 
-        bbox = self.mesh.get_axis_aligned_bounding_box()
+        bbox = mesh.get_axis_aligned_bounding_box()
         self.bbox_corners = np.asarray(bbox.get_box_points())
-        extent_max = max(bbox.get_extent())   # (dx, dy, dz) in world units
-        self.ray_spacing = np.round(np.clip((extent_max / 200), 0.0005, 0.003), 4)
-        self.voxel_size = np.round(np.clip((extent_max / 100), 0.001, 0.005), 4)
+        extent_min = bbox.get_extent().min()   # (dx, dy, dz) in world units
+        self.ray_spacing = np.round(np.clip((extent_min / 100), 0.0005, 0.003), 4)
+        self.voxel_size = np.round(np.clip((extent_min / 50), 0.001, 0.005), 4)
         print(f"calculated ray spacing: {self.ray_spacing*1000}mm")
         print(f"calculated voxel size needed: {self.voxel_size * 1000}mm")
 
         self.next_stage_buttons[Stage.IMPORT_MESH].enabled = True
         self.safe_scene_update(lambda: self._clear_scene())
-        # self.safe_scene_update(self.create_origin_frame())
         self.safe_scene_update(lambda: self.scene.scene.add_geometry("mesh", self.mesh, self.default_material))
         self._reframe()
 
@@ -500,12 +404,15 @@ class MeshSamplingApp:
         v.add_child(self.num_views_slider)
         v.add_child(btn_raycast)
         v.add_child(btn_reset)
-        v.add_child(btn_next)
         v.add_child(btn_back)
+        v.add_child(btn_next)
         return v
 
     def raycast_stage_init(self):
         self.next_stage_buttons[Stage.RAYCAST].enabled = (self.raw_pcd != None)
+        if self.raw_pcd is not None:
+            self.safe_scene_update(lambda: self._clear_scene())
+            self.safe_scene_update(lambda: self.scene.scene.add_geometry("raw_pcd", self.raw_pcd, self.default_material))
 
     def reset_raycast_stage(self):
         self.safe_scene_update(lambda: self._clear_scene())
@@ -524,8 +431,6 @@ class MeshSamplingApp:
             return
         self.camera_distance = self.camera_distance_slider.double_value
         self.num_views = self.num_views_slider.int_value
-
-        # Use the largest extent as the characteristic size of the model.
         self.show_progress("Raycasting mesh...")
 
         scene = o3d.t.geometry.RaycastingScene()
@@ -534,10 +439,7 @@ class MeshSamplingApp:
         all_points = []
         all_cam_pos = []
         for view_index, view_dir in enumerate(view_dirs):
-            # --------------------------------------------------
             # Camera position
-            # --------------------------------------------------
-            # cam_pos = view_dir * (self.camera_distance * effective_scale)
             cam_pos = view_dir * (self.camera_distance)
             forward = -cam_pos / np.linalg.norm(cam_pos)
             # Stable camera basis
@@ -564,6 +466,7 @@ class MeshSamplingApp:
             # Generate ray grid in METERS
             xs = np.arange(x_min, x_max, self.ray_spacing)
             ys = np.arange(y_min, y_max, self.ray_spacing)
+            # print(f"Ray Grid: {xs.size} * {ys.size}")
 
             if len(xs) == 0 or len(ys) == 0:
                 continue
@@ -576,10 +479,8 @@ class MeshSamplingApp:
             dirs = dirs.repeat(origins.shape[1], axis=1)
 
             rays = np.concatenate([origins.reshape(-1, 3), dirs.reshape(-1, 3)],axis=1)
-
             rays = o3d.core.Tensor(rays, dtype=o3d.core.Dtype.Float32)
 
-            # Raycast
             hits = scene.cast_rays(rays)
             hit_mask = hits["t_hit"].isfinite()
 
@@ -591,7 +492,6 @@ class MeshSamplingApp:
             all_points.append(hit_points)
             all_cam_pos.append(cam_pos_arr)
 
-            # --- Progress update ---
             progress = (view_index + 1) / self.num_views
             self.update_progress(progress)
 
@@ -651,8 +551,8 @@ class MeshSamplingApp:
         v.add_child(delete_btn)
         v.add_child(btn_reset)
 
-        v.add_child(btn_next)
         v.add_child(btn_back)
+        v.add_child(btn_next)
         print("loaded crop panel")
 
         return v
@@ -789,17 +689,17 @@ class MeshSamplingApp:
         v.add_child(self.adaptive_checkbox)
         v.add_child(btn_downsample)
         v.add_child(btn_reset)
-        v.add_child(btn_next)
         v.add_child(btn_back)
+        v.add_child(btn_next)
         print("loaded downsample panel")
 
         return v
         
     def downsample_stage_init(self):        
+        self.next_stage_buttons[Stage.DOWNSAMPLE].enabled = (self.down_pcd != None)
         if self.down_pcd != None:
             self.safe_scene_update(lambda: self._clear_scene())
             self.safe_scene_update(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
-        self.next_stage_buttons[Stage.DOWNSAMPLE].enabled = (self.down_pcd != None)
 
     def reset_downsample_stage(self):
         self.next_stage_buttons[Stage.DOWNSAMPLE].enabled = (self.down_pcd != None)
@@ -813,6 +713,7 @@ class MeshSamplingApp:
     def _downsample_worker(self):
         self.use_adaptive = self.adaptive_checkbox.checked
         if self.cropped_pcd is None:
+            print("cropped pcd is none")
             return
 
         self.adaptive_voxel_downsample() if self.use_adaptive else self.uniform_voxel_downsample()
@@ -835,7 +736,6 @@ class MeshSamplingApp:
         pcd_flat = mask_point_cloud(self.cropped_pcd, ~feature_mask)
         pcd_feature = pcd_feature.voxel_down_sample(self.voxel_size)
         pcd_flat = pcd_flat.voxel_down_sample(self.voxel_size * self.coarse_factor)
-
         self.down_pcd = normalize_normals(pcd_feature + pcd_flat)
 
         self.update_progress(1.0)
@@ -852,10 +752,8 @@ class MeshSamplingApp:
             C = np.cov(nbrs.T)
             eigvals = np.linalg.eigvalsh(C)
             curv[i] = eigvals[0] / eigvals.sum()   # smallest eigenvalue ratio
-            # --- Progress update ---
             progress = (i + 1) / len(pts)
             self.update_progress(progress)
-
         return curv
 
     # ===============================
