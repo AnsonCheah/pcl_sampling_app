@@ -32,36 +32,15 @@ class ToolMode(Enum):
 # ===============================
 class MeshSamplingApp:
 
-    def __init__(self):
+    def __init__(self, headless=False):
+        self.headless = headless
         self.stage = Stage.IMPORT_MESH
-        self.window_width = 1440
-        self.window_height = 900
-        self.window = gui.Application.instance.create_window("Mesh Sampling Tool", self.window_width, self.window_height)
 
         # === Data variables ===
         self.mesh = None
         self.raw_pcd = None
         self.cropped_pcd = None
         self.down_pcd = None
-        self.frame_visible = False
-
-        self.tool_mode = ToolMode.NONE
-        self.is_dragging = False
-        self.drag_start = None
-        self.drag_end = None
-        self.selected_indices = []
-
-        # === Materials ===
-        self.default_material = rendering.MaterialRecord()
-        self.default_material.shader = "defaultLit"
-        self.default_point_material = rendering.MaterialRecord()
-        self.default_point_material.shader = "defaultUnlit"
-        self.default_point_material.point_size = 1.5
-        self.default_point_material.base_color = [1.0, 1.0, 1.0, 1.0]
-        self.overlay_material = rendering.MaterialRecord()
-        self.overlay_material.shader = "defaultUnlit"
-        self.overlay_material.point_size = 1.5
-        self.overlay_material.base_color = [1.0, 0.5, 0.3, 1.0]
 
         self.stage_init = {}        
         self.stage_init[Stage.IMPORT_MESH] = self.load_mesh_stage_init
@@ -82,6 +61,9 @@ class MeshSamplingApp:
         self.bbox_corners = None
 
         # === Scene widget ===
+        self.window_width = 1440
+        self.window_height = 900
+        self.window = gui.Application.instance.create_window("Mesh Sampling Wizard", self.window_width, self.window_height)
         self.scene = gui.SceneWidget()
         self.scene.scene = rendering.Open3DScene(self.window.renderer)
         self.scene.scene.set_background([0.2, 0.2, 0.2, 1.0])
@@ -89,6 +71,23 @@ class MeshSamplingApp:
         self.window.set_on_key(self._on_key)
         self.scene.set_on_mouse(self._on_mouse_event)
         self.window.add_child(self.scene)
+        self.tool_mode = ToolMode.NONE
+        self.is_dragging = False
+        self.drag_start = None
+        self.drag_end = None
+        self.selected_indices = []
+
+        # === Materials ===
+        self.default_material = rendering.MaterialRecord()
+        self.default_material.shader = "defaultLit"
+        self.default_point_material = rendering.MaterialRecord()
+        self.default_point_material.shader = "defaultUnlit"
+        self.default_point_material.point_size = 1.5
+        self.default_point_material.base_color = [1.0, 1.0, 1.0, 1.0]
+        self.overlay_material = rendering.MaterialRecord()
+        self.overlay_material.shader = "defaultUnlit"
+        self.overlay_material.point_size = 1.5
+        self.overlay_material.base_color = [1.0, 0.5, 0.3, 1.0]
 
         # ===============================
         # Build Control Panel
@@ -145,10 +144,8 @@ class MeshSamplingApp:
         self.progress_panel.add_child(self.progress_label)
         self.progress_panel.add_child(self.progress_bar)
         self.window.add_child(self.progress_panel)
-        r = self.window.content_rect
-        self.scene.frame = r
         panel_width = 300
-        panel_height = 80
+        panel_height = 50
         self.progress_panel.frame = gui.Rect(
             int((self.window_width - panel_width)/2),
             int((self.window_height - panel_height)/ 2),
@@ -184,20 +181,21 @@ class MeshSamplingApp:
             if radius < 1e-6:
                 return
 
-            fov_rad = np.deg2rad(fov_deg)
-            distance = (radius / np.tan(fov_rad / 2.0)) * margin
+            distance = (radius / np.tan(np.deg2rad(fov_deg) / 2.0)) * margin
             eye = center + np.array([distance, distance, 0])
             up = np.array([0, 1, 1])
 
         cam = self.scene.scene.camera
         cam.look_at(center, eye, up)
         cam.set_projection(
-            fov_deg,
-            self.scene.scene.viewport.aspect,
-            near=distance * 0.01,
-            far=distance * 10.0,
-            is_ortho=False
+            60.0,                    # FOV
+            self.scene.frame.width / self.scene.frame.height,
+            0.01,
+            1000.0,
+            o3d.visualization.rendering.Camera.FovType.Vertical
         )
+
+
         print("reframed")
 
     def show_progress(self, text="Processing..."):
@@ -229,13 +227,26 @@ class MeshSamplingApp:
     def _open_stl_dialog(self):
         Tk().withdraw()
         path = filedialog.askopenfilename(filetypes=[("STL files", "*.stl *.STL")])
-        return Path(path) if path else None
+        if not path:
+            return None
+        path = Path(path)
+        self.stl_basename = path.stem  # filename without extension
+        return path
 
     def _save_ply_dialog(self):
         Tk().withdraw()
-        path = filedialog.asksaveasfilename(defaultextension=".ply", filetypes=[("PLY files", "*.ply")])
-        return Path(path) if path else None
+        default_name = "output.ply"
+        if hasattr(self, "stl_basename") and self.stl_basename:
+            default_name = f"{self.stl_basename}.ply"
 
+        path = filedialog.asksaveasfilename(
+            defaultextension=".ply",
+            initialfile=default_name,
+            filetypes=[("PLY files", "*.ply")]
+        )
+
+        return Path(path) if path else None
+    
     # ===============================
     # Keybindings
     # ===============================
@@ -397,7 +408,6 @@ class MeshSamplingApp:
         btn_back.set_on_clicked(lambda: self.set_stage(Stage(self.stage.value - 1)))
 
         v.add_child(gui.Label("Raycasting"))
-        v.add_child(gui.Label("Raycast Settings"))
         v.add_child(gui.Label("Camera Distance"))
         v.add_child(self.camera_distance_slider)
         v.add_child(gui.Label("Number of Views"))
@@ -516,7 +526,7 @@ class MeshSamplingApp:
         print(f"[INFO] Total points sampled: {len(pcd.points)}")
         initial_voxel = (self.ray_spacing)*0.3
         pcd = normalize_normals(pcd.voxel_down_sample(initial_voxel)) # downsample to 3x resolution 
-        print(f"[INFO] {initial_voxel*1000}mm Downsampled points: {len(pcd.points)}")
+        print(f"[INFO] Initial voxelized points: {len(pcd.points)}")
         self.raw_pcd = pcd
         self.cropped_pcd = copy.deepcopy(self.raw_pcd) # for crop stage
         self.safe_scene_update(lambda: self._clear_scene())
@@ -700,6 +710,9 @@ class MeshSamplingApp:
         if self.down_pcd != None:
             self.safe_scene_update(lambda: self._clear_scene())
             self.safe_scene_update(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
+        elif self.cropped_pcd != None:
+            self.safe_scene_update(lambda: self._clear_scene())
+            self.safe_scene_update(lambda: self.scene.scene.add_geometry("cropped_pcd", self.cropped_pcd, self.default_point_material))
 
     def reset_downsample_stage(self):
         self.next_stage_buttons[Stage.DOWNSAMPLE].enabled = (self.down_pcd != None)
@@ -716,6 +729,11 @@ class MeshSamplingApp:
             print("cropped pcd is none")
             return
 
+        bbox = self.mesh.get_minimal_oriented_bounding_box()
+        print(bbox.volume())
+        self.voxel_size = np.round(np.clip((bbox.volume() / 3), 0.001, 0.005), 4)
+        print(f"calculated voxel size needed: {self.voxel_size * 1000}mm")
+
         self.adaptive_voxel_downsample() if self.use_adaptive else self.uniform_voxel_downsample()
         print(f"[INFO] Downsampled from to {len(self.cropped_pcd.points)} {len(self.down_pcd.points)} points")
         self.next_stage_buttons[Stage.DOWNSAMPLE].enabled = (self.down_pcd != None)
@@ -728,7 +746,7 @@ class MeshSamplingApp:
 
     def adaptive_voxel_downsample(self):
         self.show_progress("Downsampling point cloud...")
-        variation = self.compute_curvature(self.cropped_pcd, self.curvature_k_neighbors)
+        variation = self.compute_curvature(self.cropped_pcd)
         threshold, percentile, _ = find_cdf_knee(variation)
         feature_mask = variation >= threshold
 
@@ -741,13 +759,13 @@ class MeshSamplingApp:
         self.update_progress(1.0)
         self.hide_progress()
 
-    def compute_curvature(self, pcd, k_neighbors):
+    def compute_curvature(self, pcd):
         pts = np.asarray(pcd.points)
         tree = o3d.geometry.KDTreeFlann(pcd)
         curv = np.zeros(len(pts))
 
         for i in range(len(pts)):
-            _, idx, _ = tree.search_knn_vector_3d(pts[i], k_neighbors)
+            _, idx, _ = tree.search_knn_vector_3d(pts[i], self.curvature_k_neighbors)
             nbrs = pts[idx]
             C = np.cov(nbrs.T)
             eigvals = np.linalg.eigvalsh(C)
