@@ -2,211 +2,290 @@ import open3d as o3d
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 import copy
+from utilities import *
 
-# ----------------------------
-# Utility
-# ----------------------------
+class SyntheticSceneGenerator:
 
-def random_pose():
-    rot = R.random().as_matrix()
-    return rot
+    def __init__(self,mesh_path,image_width=640,image_height=480,fov=60,max_occlusion_ratio=0.3):
+        self.mesh_path = mesh_path
+        self.width = image_width
+        self.height = image_height
+        self.fov = fov
+        self.max_occlusion_ratio = max_occlusion_ratio
+        self.target_mesh = self._prepare_target_mesh(mesh_path)
+        self.visible_target_pcd = o3d.geometry.PointCloud()
+        self.occluders_pcd = o3d.geometry.PointCloud()
 
-def look_at_matrix(eye, target, up):
-    z = (eye - target)
-    z /= np.linalg.norm(z)
-    x = np.cross(up, z)
-    x /= np.linalg.norm(x)
-    y = np.cross(z, x)
-    T = np.eye(4)
-    T[:3, :3] = np.vstack([x, y, z])
-    T[:3, 3] = eye
-    return T
+    # ----------------------------
+    # Core utilities
+    # ----------------------------
 
-# ----------------------------
-# Mesh preparation
-# ----------------------------
+    def random_pose(self):
+        return R.random().as_matrix()
 
-def prepare_target_mesh(mesh_path):
-    print(mesh_path)
-    mesh = o3d.io.read_triangle_mesh(str(mesh_path))
-    if mesh.is_empty():
-        print("[WARN] Empty mesh")
-        return
+    def random_camera(self, base_distance=1.5, jitter=0.2):
+        cam_pos = np.array([np.random.uniform(-jitter, jitter), np.random.uniform(-jitter, jitter), base_distance])
+        look_at = np.zeros(3)
+        up = np.array([0,0,1])
+        return cam_pos, look_at, up
 
-    bbox = mesh.get_axis_aligned_bounding_box()
-    extent_max = bbox.get_extent().max()
-    unit_conversion = 1.0
-    if extent_max > 5 and extent_max < 5000.0:
-        # Likely in millimeters -> convert to meters
-        print(f"[INFO] Converting units from mm to m for: {mesh_path}")
-        unit_conversion = 0.001
-        mesh.scale(unit_conversion, center=(0, 0, 0))
+    # ----------------------------
+    # Mesh prep
+    # ----------------------------
 
-    mesh.compute_vertex_normals()
-    mesh.translate(-mesh.get_center())
+    def _prepare_target_mesh(self, mesh_path):
+        mesh = o3d.io.read_triangle_mesh(str(mesh_path))
+        if mesh.is_empty():
+            raise RuntimeError("Empty mesh")
 
-    rot = random_pose()
-    mesh.rotate(rot, center=(0,0,0))
+        bbox = mesh.get_axis_aligned_bounding_box()
+        extent_max = bbox.get_extent().max()
+        if extent_max > 5 and extent_max < 5000:
+            mesh.scale(0.001, center=(0,0,0))  # mm → m
 
-    return mesh, rot
+        mesh.compute_vertex_normals()
+        mesh.translate(-mesh.get_center())
+        mesh.rotate(self.random_pose(), center=(0,0,0))
+        return mesh
 
-# ----------------------------
-# Camera
-# ----------------------------
+    # ----------------------------
+    # AABB intersection
+    # ----------------------------
 
-def random_camera(base_distance=1.5, jitter=0.2):
-    cam_pos = np.array([
-        base_distance,
-        np.random.uniform(-jitter, jitter),
-        np.random.uniform(-jitter, jitter)
-    ])
-    look_at = np.zeros(3)
-    up = np.array([0,0,1])
-    return cam_pos, look_at, up
+    def aabb_intersect(self, aabb1, aabb2):
+        min1 = aabb1.get_min_bound()
+        max1 = aabb1.get_max_bound()
+        min2 = aabb2.get_min_bound()
+        max2 = aabb2.get_max_bound()
+        return np.all(max1 >= min2) and np.all(max2 >= min1)
 
-# ----------------------------
-# Intersection check
-# ----------------------------
+    def meshes_intersect(self, mesh1, mesh2):
+        aabb1 = mesh1.get_axis_aligned_bounding_box()
+        aabb2 = mesh2.get_axis_aligned_bounding_box()
+        if not self.aabb_intersect(aabb1, aabb2):
+            return False
 
-def meshes_intersect(mesh1, mesh2):
-    aabb1 = mesh1.get_axis_aligned_bounding_box()
-    aabb2 = mesh2.get_axis_aligned_bounding_box()
-    if not aabb_intersect(aabb1, aabb2):
-        return False
+        scene = o3d.t.geometry.RaycastingScene()
+        m1 = o3d.t.geometry.TriangleMesh.from_legacy(mesh1)
+        scene.add_triangles(m1)
+        pts = np.asarray(mesh2.sample_points_uniformly(500).points)
+        query = o3d.core.Tensor(pts, dtype=o3d.core.Dtype.Float32)
+        sdf = scene.compute_signed_distance(query).numpy()
+        return np.any(sdf < 0)
 
-    # Accurate SDF check
-    scene = o3d.t.geometry.RaycastingScene()
-    m1 = o3d.t.geometry.TriangleMesh.from_legacy(mesh1)
-    m2 = o3d.t.geometry.TriangleMesh.from_legacy(mesh2)
-    scene.add_triangles(m1)
-    pts = np.asarray(mesh2.sample_points_uniformly(500).points)
-    query = o3d.core.Tensor(pts, dtype=o3d.core.Dtype.Float32)
-    sdf = scene.compute_signed_distance(query).numpy()
-    return np.any(sdf < 0)
+    # ----------------------------
+    # Raycasting
+    # ----------------------------
 
-def aabb_intersect(aabb1, aabb2):
-    min1 = aabb1.get_min_bound()
-    max1 = aabb1.get_max_bound()
-    min2 = aabb2.get_min_bound()
-    max2 = aabb2.get_max_bound()
+    def _camera_cast_worker(self, meshes, cam_pos, look_at):
+        scene = o3d.t.geometry.RaycastingScene()
+        for m in meshes:
+            scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(m))
 
-    return np.all(max1 >= min2) and np.all(max2 >= min1)
-# ----------------------------
-# Occluder generation
-# ----------------------------
+        rays = scene.create_rays_pinhole(
+            fov_deg=self.fov,
+            center=look_at,
+            eye=cam_pos,
+            up=[0,0,1],
+            width_px=self.width,
+            height_px=self.height
+        )
 
-def generate_occluder(target_mesh, max_trials=50):
-    for _ in range(max_trials):
-        occ = copy.deepcopy(target_mesh)
-        occ.rotate(random_pose(), center=(0,0,0))
-        occ.translate([
-            np.random.uniform(0.15, 0.4),
-            np.random.uniform(-0.2, 0.2),
-            np.random.uniform(-0.2, 0.2)
-        ])
-        if not meshes_intersect(target_mesh, occ):
-            return occ
-    raise RuntimeError("Failed to generate non-intersecting occluder")
+        ans = scene.cast_rays(rays)
 
-# ----------------------------
-# Raycasting
-# ----------------------------
+        hit = ans['t_hit'].isfinite().numpy().reshape(-1)
+        hit_indices = np.where(hit)[0]
 
-def render_scene(meshes, cam_pos, look_at, width=5000, height=5000, fov=60):
-    scene = o3d.t.geometry.RaycastingScene()
-    for m in meshes:
-        scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(m))
+        rays_np = rays.numpy().reshape(-1, 6)
+        t_hit = ans['t_hit'].numpy().reshape(-1)
 
-    rays = scene.create_rays_pinhole(
-        fov_deg=fov,
-        center=look_at,
-        eye=cam_pos,
-        up=[0,0,1],
-        width_px=width,
-        height_px=height
-    )
+        origins = rays_np[hit_indices, :3]
+        dirs    = rays_np[hit_indices, 3:]
+        points  = origins + dirs * t_hit[hit_indices][:, None]
 
-    ans = scene.cast_rays(rays)
+        geom_ids_all = ans['geometry_ids'].numpy().reshape(-1)
+        geom_ids_hit = geom_ids_all[hit_indices]
 
-    hit = ans['t_hit'].isfinite().numpy()
-    rays_np = rays.numpy()
-    t_hit = ans['t_hit'].numpy()
+        pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points))
+        return {
+            "pcd": pcd,
+            "hit_indices": hit_indices,
+            "geom_ids_hit": geom_ids_hit,
+            "geom_ids_all": geom_ids_all.reshape(self.height, self.width),
+            "hit_mask_img": hit.reshape(self.height, self.width),
+            "ray_origins": origins,
+            "ray_hits": points
+        }
+    
+    def _scene_cast(self, cam_pos, look_at, num_occluders=3, max_trials=50):
+        self.target_mesh.rotate(self.random_pose(), center=(0,0,0))
+        # --- Target only ---
+        res_target = self._camera_cast_worker([self.target_mesh], cam_pos, look_at)
+        target_hit_ids = res_target["geom_ids_hit"]
 
-    origins = rays_np[hit][:, :3]
-    dirs    = rays_np[hit][:, 3:]
-    t       = t_hit[hit][:, None]
+        target_geom_ids = [int(i) for i in np.unique(target_hit_ids) if i != 4294967295]
+        if len(target_geom_ids) != 1 or target_geom_ids[0] != 0:
+            raise RuntimeError("Foreign id in target generation")
+        target_geom_id = target_geom_ids[0]
+        target_pixels = len(target_hit_ids)
 
-    points = origins + dirs * t
-    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points))
+        # --- Object scale ---
+        bbox = self.target_mesh.get_axis_aligned_bounding_box()
+        diag = np.linalg.norm(bbox.get_extent())
 
-    return pcd, origins, points
+        self.occluders = []
+        scene_meshes = [self.target_mesh]
 
+        for occ_idx in range(num_occluders):
+            success = False
 
-# ----------------------------
-# Noise models
-# ----------------------------
+            for trial in range(max_trials):
+                occ = copy.deepcopy(self.target_mesh)
+                occ.rotate(self.random_pose(), center=(0,0,0))
+                occ.translate([
+                    np.random.uniform(0.0 * diag, 1.0 * diag),
+                    np.random.uniform(-0.7 * diag, 0.7 * diag),
+                    np.random.uniform(-0.7 * diag, 0.7 * diag)
+                ])
 
-def add_surface_noise(pcd, sigma=0.0001):
-    pcd.estimate_normals()
-    pts = np.asarray(pcd.points)
-    nrm = np.asarray(pcd.normals)
-    noise = np.random.normal(0, sigma, (len(pts), 1))
-    pcd.points = o3d.utility.Vector3dVector(pts + nrm * noise)
-    return pcd
+                # --- Intersection checks ---
+                if any(self.meshes_intersect(m, occ) for m in scene_meshes):
+                    continue
 
-def add_outliers(pcd, n=300, radius=0.4):
-    pts = np.asarray(pcd.points)
-    center = pts.mean(axis=0)
-    out = center + np.random.uniform(-radius, radius, (n,3))
-    pcd.points = o3d.utility.Vector3dVector(np.vstack([pts, out]))
-    return pcd
+                # --- Test occlusion ---
+                test_scene = scene_meshes + [occ]
+                res = self._camera_cast_worker(test_scene, cam_pos, look_at)
+                self.ray_origins = res["ray_origins"]
+                self.ray_hits = res["ray_hits"]
+                geom_ids_hit = res["geom_ids_hit"]
+                scene_pcd = res["pcd"]
+                scene_pcd.estimate_normals()
+                orient_normals_using_cameras(scene_pcd, cam_pos)
+                scene_pcd = normalize_normals(scene_pcd)
+                validate_normals(scene_pcd)
 
-# ----------------------------
-# Visualization
-# ----------------------------
+                target_hit_mask = geom_ids_hit == target_geom_id
+                occ_hit_mask    = geom_ids_hit != target_geom_id
 
-def visualize_scene(target, occluder, pcd, cam_pos, ray_origins, ray_hits):
-    target.paint_uniform_color([0,1,0])
-    occluder.paint_uniform_color([1,0,0])
-    pcd.paint_uniform_color([0,0,1])
+                self.visible_target_pcd = mask_point_cloud(scene_pcd, target_hit_mask)
+                self.occluders_pcd      = mask_point_cloud(scene_pcd, occ_hit_mask)
 
-    cam = o3d.geometry.TriangleMesh.create_sphere(0.02)
-    cam.translate(cam_pos)
-    cam.paint_uniform_color([1,1,0])
+                visible_pixels = len(self.visible_target_pcd.points)
+                occlusion_ratio = 1 - (visible_pixels / target_pixels)
+                if occlusion_ratio > self.max_occlusion_ratio:
+                    continue
 
-    # Rays (subsample for sanity)
-    idx = np.random.choice(len(ray_hits), size=min(1000, len(ray_hits)), replace=False)
-    lines = [[i, i+len(idx)] for i in range(len(idx))]
-    points = np.vstack([ray_origins[idx], ray_hits[idx]])
-    colors = [[1,0,0] for _ in lines]
-    ray_lines = o3d.geometry.LineSet(
-        o3d.utility.Vector3dVector(points),
-        o3d.utility.Vector2iVector(lines)
-    )
-    ray_lines.colors = o3d.utility.Vector3dVector(colors)
+                # --- Accept ---
+                self.occluders.append(occ)
+                scene_meshes.append(occ)
+                success = True
+                break
 
-    o3d.visualization.draw_geometries([target, occluder, pcd, cam, ray_lines], width=1440, height=900)
+            if not success:
+                raise RuntimeError(f"Failed to generate occluder {occ_idx}")
 
-# ----------------------------
-# Full pipeline
-# ----------------------------
+        # --- Final scene ---
+        res_final = self._camera_cast_worker(scene_meshes, cam_pos, look_at)
+        geom_ids_hit = res_final["geom_ids_hit"]
+        final_visible = np.sum(geom_ids_hit == target_geom_id)
+        final_occlusion_ratio = 1 - (final_visible / target_pixels)
 
-def generate_sample(mesh_path):
-    target, gt_rot = prepare_target_mesh(mesh_path)
-    cam_pos, look_at, up = random_camera()
-    occluder = generate_occluder(target)
-    pcd, ray_origins, ray_hits = render_scene([target, occluder], cam_pos, look_at)
-    pcd = add_surface_noise(pcd)
-    pcd = add_outliers(pcd)
-    visualize_scene(target, occluder, pcd, cam_pos, ray_origins, ray_hits)
+        print(f"Target pcd occlusion ratio: {final_occlusion_ratio}")
 
-    return {"pcd": pcd,"gt_rot": gt_rot,"camera": cam_pos}
+    # ----------------------------
+    # Noise
+    # ----------------------------
+
+    def add_surface_noise(self, sigma=0.002):
+        pts = np.asarray(self.visible_target_pcd.points)
+        nrm = np.asarray(self.visible_target_pcd.normals)
+        noise = np.random.normal(0, sigma, (len(pts), 1))
+        self.visible_target_pcd.points = o3d.utility.Vector3dVector(pts + nrm * noise)
+
+    def add_outliers(self):
+        bbox = self.target_mesh.get_axis_aligned_bounding_box()
+        extent = bbox.get_extent()
+        diag = np.linalg.norm(extent)/2
+        pts = np.asarray(self.visible_target_pcd.points)
+        center = self.visible_target_pcd.get_center()
+        outlier_count = int(len(self.visible_target_pcd.points)/3)
+        out = center + np.random.uniform(-diag, diag, (outlier_count,3))
+        self.visible_target_pcd.points = o3d.utility.Vector3dVector(np.vstack([pts, out]))
+
+    # ----------------------------
+    # Visualization
+    # ----------------------------
+
+    def visualize(self, cam_pos, look_at):
+        self.target_mesh.paint_uniform_color([0,1,0])
+        self.visible_target_pcd.paint_uniform_color([0,0,1])
+        self.occluders_pcd.paint_uniform_color([0.6,0.6,0.6])
+        for o in self.occluders:
+            o.paint_uniform_color([1.0,1.0,0.7])
+
+        cam = o3d.geometry.TriangleMesh.create_sphere(0.02)
+        cam.translate(cam_pos)
+        cam.paint_uniform_color([1,1,0])
+
+        # ---- Rays (subsample) ----
+        idx = np.random.choice(len(self.ray_hits), size=min(1000, len(self.ray_hits)), replace=False)
+        lines = [[i, i+len(idx)] for i in range(len(idx))]
+        points = np.vstack([self.ray_origins[idx], self.ray_hits[idx]])
+        colors = [[0.7,0.7,0.7] for _ in lines]
+        ray_lines = o3d.geometry.LineSet(
+            o3d.utility.Vector3dVector(points),
+            o3d.utility.Vector2iVector(lines)
+        )
+        ray_lines.colors = o3d.utility.Vector3dVector(colors)
+
+        # ---- Ground grid ----
+        view_dir = (look_at - cam_pos)
+        view_dir /= np.linalg.norm(view_dir)
+        bottom_center = self.target_mesh.get_center() # + view_dir * target.get_axis_aligned_bounding_box().get_max_bound()[2]
+        grid = make_grid(bottom_center, -view_dir, size=1.0, step=0.1)
+        # ---- Camera frustum ----
+        frustum = make_camera_frustum(cam_pos, look_at, fov_deg=60, depth=0.5)
+
+        o3d.visualization.draw_geometries(
+            [self.target_mesh, *self.occluders, self.visible_target_pcd, self.occluders_pcd, grid],
+            width=1400, height=900, zoom=0.1
+        )
+        # o3d.visualization.draw_geometries(
+        #     [self.target_mesh, *self.occluders, self.visible_target_pcd, self.occluders_pcd, ray_lines, cam, grid, frustum],
+        #     width=1400, height=900, zoom=0.05
+        # )
+
+    # ----------------------------
+    # Public API
+    # ----------------------------
+
+    def generate_sample(self, path, visualize=True):
+        cam_pos, look_at, up = self.random_camera()
+        self._scene_cast(cam_pos, look_at)
+        self.add_surface_noise()
+        self.add_outliers()
+        if visualize:
+            self.visualize(cam_pos, look_at)
+        self.visible_target_pcd.voxel_down_sample(0.001)
+        self.visible_target_pcd.estimate_normals()
+        orient_normals_using_cameras(self.visible_target_pcd, cam_pos)
+        self.visible_target_pcd = normalize_normals(self.visible_target_pcd)
+        validate_normals(self.visible_target_pcd)
+        pointcloud_to_ply(self.visible_target_pcd, path)
 
 # ----------------------------
 # Run
 # ----------------------------
 
 if __name__ == "__main__":
-    mesh_path = "input/25333MB000.STL"
-    # for _ in range(100):
-    sample = generate_sample(mesh_path)
+    sim = SyntheticSceneGenerator(
+        mesh_path="input/25333MB000.STL",
+        image_width=1920,
+        image_height=1080,
+        fov=60,
+        max_occlusion_ratio=0.3
+    )
+    for i in range(1):
+        path = f"C:/Users/Hmgics/Desktop/sampling_app/pcl_sampling_app/synthetic_target/sample_{i}.ply"
+        sample = sim.generate_sample(path, visualize=False)
+        # sample = sim.generate_sample(path)

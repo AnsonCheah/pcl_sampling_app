@@ -200,7 +200,7 @@ def find_cdf_knee(curvature):
     print(f"rounded percentile: {int(np.floor(percentile))}")
     return threshold, int(np.floor(percentile)), knee_idx
 
-def write_mechmind_ply(pcd, ply_path):
+def pointcloud_to_ply(pcd, ply_path):
     points = np.asarray(pcd.points, dtype=np.float32)
     normals = np.asarray(pcd.normals, dtype=np.float32)
 
@@ -275,3 +275,70 @@ end_header
         f.write(struct.pack("<i", 480))  # viewporty
         f.write(struct.pack("<f", 0.0))  # k1
         f.write(struct.pack("<f", 0.0))  # k2
+
+
+def make_camera_frustum(cam_pos, look_at, fov_deg=60, aspect=1.0, depth=0.5):
+    forward = look_at - cam_pos
+    forward /= np.linalg.norm(forward)
+
+    right = np.cross(forward, [0,0,1])
+    if np.linalg.norm(right) < 1e-6:
+        right = np.cross(forward, [0,1,0])
+    right /= np.linalg.norm(right)
+    up = np.cross(right, forward)
+
+    h = np.tan(np.deg2rad(fov_deg/2)) * depth
+    w = h * aspect
+
+    center = cam_pos + forward * depth
+    corners = [
+        center + up*h + right*w,
+        center + up*h - right*w,
+        center - up*h - right*w,
+        center - up*h + right*w,
+    ]
+
+    points = [cam_pos] + corners
+    lines = [
+        [0,1],[0,2],[0,3],[0,4],
+        [1,2],[2,3],[3,4],[4,1]
+    ]
+
+    frustum = o3d.geometry.LineSet(
+        o3d.utility.Vector3dVector(points),
+        o3d.utility.Vector2iVector(lines)
+    )
+    frustum.paint_uniform_color([1,0,0])
+    return frustum
+
+def make_grid(center, normal, size=1.0, step=0.1):
+    normal = normal / np.linalg.norm(normal)
+
+    # find two orthogonal axes on plane
+    tmp = np.array([1,0,0]) if abs(normal[0]) < 0.9 else np.array([0,1,0])
+    axis1 = np.cross(normal, tmp)
+    axis1 /= np.linalg.norm(axis1)
+    axis2 = np.cross(normal, axis1)
+
+    lines = []
+    points = []
+    n = int(size / step)
+
+    for i in range(-n, n+1):
+        p1 = center + axis1 * i * step + axis2 * size
+        p2 = center + axis1 * i * step - axis2 * size
+        p3 = center + axis2 * i * step + axis1 * size
+        p4 = center + axis2 * i * step - axis1 * size
+
+        points.append(p1); points.append(p2)
+        lines.append([len(points)-2, len(points)-1])
+
+        points.append(p3); points.append(p4)
+        lines.append([len(points)-2, len(points)-1])
+
+    grid = o3d.geometry.LineSet(
+        o3d.utility.Vector3dVector(points),
+        o3d.utility.Vector2iVector(lines)
+    )
+    grid.paint_uniform_color([0.3,0.3,0.3])
+    return grid

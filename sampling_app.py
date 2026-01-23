@@ -358,7 +358,7 @@ class MeshSamplingApp:
         if self.headless:
             return
         self.next_stage_buttons[Stage.IMPORT_MESH].enabled = (self.mesh != None)
-        self.btn_express.enabled = False
+        self.btn_express.enabled = (self.mesh != None)
         if self.mesh is not None:
             self.safe_scene_update(lambda: self._clear_scene())
             self.safe_scene_update(lambda: self.scene.scene.add_geometry("mesh", self.mesh, self.default_material))
@@ -753,12 +753,12 @@ class MeshSamplingApp:
         if self.headless:
             return       
         self.next_stage_buttons[Stage.DOWNSAMPLE].enabled = (self.down_pcd != None)
-        if self.down_pcd != None:
-            self.safe_scene_update(lambda: self._clear_scene())
-            self.safe_scene_update(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
-        elif self.cropped_pcd != None:
+        if self.cropped_pcd != None:
             self.safe_scene_update(lambda: self._clear_scene())
             self.safe_scene_update(lambda: self.scene.scene.add_geometry("cropped_pcd", self.cropped_pcd, self.default_point_material))
+        elif self.down_pcd != None:
+            self.safe_scene_update(lambda: self._clear_scene())
+            self.safe_scene_update(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
 
     def reset_downsample_stage(self):
         self.next_stage_buttons[Stage.DOWNSAMPLE].enabled = (self.down_pcd != None)
@@ -777,7 +777,7 @@ class MeshSamplingApp:
         if self.cropped_pcd is None:
             print("cropped pcd is none")
             return
-
+        
         bbox = self.cropped_pcd.get_minimal_oriented_bounding_box()
         print(bbox.volume())
         self.voxel_size = np.round(np.clip((bbox.volume() / 3), 0.001, 0.005), 4)
@@ -863,7 +863,7 @@ class MeshSamplingApp:
         if not path:
             return
         try:
-            write_mechmind_ply(self.down_pcd, str(path))
+            pointcloud_to_ply(self.down_pcd, str(path))
             print(f"[INFO] Point cloud saved to {path}")
         except Exception as e:
             print(f"[ERROR] Failed to save PLY: {e}")
@@ -907,7 +907,7 @@ class MeshSamplingApp:
             self._load_mesh_worker()
             self._express_sampling()
 
-            write_mechmind_ply(self.down_pcd, str(dst_dir / (stl_path.stem + ".ply")))
+            pointcloud_to_ply(self.down_pcd, str(dst_dir / (stl_path.stem + ".ply")))
 # ===============================
 # Entry point
 # ===============================
