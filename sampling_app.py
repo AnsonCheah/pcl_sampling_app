@@ -40,7 +40,7 @@ class MeshSamplingApp:
         self.stage = Stage.IMPORT_MESH
 
         # === Data variables ===
-        self.mesh = None
+        self.target_mesh = None
         self.raw_pcd = None
         self.cropped_pcd = None
         self.down_pcd = None
@@ -63,7 +63,7 @@ class MeshSamplingApp:
         self.curvature_k_neighbors = 5
         self.bbox_corners = None
 
-        if not headless:
+        if not self.headless:
             # === Scene widget ===
             self.window_width = 1440
             self.window_height = 900
@@ -101,6 +101,7 @@ class MeshSamplingApp:
             self.window.add_child(self.panel)
 
             self.next_stage_buttons = {}
+            self.worker_buttons = {}
             self.stage_panels = {}
             self.stage_panels[Stage.IMPORT_MESH] = self._load_mesh_panel()
             self.stage_panels[Stage.RAYCAST] = self._raycast_panel()
@@ -174,14 +175,14 @@ class MeshSamplingApp:
         Dynamically frame object based on its bounding box size.
         """
         print("reframing")
-        if self.mesh is None:
+        if self.target_mesh is None:
             center = np.array([0.0, 0.0, 0.0])
             distance = 0.5
             eye = np.array([1.0,1.0,1.0])
             up = np.array([1, 1, 1])
 
         else:
-            bbox = self.mesh.get_axis_aligned_bounding_box()
+            bbox = self.target_mesh.get_axis_aligned_bounding_box()
             center = bbox.get_center()
             extent = bbox.get_extent()
             radius = 0.5 * np.linalg.norm(extent)
@@ -194,14 +195,13 @@ class MeshSamplingApp:
 
         cam = self.scene.scene.camera
         cam.look_at(center, eye, up)
-        cam.set_projection(
-            60.0,                    # FOV
-            self.scene.frame.width / self.scene.frame.height,
-            0.01,
-            1000.0,
-            o3d.visualization.rendering.Camera.FovType.Vertical
-        )
-
+        # cam.set_projection(
+        #     60.0,                    # FOV
+        #     self.scene.frame.width / self.scene.frame.height,
+        #     0.01,
+        #     1000.0,
+        #     o3d.visualization.rendering.Camera.FovType.Vertical
+        # )
 
         print("reframed")
 
@@ -314,7 +314,7 @@ class MeshSamplingApp:
             if key == gui.KeyName.S:
                 self.save_pcd()
             elif key == gui.KeyName.R:
-                self.mesh = None
+                self.target_mesh = None
                 self.raw_pcd = None
                 self.down_pcd = None
                 self.stage = Stage.IMPORT_MESH
@@ -330,9 +330,9 @@ class MeshSamplingApp:
     def _load_mesh_panel(self):
         print("loading mesh panel")
         v = gui.Vert(4)
-
         btn_load = gui.Button("Load STL")
         btn_load.set_on_clicked(self.import_mesh)
+
         btn_reset = gui.Button("Clear Mesh")
         btn_reset.set_on_clicked(self.reset_mesh_stage)
         self.btn_express = gui.Button("Express Sampling")
@@ -342,13 +342,16 @@ class MeshSamplingApp:
 
         btn_next = gui.Button("Next: Raycast")
         btn_next.set_on_clicked(lambda: self.set_stage(Stage(self.stage.value + 1)))
+        self.worker_buttons[Stage.IMPORT_MESH] = btn_load
         self.next_stage_buttons[Stage.IMPORT_MESH] = btn_next
         v.add_child(gui.Label("Import Mesh"))
-        v.add_child(btn_load)
+        v.add_child(gui.Label(""))
+        v.add_child(self.worker_buttons[Stage.IMPORT_MESH])
         v.add_child(btn_reset)
         v.add_child(gui.Label(""))
         v.add_child(self.btn_express)
         v.add_child(btn_batch)
+        v.add_child(gui.Label(""))
         v.add_child(gui.Label(""))
         v.add_child(self.next_stage_buttons[Stage.IMPORT_MESH])
         print("loaded mesh panel")
@@ -357,32 +360,36 @@ class MeshSamplingApp:
     def load_mesh_stage_init(self):
         if self.headless:
             return
-        self.next_stage_buttons[Stage.IMPORT_MESH].enabled = (self.mesh != None)
-        self.btn_express.enabled = (self.mesh != None)
-        if self.mesh is not None:
+        self.worker_buttons[Stage.IMPORT_MESH].enabled = True
+        self.next_stage_buttons[Stage.IMPORT_MESH].enabled = (self.target_mesh != None)
+        self.btn_express.enabled = (self.target_mesh != None)
+        if self.target_mesh is not None:
             self.safe_scene_update(lambda: self._clear_scene())
-            self.safe_scene_update(lambda: self.scene.scene.add_geometry("mesh", self.mesh, self.default_material))
+            self.safe_scene_update(lambda: self.scene.scene.add_geometry("mesh", self.target_mesh, self.default_material))
 
     def reset_mesh_stage(self):
-        self.mesh = None
+        self.target_mesh = None
         self.raw_pcd = None
         self.cropped_pcd = None
         self.down_pcd = None
+        self.worker_buttons[Stage.IMPORT_MESH].enabled = True
         self.next_stage_buttons[Stage.IMPORT_MESH].enabled = False
         self.btn_express.enabled = False
         self.safe_scene_update(lambda: self._clear_scene())
 
     def import_mesh(self):
+        self.worker_buttons[Stage.IMPORT_MESH].enabled = False
         self.file_path = self._open_stl_dialog()
         if not self.file_path:
+            self.worker_buttons[Stage.IMPORT_MESH].enabled = True
             return
         self._load_mesh_worker()
+        self.next_stage_buttons[Stage.IMPORT_MESH].enabled = True
         if self.headless:
             return
-        self.next_stage_buttons[Stage.IMPORT_MESH].enabled = True
         self.btn_express.enabled = True
         self.safe_scene_update(lambda: self._clear_scene())
-        self.safe_scene_update(lambda: self.scene.scene.add_geometry("mesh", self.mesh, self.default_material))
+        self.safe_scene_update(lambda: self.scene.scene.add_geometry("mesh", self.target_mesh, self.default_material))
         self._reframe()
 
     def _load_mesh_worker(self):
@@ -406,7 +413,7 @@ class MeshSamplingApp:
 
         mesh.compute_vertex_normals()
         mesh.translate(-mesh.get_center())
-        self.mesh = mesh
+        self.target_mesh = mesh
 
         bbox = mesh.get_axis_aligned_bounding_box()
         self.bbox_corners = np.asarray(bbox.get_box_points())
@@ -436,36 +443,43 @@ class MeshSamplingApp:
         btn_reset.set_on_clicked(self.reset_raycast_stage)
         btn_next = gui.Button("Next: Crop")
         btn_next.set_on_clicked(lambda: self.set_stage(Stage(self.stage.value + 1)))
-        self.next_stage_buttons[Stage.RAYCAST] = btn_next
         btn_back = gui.Button("Back: Import Mesh")
         btn_back.set_on_clicked(lambda: self.set_stage(Stage(self.stage.value - 1)))
 
+        self.worker_buttons[Stage.RAYCAST] = btn_raycast
+        self.next_stage_buttons[Stage.RAYCAST] = btn_next
         v.add_child(gui.Label("Raycasting"))
+        v.add_child(gui.Label(""))
         v.add_child(gui.Label("Camera Distance"))
         v.add_child(self.camera_distance_slider)
         v.add_child(gui.Label("Number of Views"))
         v.add_child(self.num_views_slider)
-        v.add_child(btn_raycast)
+        v.add_child(self.worker_buttons[Stage.RAYCAST])
         v.add_child(btn_reset)
+        v.add_child(gui.Label(""))
         v.add_child(btn_back)
-        v.add_child(btn_next)
+        v.add_child(self.next_stage_buttons[Stage.RAYCAST])
         return v
 
     def raycast_stage_init(self):
         if self.headless:
             return
+        self.worker_buttons[Stage.RAYCAST].enabled = True
         self.next_stage_buttons[Stage.RAYCAST].enabled = (self.raw_pcd != None)
         if self.raw_pcd is not None:
             self.safe_scene_update(lambda: self._clear_scene())
             self.safe_scene_update(lambda: self.scene.scene.add_geometry("raw_pcd", self.raw_pcd, self.default_material))
 
     def reset_raycast_stage(self):
-        self.safe_scene_update(lambda: self._clear_scene())
         self.raw_pcd = None
         self.cropped_pcd = None
         self.down_pcd = None
+        if self.headless: 
+            return
+        self.worker_buttons[Stage.RAYCAST].enabled = True
         self.next_stage_buttons[Stage.RAYCAST].enabled = (self.raw_pcd != None)
-        self.safe_scene_update(lambda: self.scene.scene.add_geometry("mesh", self.mesh, self.default_material))
+        self.safe_scene_update(lambda: self._clear_scene())
+        self.safe_scene_update(lambda: self.scene.scene.add_geometry("mesh", self.target_mesh, self.default_material))
 
     def start_raycasting(self):
         self.set_stage(Stage.RAYCAST)
@@ -473,16 +487,18 @@ class MeshSamplingApp:
         self.raycasting_thread.start()
 
     def _raycasting_worker(self):
-        if self.mesh is None:
+        if self.target_mesh is None:
             print("[WARN] No mesh loaded")
             return
         if not self.headless:
+            self.worker_buttons[Stage.RAYCAST].enabled = False
+            self.next_stage_buttons[Stage.RAYCAST].enabled = False
             self.camera_distance = self.camera_distance_slider.double_value
             self.num_views = self.num_views_slider.int_value
             self.show_progress("Raycasting mesh...")
 
         scene = o3d.t.geometry.RaycastingScene()
-        _ = scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(self.mesh))
+        _ = scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(self.target_mesh))
         view_dirs = fibonacci_sphere(self.num_views)
         all_points = []
         all_cam_pos = []
@@ -514,7 +530,6 @@ class MeshSamplingApp:
             # Generate ray grid in METERS
             xs = np.arange(x_min, x_max, self.ray_spacing)
             ys = np.arange(y_min, y_max, self.ray_spacing)
-            # print(f"Ray Grid: {xs.size} * {ys.size}")
 
             if len(xs) == 0 or len(ys) == 0:
                 continue
@@ -557,9 +572,8 @@ class MeshSamplingApp:
         pcd.remove_non_finite_points()
         pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius = 0.005, max_nn = 60))
         pcd=normalize_normals(pcd)
-
         orient_normals_using_cameras(pcd, cam_positions)
-        pcd = center_pointcloud_to_geometric_center(pcd)
+        
         pcd=normalize_normals(pcd)
         validate_normals(pcd)
         print(f"[INFO] Total points sampled: {len(pcd.points)}")
@@ -573,6 +587,7 @@ class MeshSamplingApp:
             self.safe_scene_update(lambda: self._clear_scene())
             self.safe_scene_update(lambda: self.scene.scene.add_geometry("raw_pcd", self.raw_pcd, self.default_point_material))
             self.next_stage_buttons[Stage.RAYCAST].enabled = True
+            self.worker_buttons[Stage.RAYCAST].enabled = True
             self.hide_progress()
         print("raycast finished")
 
@@ -593,16 +608,20 @@ class MeshSamplingApp:
 
         btn_next = gui.Button("Next: Downsample")
         btn_next.set_on_clicked(lambda: self.set_stage(Stage(self.stage.value + 1)))
-        self.next_stage_buttons[Stage.CROP] = btn_next
         btn_back = gui.Button("Back: Raycast")
         btn_back.set_on_clicked(lambda: self.set_stage(Stage(self.stage.value - 1)))
 
+        self.worker_buttons[Stage.CROP] = delete_btn
+        self.next_stage_buttons[Stage.CROP] = btn_next
+
         v.add_child(gui.Label("Crop Point Cloud"))
+        v.add_child(gui.Label(""))
         v.add_child(gui.Label("Controls"))
         v.add_child(self.btn_box_select)
-        v.add_child(delete_btn)
+        v.add_child(self.worker_buttons[Stage.CROP])
         v.add_child(btn_reset)
-
+        v.add_child(gui.Label(""))
+        v.add_child(gui.Label(""))
         v.add_child(btn_back)
         v.add_child(btn_next)
         print("loaded crop panel")
@@ -643,17 +662,22 @@ class MeshSamplingApp:
         return o3d.visualization.gui.Widget.EventCallbackResult.IGNORED
 
     def crop_stage_init(self):
+        self.selected_indices = []
+        self.cropped_pcd = copy.deepcopy(self.raw_pcd) if self.cropped_pcd == None else self.cropped_pcd
         if self.headless:
             return
-        self.cropped_pcd = copy.deepcopy(self.raw_pcd) if self.cropped_pcd == None else self.cropped_pcd
-        print("[INFO] Entering crop stage. Use box selection to select points to delete.")
+        self.worker_buttons[Stage.CROP].enabled = (len(self.selected_indices) != 0)
         self.safe_scene_update(lambda: self._clear_scene())
         self.safe_scene_update(lambda: self.scene.scene.add_geometry("crop_pcd", self.cropped_pcd, self.default_point_material))
 
     def reset_crop_stage(self):
-        self.safe_scene_update(lambda: self._clear_scene())
-        self.cropped_pcd = copy.deepcopy(self.raw_pcd)
         self.down_pcd = None
+        self.selected_indices = []
+        self.cropped_pcd = copy.deepcopy(self.raw_pcd)
+        if self.headless:
+            return
+        self.worker_buttons[Stage.CROP].enabled = (len(self.selected_indices) != 0)
+        self.safe_scene_update(lambda: self._clear_scene())
         self.safe_scene_update(lambda: self.scene.scene.add_geometry("cropped", self.cropped_pcd, self.default_point_material))
 
     def _select_points_screen_space(self):
@@ -673,6 +697,7 @@ class MeshSamplingApp:
         self.safe_scene_update(lambda: self._clear_scene())
         self.safe_scene_update(lambda: self.scene.scene.add_geometry("selected", selected_pcd, self.overlay_material))
         self.safe_scene_update(lambda: self.scene.scene.add_geometry("non selected", non_selected_pcd, self.default_point_material))
+        self.worker_buttons[Stage.CROP].enabled = (len(self.selected_indices) != 0)
         self.next_stage_buttons[Stage.CROP].enabled = True
 
     def delete_selected_points(self):
@@ -683,6 +708,7 @@ class MeshSamplingApp:
         self.selected_indices = []
         self.safe_scene_update(lambda: self._clear_scene())
         self.safe_scene_update(lambda: self.scene.scene.add_geometry("cropped", self.cropped_pcd, self.default_point_material))
+        self.worker_buttons[Stage.CROP].enabled = (len(self.selected_indices) != 0)
 
     def _enable_box_selection(self):
         if self.btn_box_select.is_on:
@@ -730,21 +756,28 @@ class MeshSamplingApp:
         self.adaptive_checkbox.checked = self.use_adaptive
         btn_downsample = gui.Button("Downsample")
         btn_downsample.set_on_clicked(self.start_downsampling)
+        btn_recenter = gui.Button("Recenter Point Cloud")
+        btn_recenter.set_on_clicked(self.recenter_down_pcd)
 
         btn_reset = gui.Button("Restart Downsample")
         btn_reset.set_on_clicked(self.reset_downsample_stage)
         btn_next = gui.Button("Next: Save")
         btn_next.set_on_clicked(lambda: self.set_stage(Stage(self.stage.value + 1)))
+        self.worker_buttons[Stage.DOWNSAMPLE] = btn_downsample
         self.next_stage_buttons[Stage.DOWNSAMPLE] = btn_next
         btn_back = gui.Button("Back: Crop")
         btn_back.set_on_clicked(lambda: self.set_stage(Stage(self.stage.value - 1)))
 
         v.add_child(gui.Label("Downsampling"))
+        v.add_child(gui.Label(""))
         v.add_child(self.adaptive_checkbox)
-        v.add_child(btn_downsample)
+        v.add_child(self.worker_buttons[Stage.DOWNSAMPLE])
+        v.add_child(btn_recenter)
         v.add_child(btn_reset)
+        v.add_child(gui.Label(""))
+        v.add_child(gui.Label(""))
         v.add_child(btn_back)
-        v.add_child(btn_next)
+        v.add_child(self.next_stage_buttons[Stage.DOWNSAMPLE])
         print("loaded downsample panel")
 
         return v
@@ -752,19 +785,24 @@ class MeshSamplingApp:
     def downsample_stage_init(self): 
         if self.headless:
             return       
+        self.worker_buttons[Stage.DOWNSAMPLE].enabled = True
         self.next_stage_buttons[Stage.DOWNSAMPLE].enabled = (self.down_pcd != None)
-        if self.cropped_pcd != None:
-            self.safe_scene_update(lambda: self._clear_scene())
-            self.safe_scene_update(lambda: self.scene.scene.add_geometry("cropped_pcd", self.cropped_pcd, self.default_point_material))
-        elif self.down_pcd != None:
+        if self.down_pcd != None:
             self.safe_scene_update(lambda: self._clear_scene())
             self.safe_scene_update(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
+        elif self.cropped_pcd != None:
+            self.safe_scene_update(lambda: self._clear_scene())
+            self.safe_scene_update(lambda: self.scene.scene.add_geometry("cropped_pcd", self.cropped_pcd, self.default_point_material))
 
     def reset_downsample_stage(self):
-        self.next_stage_buttons[Stage.DOWNSAMPLE].enabled = (self.down_pcd != None)
-        self.safe_scene_update(lambda: self._clear_scene())
         self.down_pcd = None
-        self.safe_scene_update(lambda: self.scene.scene.add_geometry("cropped_pcd", self.cropped_pcd, self.default_point_material))
+        self.downsample_stage_init()
+        # if self.headless:
+        #     return
+        # self.worker_buttons[Stage.DOWNSAMPLE].enabled = True
+        # self.next_stage_buttons[Stage.DOWNSAMPLE].enabled = (self.down_pcd != None)
+        # self.safe_scene_update(lambda: self._clear_scene())
+        # self.safe_scene_update(lambda: self.scene.scene.add_geometry("cropped_pcd", self.cropped_pcd, self.default_point_material))
 
     def start_downsampling(self):
         self.set_stage(Stage.DOWNSAMPLE)
@@ -774,19 +812,19 @@ class MeshSamplingApp:
     def _downsample_worker(self):
         if not self.headless:
             self.use_adaptive = self.adaptive_checkbox.checked
+            self.worker_buttons[Stage.DOWNSAMPLE].enabled = False
         if self.cropped_pcd is None:
             print("cropped pcd is none")
             return
         
         bbox = self.cropped_pcd.get_minimal_oriented_bounding_box()
-        print(bbox.volume())
         self.voxel_size = np.round(np.clip((bbox.volume() / 3), 0.001, 0.005), 4)
-        print(f"calculated voxel size needed: {self.voxel_size * 1000}mm")
         self.adaptive_voxel_downsample() if self.use_adaptive else self.uniform_voxel_downsample()
-        print(f"[INFO] Downsampled from to {len(self.cropped_pcd.points)} {len(self.down_pcd.points)} points")
+        print(f"[INFO] Downsampled {self.voxel_size * 1000}mm from {len(self.cropped_pcd.points)} to {len(self.down_pcd.points)} points")
 
         if self.headless:
             return
+        self.worker_buttons[Stage.DOWNSAMPLE].enabled = True
         self.next_stage_buttons[Stage.DOWNSAMPLE].enabled = (self.down_pcd != None)
         self.safe_scene_update(lambda: self._clear_scene())
         self.safe_scene_update(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
@@ -826,6 +864,15 @@ class MeshSamplingApp:
                 self.update_progress(progress)
         return curv
 
+    def recenter_down_pcd(self):
+        self.down_pcd, T = center_pointcloud_to_geometric_center(self.down_pcd)
+        self.target_mesh.transform(T)
+        self.raw_pcd.transform(T)
+        self.cropped_pcd.transform(T)
+        self.safe_scene_update(lambda: self._clear_scene())
+        self.safe_scene_update(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
+        print("recentered pointcloud")
+
     # ===============================
     # Save PLY Stage
     # ===============================
@@ -841,9 +888,15 @@ class MeshSamplingApp:
 
         btn_restart = gui.Button("Restart")
         btn_restart.set_on_clicked(lambda: self._restart())
-        
+        self.worker_buttons[Stage.SAVE] = btn_save
         v.add_child(gui.Label("Export PCL"))
+        v.add_child(gui.Label(""))
         v.add_child(btn_save)
+        v.add_child(gui.Label(""))
+        v.add_child(gui.Label(""))
+        v.add_child(gui.Label(""))
+        v.add_child(gui.Label(""))
+        v.add_child(gui.Label(""))
         v.add_child(btn_back)
         v.add_child(btn_restart)
 
@@ -853,13 +906,19 @@ class MeshSamplingApp:
     def save_stage_init(self):
         if self.headless:
             return
-        pass
+        self.worker_buttons[Stage.SAVE].enabled = True
+        if self.down_pcd != None:
+            self.safe_scene_update(lambda: self._clear_scene())
+            self.safe_scene_update(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
 
     def save_pcd(self):
         if self.down_pcd is None:
+            self.worker_buttons[Stage.SAVE].enabled = True
             print("[WARN] No pointcloud to save")
             return
+        self.worker_buttons[Stage.SAVE].enabled = False
         path = self._save_ply_dialog()
+        self.worker_buttons[Stage.SAVE].enabled = True
         if not path:
             return
         try:
@@ -871,7 +930,7 @@ class MeshSamplingApp:
 
     def _restart(self):
         print("restart wizard")
-        self.mesh = None
+        self.target_mesh = None
         self.raw_pcd = None
         self.cropped_pcd = None
         self.down_pcd = None
@@ -879,12 +938,8 @@ class MeshSamplingApp:
         self.safe_scene_update(lambda: self._clear_scene())
 
     def _express_sampling(self):
-        # self.start_raycasting()
-        # self.raycasting_thread.join(timeout=100.0)
         self._raycasting_worker()
         self.down_pcd=app.raw_pcd
-        # self.start_downsampling()
-        # self.downsampling_thread.join(timeout=100.0)
         self._downsample_worker()
         self.set_stage(Stage.SAVE)
 
@@ -903,11 +958,10 @@ class MeshSamplingApp:
         for stl_path in stl_files:
             print(f"[INFO] Processing {stl_path.name}")
             self.file_path = stl_path
-            # self.mesh = o3d.io.read_triangle_mesh(str(stl_path))
             self._load_mesh_worker()
             self._express_sampling()
-
             pointcloud_to_ply(self.down_pcd, str(dst_dir / (stl_path.stem + ".ply")))
+
 # ===============================
 # Entry point
 # ===============================

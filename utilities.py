@@ -16,12 +16,14 @@ def center_pointcloud_to_geometric_center(pcd):
         raise ValueError("Point cloud is empty")
     pts = np.asarray(pcd.points, dtype=np.float64)
     # True geometric center of sampled surface
-    centroid = pts.mean(axis=0)
-
+    centroid = pts.mean(axis=0) # translation only
     T = np.eye(4)
-    T[:3, 3] = -centroid
+    # T[:3, 3] = -centroid
+    T[:3, 3] = centroid
+    T[:3, :3] = pcd.get_minimal_oriented_bounding_box().R
+    T = np.linalg.inv(T)
     pcd_centered = pcd.transform(T)
-    return pcd_centered #, T, centroid
+    return pcd_centered, T
 
 def normalize_normals(pcd):
     """
