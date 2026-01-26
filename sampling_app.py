@@ -72,6 +72,7 @@ class MeshSamplingApp:
         self.fov_deg = 60
         self.res_width = 1920
         self.res_height = 1080
+        self.min_occlusion_ratio = 0.1
         self.max_occlusion_ratio = 0.3
 
         if not self.headless:
@@ -943,7 +944,9 @@ class MeshSamplingApp:
         # if not path:
         #     return
         try:
-            pcd_path = Path.cwd() / "reference_pcd" / (self.mesh_basename + ".ply")
+            folder_path = Path.cwd() / "reference_pcd"
+            folder_path.mkdir(parents=True, exist_ok=True)
+            pcd_path = folder_path / (self.mesh_basename + ".ply")
             pointcloud_to_ply(self.down_pcd, str(pcd_path))
             print(f"[INFO] Point cloud saved to {pcd_path}")
         except Exception as e:
@@ -960,7 +963,7 @@ class MeshSamplingApp:
         v = gui.Vert(4)
 
         self.num_targets_slider = gui.Slider(gui.Slider.INT)
-        self.num_targets_slider.set_limits(5, 100)
+        self.num_targets_slider.set_limits(5, 500)
         self.num_targets_slider.int_value = 20
         self.occlusion_checkbox = gui.Checkbox("Occlusion")
         self.occlusion_checkbox.checked = self.synthetic_occlusion
@@ -1012,10 +1015,8 @@ class MeshSamplingApp:
         for i in range(self.num_targerts):
             print("synthetic generation")
             cam_pos, look_at, up = random_camera(self.view_sphere[i], self.camera_distance)
-            if self.synthetic_occlusion:
-                self._scene_cast(cam_pos, look_at)
-            else:
-                self._scene_cast(cam_pos, look_at, num_occluders=0)
+
+            self._scene_cast(cam_pos, look_at, num_occluders=(0 if not self.synthetic_occlusion else 1))
             self.visible_target_pcd = add_surface_noise(self.visible_target_pcd)
             self.visible_target_pcd = add_outliers(self.visible_target_pcd)
             self.visible_target_pcd.voxel_down_sample(0.001)
@@ -1023,10 +1024,10 @@ class MeshSamplingApp:
             orient_normals_using_cameras(self.visible_target_pcd, cam_pos)
             self.visible_target_pcd = normalize_normals(self.visible_target_pcd)
             validate_normals(self.visible_target_pcd)
-            if self.synthetic_occlusion:
-                save_path = Path.cwd() / "synthetic_target" / "occluded" /f"sample_{i}.ply"
-            else:
-                save_path = Path.cwd() / "synthetic_target" / "normal" /f"sample_{i}.ply"
+            folder_path = Path.cwd() / "synthetic_target" / ("occluded" if self.synthetic_occlusion else "normal")
+            folder_path.mkdir(parents=True, exist_ok=True)
+            save_path = folder_path / f"sample_{i}.ply"
+
             pointcloud_to_ply(self.visible_target_pcd, save_path)
             if not self.headless:
                 self.update_progress((i + 1) / self.num_targerts)
@@ -1099,8 +1100,8 @@ class MeshSamplingApp:
                 self.occluders_pcd      = mask_point_cloud(scene_pcd, ~target_hit_mask)
                 visible_pixels = len(self.visible_target_pcd.points)
                 occlusion_ratio = 1 - (visible_pixels / target_pixels)
-                if occlusion_ratio > self.max_occlusion_ratio:
-                    print(f"occlusion ratio exceed threshold: {occlusion_ratio}")
+                if not (self.min_occlusion_ratio < occlusion_ratio < self.max_occlusion_ratio):
+                    print(f"occlusion ratio out of range: {occlusion_ratio}")
                     continue
 
                 # --- Accept ---
@@ -1120,7 +1121,7 @@ class MeshSamplingApp:
             self.visible_target_pcd = normalize_normals(self.visible_target_pcd)
             validate_normals(self.visible_target_pcd)
             print("estimated normals")
-        print(f"Target pcd occlusion ratio: {occlusion_ratio}")    
+        print(f"Accepted pcd occlusion ratio: {occlusion_ratio}")    
 
     def _restart(self):
         print("restart wizard")
