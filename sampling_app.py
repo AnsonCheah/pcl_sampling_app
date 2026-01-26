@@ -187,6 +187,8 @@ class MeshSamplingApp:
         """
         Dynamically frame object based on its bounding box size.
         """
+        if self.headless:
+            return
         print("reframing")
         if self.target_mesh is None:
             center = np.array([0.0, 0.0, 0.0])
@@ -243,6 +245,7 @@ class MeshSamplingApp:
 
     def enable_button(self, button, enabled:bool):
         button.enabled = enabled
+        
     # ===============================
     # File dialogs
     # ===============================
@@ -295,7 +298,7 @@ class MeshSamplingApp:
             return True
 
         if key == gui.KeyName.N:
-            if self.stage.value >=4:
+            if self.stage.value >=5:
                 return False
             self.set_stage(Stage(self.stage.value + 1))
             return True
@@ -348,6 +351,7 @@ class MeshSamplingApp:
         v = gui.Vert(4)
         btn_load = gui.Button("Load STL")
         btn_load.set_on_clicked(self.import_mesh)
+        # btn_load.set_on_clicked(self.start_import_worker)
 
         btn_reset = gui.Button("Clear Mesh")
         btn_reset.set_on_clicked(self.reset_mesh_stage)
@@ -379,8 +383,8 @@ class MeshSamplingApp:
         self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.IMPORT_MESH], True))
         self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.IMPORT_MESH], (self.target_mesh != None)))
         self.main_thread(lambda: self.enable_button(self.btn_express, (self.target_mesh != None)))
+        self.main_thread(lambda: self._clear_scene())
         if self.target_mesh is not None:
-            self.main_thread(lambda: self._clear_scene())
             self.main_thread(lambda: self.scene.scene.add_geometry("mesh", self.target_mesh, self.default_material))
 
     def reset_mesh_stage(self):
@@ -388,26 +392,18 @@ class MeshSamplingApp:
         self.raw_pcd = None
         self.cropped_pcd = None
         self.down_pcd = None
-        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.IMPORT_MESH], True))
-        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.IMPORT_MESH], False))
-        self.main_thread(lambda: self.enable_button(self.btn_express, False))
-        self.main_thread(lambda: self._clear_scene())
+        self.load_mesh_stage_init()
 
     def import_mesh(self):
-        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.IMPORT_MESH], False))
+        if not self.headless:
+            self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.IMPORT_MESH], False))
         self.file_path = self._open_stl_dialog()
         if not self.file_path:
-            self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.IMPORT_MESH], True))
+            if not self.headless:
+                self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.IMPORT_MESH], True))
             return
-        
         self._load_mesh_worker()
-
-        if self.headless:
-            return
-        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.IMPORT_MESH], True))
-        self.main_thread(lambda: self.enable_button(self.btn_express, True))
-        self.main_thread(lambda: self._clear_scene())
-        self.main_thread(lambda: self.scene.scene.add_geometry("mesh", self.target_mesh, self.default_material))
+        self.load_mesh_stage_init()
         self._reframe()
 
     def _load_mesh_worker(self):
@@ -487,17 +483,15 @@ class MeshSamplingApp:
         if self.raw_pcd is not None:
             self.main_thread(lambda: self._clear_scene())
             self.main_thread(lambda: self.scene.scene.add_geometry("raw_pcd", self.raw_pcd, self.default_material))
+        elif self.target_mesh is not None:
+            self.main_thread(lambda: self._clear_scene())
+            self.main_thread(lambda: self.scene.scene.add_geometry("mesh", self.target_mesh, self.default_material))
 
     def reset_raycast_stage(self):
         self.raw_pcd = None
         self.cropped_pcd = None
         self.down_pcd = None
-        if self.headless: 
-            return
-        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.RAYCAST], True))
-        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.RAYCAST], (self.raw_pcd != None)))
-        self.main_thread(lambda: self._clear_scene())
-        self.main_thread(lambda: self.scene.scene.add_geometry("mesh", self.target_mesh, self.default_material))
+        self.raycast_stage_init()
 
     def start_raycasting(self):
         self.set_stage(Stage.RAYCAST)
@@ -521,39 +515,26 @@ class MeshSamplingApp:
         all_points = []
         all_cam_pos = []
         for view_index, view_dir in enumerate(view_dirs):
-            # Camera position
             cam_pos = view_dir * (self.camera_distance)
             forward = -cam_pos / np.linalg.norm(cam_pos)
-            # Stable camera basis
             right = np.cross([0, 0, 1], forward)
             if np.linalg.norm(right) < 1e-6:
                 right = np.cross([0, 1, 0], forward)
             right /= np.linalg.norm(right)
             up = np.cross(forward, right)
 
-            # Project bbox corners onto camera plane
+            # Project bbox corners onto camera plane with margin
             rel = self.bbox_corners - cam_pos
             x_proj = rel @ right
             y_proj = rel @ up
-            x_min, x_max = x_proj.min(), x_proj.max()
-            y_min, y_max = y_proj.min(), y_proj.max()
-
-            # Add margin (convert mm → meters)
             margin = self.ray_margin_mm * 1e-3
-            x_min -= margin
-            x_max += margin
-            y_min -= margin
-            y_max += margin
-
-            # Generate ray grid in METERS
-            xs = np.arange(x_min, x_max, self.ray_spacing)
-            ys = np.arange(y_min, y_max, self.ray_spacing)
+            xs = np.arange(x_proj.min() - margin, x_proj.max() + margin, self.ray_spacing)
+            ys = np.arange(y_proj.min() - margin, y_proj.max() + margin, self.ray_spacing)
 
             if len(xs) == 0 or len(ys) == 0:
                 continue
 
             uu, vv = np.meshgrid(xs, ys)
-            # Ray origins and directions
             origins = (cam_pos + uu[..., None] * right + vv[..., None] * up)
 
             dirs = forward[None, None, :].repeat(origins.shape[0], axis=0)
@@ -574,8 +555,7 @@ class MeshSamplingApp:
             all_cam_pos.append(cam_pos_arr)
 
             if not self.headless:
-                progress = (view_index + 1) / self.num_views
-                self.update_progress(progress)
+                self.update_progress((view_index + 1) / self.num_views)
 
         if not all_points:
             logging.warning(f"No points generated from mesh")
@@ -589,25 +569,19 @@ class MeshSamplingApp:
 
         pcd.remove_non_finite_points()
         pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius = 0.005, max_nn = 60))
-        pcd=normalize_normals(pcd)
         orient_normals_using_cameras(pcd, cam_positions)
-        
-        pcd=normalize_normals(pcd)
-        validate_normals(pcd)
         print(f"[INFO] Total points sampled: {len(pcd.points)}")
         initial_voxel = (self.ray_spacing)*0.3
-        pcd = normalize_normals(pcd.voxel_down_sample(initial_voxel)) # downsample to 3x resolution 
+        pcd = pcd.voxel_down_sample(initial_voxel)
+        normalize_normals(pcd)
+        validate_normals(pcd)
         print(f"[INFO] Initial voxelized points: {len(pcd.points)}")
         self.raw_pcd = pcd
-        self.cropped_pcd = copy.deepcopy(self.raw_pcd) # for crop stage
+        self.cropped_pcd = copy.deepcopy(self.raw_pcd)
 
-        if not self.headless:
-            self.main_thread(lambda: self._clear_scene())
-            self.main_thread(lambda: self.scene.scene.add_geometry("raw_pcd", self.raw_pcd, self.default_point_material))
-            self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.RAYCAST], True))
-            self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.RAYCAST], True))
-            self.hide_progress()
         print("raycast finished")
+        self.raycast_stage_init()
+        self.hide_progress()
 
     # ==============================
     # Crop Stage
@@ -681,27 +655,21 @@ class MeshSamplingApp:
 
     def crop_stage_init(self):
         self.selected_indices = []
-        self.cropped_pcd = copy.deepcopy(self.raw_pcd) if self.cropped_pcd == None else self.cropped_pcd
         if self.headless:
             return
+        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.CROP], True))
         self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.CROP], (len(self.selected_indices) != 0)))
         self.main_thread(lambda: self._clear_scene())
         self.main_thread(lambda: self.scene.scene.add_geometry("crop_pcd", self.cropped_pcd, self.default_point_material))
 
     def reset_crop_stage(self):
         self.down_pcd = None
-        self.selected_indices = []
         self.cropped_pcd = copy.deepcopy(self.raw_pcd)
-        if self.headless:
-            return
-        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.CROP], (len(self.selected_indices) != 0)))
-        self.main_thread(lambda: self._clear_scene())
-        self.main_thread(lambda: self.scene.scene.add_geometry("cropped", self.cropped_pcd, self.default_point_material))
+        self.crop_stage_init()
 
     def _select_points_screen_space(self):
         valid_idx, screen_pts = self.project_world_to_screen(np.asarray(self.cropped_pcd.points))
-
-        selected = []        
+        selected = []
         for i, (x, y) in zip(valid_idx, screen_pts):
             selected.append(i) if self._inside_rect(x, y) else None
         print(f"[INFO] Selected {len(selected)} points")
@@ -712,21 +680,18 @@ class MeshSamplingApp:
         selected_pcd = mask_point_cloud(self.cropped_pcd, ~selection_mask)
         non_selected_pcd = mask_point_cloud(self.cropped_pcd, selection_mask)
 
+        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.CROP], True))
+        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.CROP], (len(self.selected_indices) != 0)))
         self.main_thread(lambda: self._clear_scene())
         self.main_thread(lambda: self.scene.scene.add_geometry("selected", selected_pcd, self.overlay_material))
         self.main_thread(lambda: self.scene.scene.add_geometry("non selected", non_selected_pcd, self.default_point_material))
-        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.CROP], (len(self.selected_indices) != 0)))
-        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.CROP], True))
 
     def delete_selected_points(self):
         mask = np.ones(len(self.cropped_pcd.points), dtype=bool)
         mask[self.selected_indices] = False
         self.cropped_pcd = mask_point_cloud(self.cropped_pcd, mask)
         print(f"[INFO] Deleted selected {len(self.selected_indices)} points. Remaining points: {len(self.cropped_pcd.points)}")
-        self.selected_indices = []
-        self.main_thread(lambda: self._clear_scene())
-        self.main_thread(lambda: self.scene.scene.add_geometry("cropped", self.cropped_pcd, self.default_point_material))
-        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.CROP], (len(self.selected_indices) != 0)))
+        self.crop_stage_init()
 
     def _enable_box_selection(self):
         if self.btn_box_select.is_on:
@@ -775,7 +740,7 @@ class MeshSamplingApp:
         btn_downsample = gui.Button("Downsample")
         btn_downsample.set_on_clicked(self.start_downsampling)
         btn_recenter = gui.Button("Recenter Point Cloud")
-        btn_recenter.set_on_clicked(self.recenter_down_pcd)
+        btn_recenter.set_on_clicked(self.recenter_mesh_pcd)
 
         btn_reset = gui.Button("Restart Downsample")
         btn_reset.set_on_clicked(self.reset_downsample_stage)
@@ -816,12 +781,6 @@ class MeshSamplingApp:
     def reset_downsample_stage(self):
         self.down_pcd = None
         self.downsample_stage_init()
-        # if self.headless:
-        #     return
-        # self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.CROP], True))
-        # self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.CROP], (self.down_pcd != None)))
-        # self.main_thread(lambda: self._clear_scene())
-        # self.main_thread(lambda: self.scene.scene.add_geometry("cropped_pcd", self.cropped_pcd, self.default_point_material))
 
     def start_downsampling(self):
         self.set_stage(Stage.DOWNSAMPLE)
@@ -832,6 +791,7 @@ class MeshSamplingApp:
         if not self.headless:
             self.use_adaptive = self.adaptive_checkbox.checked
             self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.DOWNSAMPLE], False))
+            self.show_progress("Downsampling point cloud...")
         if self.cropped_pcd is None:
             print("cropped pcd is none")
             return
@@ -840,20 +800,15 @@ class MeshSamplingApp:
         self.voxel_size = np.round(np.clip((bbox.volume() / 3), 0.001, 0.005), 4)
         self.adaptive_voxel_downsample() if self.use_adaptive else self.uniform_voxel_downsample()
         print(f"[INFO] Downsampled {self.voxel_size * 1000}mm from {len(self.cropped_pcd.points)} to {len(self.down_pcd.points)} points")
+        self.downsample_stage_init()
+        if not self.headless:
+            self.update_progress(1.0)
+            self.hide_progress()
 
-        if self.headless:
-            return
-        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.DOWNSAMPLE], True))
-        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.DOWNSAMPLE], (self.down_pcd != None)))
-        self.main_thread(lambda: self._clear_scene())
-        self.main_thread(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
- 
     def uniform_voxel_downsample(self):
         self.down_pcd = normalize_normals(self.cropped_pcd.voxel_down_sample(self.voxel_size))
 
     def adaptive_voxel_downsample(self):
-        if not self.headless:
-            self.show_progress("Downsampling point cloud...")
         variation = self.compute_curvature(self.cropped_pcd)
         threshold, percentile, _ = find_cdf_knee(variation)
         feature_mask = variation >= threshold
@@ -862,10 +817,8 @@ class MeshSamplingApp:
         pcd_flat = mask_point_cloud(self.cropped_pcd, ~feature_mask)
         pcd_feature = pcd_feature.voxel_down_sample(self.voxel_size)
         pcd_flat = pcd_flat.voxel_down_sample(self.voxel_size * self.coarse_factor)
-        self.down_pcd = normalize_normals(pcd_feature + pcd_flat)
-        if not self.headless:
-            self.update_progress(1.0)
-            self.hide_progress()
+        self.down_pcd = pcd_feature + pcd_flat
+        normalize_normals(self.down_pcd)
 
     def compute_curvature(self, pcd):
         pts = np.asarray(pcd.points)
@@ -879,17 +832,15 @@ class MeshSamplingApp:
             eigvals = np.linalg.eigvalsh(C)
             curv[i] = eigvals[0] / eigvals.sum()   # smallest eigenvalue ratio
             if not self.headless:
-                progress = (i + 1) / len(pts)
-                self.update_progress(progress)
+                self.update_progress((i + 1) / len(pts))
         return curv
 
-    def recenter_down_pcd(self):
+    def recenter_mesh_pcd(self):
         self.down_pcd, T = center_pointcloud_to_geometric_center(self.down_pcd)
         self.target_mesh.transform(T)
         self.raw_pcd.transform(T)
         self.cropped_pcd.transform(T)
-        self.main_thread(lambda: self._clear_scene())
-        self.main_thread(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
+        self.downsample_stage_init()
         print("recentered pointcloud")
 
     # ===============================
@@ -934,11 +885,12 @@ class MeshSamplingApp:
             self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SAVE], True))
 
     def save_pcd(self):
-        if self.down_pcd is None:
-            self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SAVE], True))
-            print("[WARN] No pointcloud to save")
-            return
-        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SAVE], False))
+        if not self.headless:
+            if self.down_pcd is None:
+                self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SAVE], True))
+                print("[WARN] No pointcloud to save")
+                return
+            self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SAVE], False))
         # path = self._save_ply_dialog()
         # path = ""
         # if not path:
@@ -993,7 +945,6 @@ class MeshSamplingApp:
         
     def start_synthetic(self):
         self.set_stage(Stage.SYNTHETIC)
-        print("started synthetic generation")
         self.synthetic_thread = threading.Thread(target=self._synthetic_target_worker)
         self.synthetic_thread.start()
 
@@ -1006,23 +957,102 @@ class MeshSamplingApp:
             self.main_thread(lambda: self.scene.scene.add_geometry("mesh", self.target_mesh, self.default_material))
     
     def _synthetic_target_worker(self):
-        self.show_progress("Generating synthetic targets")
+        if not self.headless:
+            self.show_progress("Generating synthetic targets")
         self.num_targerts =  self.num_targets_slider.int_value
-        self.view_sphere = fibonacci_sphere(self.num_targerts)  # or 500
+        self.view_sphere = fibonacci_sphere(self.num_targerts)
         self.visible_target_pcd = o3d.geometry.PointCloud()
         self.occluders_pcd = o3d.geometry.PointCloud()
         self.synthetic_occlusion = self.occlusion_checkbox.checked
         for i in range(self.num_targerts):
-            print("synthetic generation")
             cam_pos, look_at, up = random_camera(self.view_sphere[i], self.camera_distance)
 
-            self._scene_cast(cam_pos, look_at, num_occluders=(0 if not self.synthetic_occlusion else 1))
+            # self._scene_cast(cam_pos, look_at, num_occluders=(0 if not self.synthetic_occlusion else 1))
+
+            target_center = self.target_mesh.get_center()
+            view_dir = (target_center - cam_pos)
+            view_dir = view_dir / np.linalg.norm(view_dir)
+            scene_meshes = [self.target_mesh]
+
+            # orthonormal basis around view dir
+            right = np.cross(view_dir, [0,0,1])
+            right = np.cross(view_dir, [0,1,0]) if np.linalg.norm(right) < 1e-6 else right
+            right /= np.linalg.norm(right)
+            up = np.cross(right, view_dir)
+
+            # --- Target only ---
+            initial_res = scene_render(scene_meshes, cam_pos, look_at, self.fov_deg, self.res_width, self.res_height)
+            target_hit_ids = initial_res["geom_ids_hit"]
+            target_geom_ids = [int(i) for i in np.unique(target_hit_ids) if i != 4294967295]
+            if len(target_geom_ids) != 1 or target_geom_ids[0] != 0:
+                raise RuntimeError("Foreign id in target generation")
+            target_geom_id = target_geom_ids[0]
+            target_pixels = len(target_hit_ids)
+            print(f"target pixels: {target_pixels}")
+
+            self.occluders = []
+            view_dir = (target_center - cam_pos)
+            view_dir = view_dir / np.linalg.norm(view_dir)
+            target_extent = self.target_mesh.get_axis_aligned_bounding_box().get_extent()
+            target_radius = 0.5 * np.linalg.norm(target_extent)
+            occlusion_ratio = 0
+            num_occluders = (0 if not self.synthetic_occlusion else 1)
+            max_trials = 50
+            for occ_idx in range(num_occluders):
+                success = False
+
+                for trial in range(max_trials):
+                    occ = copy.deepcopy(self.target_mesh)
+                    occ.rotate(R.random().as_matrix(), center=(0,0,0))
+                    right_offset = right * np.random.uniform(-1.5*target_radius, 1.5*target_radius)
+                    up_offset = up * np.random.uniform(-1.5*target_radius, 1.5*target_radius)
+                    depth_offset = np.random.uniform(1, 3) * target_radius
+                    base_pos = target_center - view_dir * depth_offset
+                    occ.translate(base_pos + right_offset + up_offset)
+
+                    if any(meshes_intersect(m, occ) for m in scene_meshes):
+                        print(f"intersection detected, regenerating")
+                        continue
+
+                    test_scene = scene_meshes + [occ]
+                    res = scene_render(test_scene, cam_pos, look_at, self.fov_deg, self.res_width, self.res_height)
+                    self.ray_origins = res["ray_origins"]
+                    self.ray_hits    = res["ray_hits"]
+                    geom_ids_hit     = res["geom_ids_hit"]
+                    scene_pcd        = res["pcd"]
+
+                    scene_pcd.estimate_normals()
+                    target_hit_mask = geom_ids_hit == target_geom_id
+                    self.visible_target_pcd = mask_point_cloud(scene_pcd, target_hit_mask)
+                    self.occluders_pcd      = mask_point_cloud(scene_pcd, ~target_hit_mask)
+                    visible_pixels = len(self.visible_target_pcd.points)
+                    occlusion_ratio = 1 - (visible_pixels / target_pixels)
+                    if not (self.min_occlusion_ratio < occlusion_ratio < self.max_occlusion_ratio):
+                        print(f"occlusion ratio out of range: {occlusion_ratio}")
+                        continue
+
+                    self.occluders.append(occ)
+                    scene_meshes.append(occ)
+                    success = True
+                    break
+
+                if not success:
+                    raise RuntimeError(f"Failed to generate occluder {occ_idx}")
+
+            if not self.synthetic_occlusion: # handles no occlusion data
+                self.visible_target_pcd = initial_res["pcd"]
+                self.visible_target_pcd.estimate_normals()
+            orient_normals_using_cameras(self.visible_target_pcd, cam_pos)
+            normalize_normals(self.visible_target_pcd)
+            validate_normals(self.visible_target_pcd)
+            print(f"Accepted pcd occlusion ratio: {occlusion_ratio}")    
+
             self.visible_target_pcd = add_surface_noise(self.visible_target_pcd)
             self.visible_target_pcd = add_outliers(self.visible_target_pcd)
             self.visible_target_pcd.voxel_down_sample(0.001)
             self.visible_target_pcd.estimate_normals()
             orient_normals_using_cameras(self.visible_target_pcd, cam_pos)
-            self.visible_target_pcd = normalize_normals(self.visible_target_pcd)
+            normalize_normals(self.visible_target_pcd)
             validate_normals(self.visible_target_pcd)
             folder_path = Path.cwd() / "synthetic_target" / ("occluded" if self.synthetic_occlusion else "normal")
             folder_path.mkdir(parents=True, exist_ok=True)
@@ -1031,97 +1061,8 @@ class MeshSamplingApp:
             pointcloud_to_ply(self.visible_target_pcd, save_path)
             if not self.headless:
                 self.update_progress((i + 1) / self.num_targerts)
-        self.hide_progress()
-    
-    def _scene_cast(self, cam_pos, look_at, num_occluders=3, max_trials=50):
-        target_center = self.target_mesh.get_center()
-        view_dir = (target_center - cam_pos)
-        view_dir = view_dir / np.linalg.norm(view_dir)
-        scene_meshes = [self.target_mesh]
-
-        # orthonormal basis around view dir
-        right = np.cross(view_dir, [0,0,1])
-        if np.linalg.norm(right) < 1e-6:
-            right = np.cross(view_dir, [0,1,0])
-        right /= np.linalg.norm(right)
-        up = np.cross(right, view_dir)
-
-        # --- Target only ---
-        initial_res = scene_render(scene_meshes, cam_pos, look_at, self.fov_deg, self.res_width, self.res_height)
-        target_hit_ids = initial_res["geom_ids_hit"]
-        target_geom_ids = [int(i) for i in np.unique(target_hit_ids) if i != 4294967295]
-        if len(target_geom_ids) != 1 or target_geom_ids[0] != 0:
-            raise RuntimeError("Foreign id in target generation")
-        target_geom_id = target_geom_ids[0]
-        target_pixels = len(target_hit_ids)
-        print(f"target pixels: {target_pixels}")
-
-        self.occluders = []
-        view_dir = (target_center - cam_pos)
-        view_dir = view_dir / np.linalg.norm(view_dir)
-        target_extent = self.target_mesh.get_axis_aligned_bounding_box().get_extent()
-        target_radius = 0.5 * np.linalg.norm(target_extent)
-        occlusion_ratio = 0
-        for occ_idx in range(num_occluders):
-            success = False
-
-            for trial in range(max_trials):
-                occ = copy.deepcopy(self.target_mesh)
-                occ.rotate(R.random().as_matrix(), center=(0,0,0))
-
-                depth_offset = np.random.uniform(1, 3) * target_radius
-                base_pos = target_center - view_dir * depth_offset
-                lateral = (
-                    right * np.random.uniform(-1.5*target_radius, 1.5*target_radius) +
-                    up    * np.random.uniform(-1.5*target_radius, 1.5*target_radius)
-                )
-                occ.translate(base_pos + lateral)
-
-                # --- Intersection checks ---
-                if any(meshes_intersect(m, occ) for m in scene_meshes):
-                    print(f"intersection detected, regenerating")
-                    continue
-
-                # --- Test occlusion ---
-                test_scene = scene_meshes + [occ]
-                res = scene_render(test_scene, cam_pos, look_at, self.fov_deg, self.res_width, self.res_height)
-
-                self.ray_origins = res["ray_origins"]
-                self.ray_hits    = res["ray_hits"]
-                geom_ids_hit     = res["geom_ids_hit"]
-                scene_pcd        = res["pcd"]
-
-                scene_pcd.estimate_normals()
-                orient_normals_using_cameras(scene_pcd, cam_pos)
-                scene_pcd = normalize_normals(scene_pcd)
-                validate_normals(scene_pcd)
-                target_hit_mask = geom_ids_hit == target_geom_id
-                self.visible_target_pcd = mask_point_cloud(scene_pcd, target_hit_mask)
-                self.occluders_pcd      = mask_point_cloud(scene_pcd, ~target_hit_mask)
-                visible_pixels = len(self.visible_target_pcd.points)
-                occlusion_ratio = 1 - (visible_pixels / target_pixels)
-                if not (self.min_occlusion_ratio < occlusion_ratio < self.max_occlusion_ratio):
-                    print(f"occlusion ratio out of range: {occlusion_ratio}")
-                    continue
-
-                # --- Accept ---
-                self.occluders.append(occ)
-                scene_meshes.append(occ)
-                success = True
-                break
-
-            if not success:
-                raise RuntimeError(f"Failed to generate occluder {occ_idx}")
-
-        if not self.synthetic_occlusion: # handles no occlusion data
-            print("estimating normals")
-            self.visible_target_pcd = initial_res["pcd"]
-            self.visible_target_pcd.estimate_normals()
-            orient_normals_using_cameras(self.visible_target_pcd, cam_pos)
-            self.visible_target_pcd = normalize_normals(self.visible_target_pcd)
-            validate_normals(self.visible_target_pcd)
-            print("estimated normals")
-        print(f"Accepted pcd occlusion ratio: {occlusion_ratio}")    
+        if not self.headless:
+            self.hide_progress()
 
     def _restart(self):
         print("restart wizard")
@@ -1130,16 +1071,19 @@ class MeshSamplingApp:
         self.cropped_pcd = None
         self.down_pcd = None
         self.set_stage(Stage.IMPORT_MESH)
-        self.main_thread(lambda: self._clear_scene())
+        if not self.headless:
+            self.main_thread(lambda: self._clear_scene())
 
     # ===============================
     # Express Handler
     # ===============================
 
     def _express_sampling(self):
-        self._raycasting_worker()
+        self.start_raycasting()
+        self.raycasting_thread.join()
         self.down_pcd=self.raw_pcd
-        self._downsample_worker()
+        self.start_downsampling()
+        self.downsampling_thread.join()
         self.set_stage(Stage.SAVE)
 
     def _batch_sampling(self):
