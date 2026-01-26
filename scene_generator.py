@@ -3,6 +3,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 import copy
 from utilities import *
+from pathlib import Path
 
 class SyntheticSceneGenerator:
 
@@ -18,6 +19,20 @@ class SyntheticSceneGenerator:
         self.visible_target_pcd = o3d.geometry.PointCloud()
         self.occluders_pcd = o3d.geometry.PointCloud()
 
+    def _prepare_target_mesh(self, mesh_path):
+        mesh = o3d.io.read_triangle_mesh(str(mesh_path))
+        if mesh.is_empty():
+            raise RuntimeError("Empty mesh")
+
+        bbox = mesh.get_axis_aligned_bounding_box()
+        extent_max = bbox.get_extent().max()
+        if extent_max > 5 and extent_max < 5000:
+            mesh.scale(0.001, center=(0,0,0))  # mm → m
+
+        mesh.compute_vertex_normals()
+        mesh.translate(-mesh.get_center())
+        return mesh
+        
     def random_camera(self, base_distance=1.5, jitter=0.05):
         p = self.view_sphere[self.view_idx]
         cam_pos = p * base_distance
@@ -41,32 +56,26 @@ class SyntheticSceneGenerator:
 
         return cam_pos, look_at, up
 
-    def _prepare_target_mesh(self, mesh_path):
-        mesh = o3d.io.read_triangle_mesh(str(mesh_path))
-        if mesh.is_empty():
-            raise RuntimeError("Empty mesh")
-
-        bbox = mesh.get_axis_aligned_bounding_box()
-        extent_max = bbox.get_extent().max()
-        if extent_max > 5 and extent_max < 5000:
-            mesh.scale(0.001, center=(0,0,0))  # mm → m
-
-        mesh.compute_vertex_normals()
-        mesh.translate(-mesh.get_center())
-        return mesh
-        
-    def aabb_intersect(self, aabb1, aabb2):
-        min1 = aabb1.get_min_bound()
-        max1 = aabb1.get_max_bound()
-        min2 = aabb2.get_min_bound()
-        max2 = aabb2.get_max_bound()
-        return np.all(max1 >= min2) and np.all(max2 >= min1)
+    # def aabb_intersect(self, aabb1, aabb2):
+    #     min1 = aabb1.get_min_bound()
+    #     max1 = aabb1.get_max_bound()
+    #     min2 = aabb2.get_min_bound()
+    #     max2 = aabb2.get_max_bound()
+    #     return np.all(max1 >= min2) and np.all(max2 >= min1)
 
     def meshes_intersect(self, mesh1, mesh2):
         aabb1 = mesh1.get_axis_aligned_bounding_box()
         aabb2 = mesh2.get_axis_aligned_bounding_box()
-        if not self.aabb_intersect(aabb1, aabb2):
+
+        min1 = aabb1.get_min_bound()
+        max1 = aabb1.get_max_bound()
+        min2 = aabb2.get_min_bound()
+        max2 = aabb2.get_max_bound()
+        if not np.all(max1 >= min2) and np.all(max2 >= min1):
             return False
+
+        # if not self.aabb_intersect(aabb1, aabb2):
+        #     return False
 
         scene = o3d.t.geometry.RaycastingScene()
         m1 = o3d.t.geometry.TriangleMesh.from_legacy(mesh1)
@@ -119,6 +128,7 @@ class SyntheticSceneGenerator:
             "ray_origins": origins,
             "ray_hits": points
         }
+    
     def _scene_cast(self, cam_pos, look_at, num_occluders=3, max_trials=50):
         
 
@@ -226,13 +236,14 @@ class SyntheticSceneGenerator:
     # Noise
     # ----------------------------
 
-    def add_surface_noise(self, sigma=0.002):
+    def add_surface_noise(self, pcd, sigma=0.002):
         pts = np.asarray(self.visible_target_pcd.points)
         nrm = np.asarray(self.visible_target_pcd.normals)
         noise = np.random.normal(0, sigma, (len(pts), 1))
         self.visible_target_pcd.points = o3d.utility.Vector3dVector(pts + nrm * noise)
+        return pcd
 
-    def add_outliers(self):
+    def add_outliers(self, pcd):
         bbox = self.target_mesh.get_axis_aligned_bounding_box()
         extent = bbox.get_extent()
         diag = np.linalg.norm(extent)/2
@@ -241,6 +252,7 @@ class SyntheticSceneGenerator:
         outlier_count = int(len(self.visible_target_pcd.points)/3)
         out = center + np.random.uniform(-diag, diag, (outlier_count,3))
         self.visible_target_pcd.points = o3d.utility.Vector3dVector(np.vstack([pts, out]))
+        return pcd
 
     # ----------------------------
     # Visualization
@@ -318,7 +330,6 @@ if __name__ == "__main__":
     samples = 20
     sim.view_sphere = fibonacci_sphere(samples)  # or 500
     for i in range(20):
-        path = f"C:/Users/Hmgics/Desktop/sampling_app/pcl_sampling_app/synthetic_target/sample_{i}.ply"
-        # sample = sim.generate_sample(path, visualize=False)
+        save_path = Path.cwd() / "synthetic_target" / f"sample_{i}.ply"
         sim.view_idx = i
-        sample = sim.generate_sample(path)
+        sample = sim.generate_sample(save_path)

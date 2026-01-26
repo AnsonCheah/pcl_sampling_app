@@ -211,7 +211,7 @@ def pointcloud_to_ply(pcd, ply_path):
     if normals.shape[0] != points.shape[0]:
         raise ValueError("Normals missing or size mismatch")
 
-    validate_normals(pcd)
+    # validate_normals(pcd)
 
     curvature = np.zeros((points.shape[0], 1), dtype=np.float32)
     vertex_data = np.hstack([points, normals, curvature])
@@ -344,3 +344,102 @@ def make_grid(center, normal, size=1.0, step=0.1):
     )
     grid.paint_uniform_color([0.3,0.3,0.3])
     return grid
+
+def meshes_intersect(mesh1, mesh2):
+    aabb1 = mesh1.get_axis_aligned_bounding_box()
+    aabb2 = mesh2.get_axis_aligned_bounding_box()
+
+    min1 = aabb1.get_min_bound()
+    max1 = aabb1.get_max_bound()
+    min2 = aabb2.get_min_bound()
+    max2 = aabb2.get_max_bound()
+    if not np.all(max1 >= min2) and np.all(max2 >= min1):
+        return False
+
+    scene = o3d.t.geometry.RaycastingScene()
+    m1 = o3d.t.geometry.TriangleMesh.from_legacy(mesh1)
+    scene.add_triangles(m1)
+    pts = np.asarray(mesh2.sample_points_uniformly(500).points)
+    query = o3d.core.Tensor(pts, dtype=o3d.core.Dtype.Float32)
+    sdf = scene.compute_signed_distance(query).numpy()
+    return np.any(sdf < 0)
+
+def add_surface_noise(pcd:o3d.geometry.PointCloud, sigma=0.002):
+    pts = np.asarray(pcd.points)
+    nrm = np.asarray(pcd.normals)
+    noise = np.random.normal(0, sigma, (len(pts), 1))
+    pcd.points = o3d.utility.Vector3dVector(pts + nrm * noise)
+    return pcd
+
+def add_outliers(pcd:o3d.geometry.PointCloud):
+    bbox = pcd.get_axis_aligned_bounding_box()
+    extent = bbox.get_extent()
+    diag = np.linalg.norm(extent)/2
+    pts = np.asarray(pcd.points)
+    center = pcd.get_center()
+    outlier_count = int(len(pcd.points)/3)
+    out = center + np.random.uniform(-diag, diag, (outlier_count,3))
+    pcd.points = o3d.utility.Vector3dVector(np.vstack([pts, out]))
+    return pcd
+
+def scene_render(meshes, cam_pos, look_at, fov, res_width, res_height):
+    scene = o3d.t.geometry.RaycastingScene()
+    for m in meshes:
+        scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(m))
+
+    rays = scene.create_rays_pinhole(
+        fov_deg=fov,
+        center=look_at,
+        eye=cam_pos,
+        up=[0,0,1],
+        width_px=res_width,
+        height_px=res_height
+    )
+
+    ans = scene.cast_rays(rays)
+
+    hit = ans['t_hit'].isfinite().numpy().reshape(-1)
+    hit_indices = np.where(hit)[0]
+
+    rays_np = rays.numpy().reshape(-1, 6)
+    t_hit = ans['t_hit'].numpy().reshape(-1)
+
+    origins = rays_np[hit_indices, :3]
+    dirs    = rays_np[hit_indices, 3:]
+    points  = origins + dirs * t_hit[hit_indices][:, None]
+
+    geom_ids_all = ans['geometry_ids'].numpy().reshape(-1)
+    geom_ids_hit = geom_ids_all[hit_indices]
+
+    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points))
+    return {
+        "pcd": pcd,
+        "hit_indices": hit_indices,
+        "geom_ids_hit": geom_ids_hit,
+        "geom_ids_all": geom_ids_all.reshape(res_height, res_width),
+        "hit_mask_img": hit.reshape(res_height, res_width),
+        "ray_origins": origins,
+        "ray_hits": points
+    }
+
+def random_camera(viewpoint, distance, jitter=0.05):
+    cam_pos = viewpoint * distance
+    look_at = np.zeros(3)
+    # camera frame
+    forward = (look_at - cam_pos)
+    forward /= np.linalg.norm(forward)
+
+    right = np.cross(forward, [0,0,1])
+    if np.linalg.norm(right) < 1e-6:
+        right = np.cross(forward, [0,1,0])
+    right /= np.linalg.norm(right)
+    up = np.cross(right, forward)
+
+    # jitter in camera local frame
+    cam_pos += (
+        right * np.random.uniform(-jitter, jitter) +
+        up    * np.random.uniform(-jitter, jitter) +
+        forward * np.random.uniform(-jitter, jitter)
+    )
+
+    return cam_pos, look_at, up

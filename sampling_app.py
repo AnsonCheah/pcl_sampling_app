@@ -11,6 +11,7 @@ import time
 import logging
 import copy
 import threading
+from scipy.spatial.transform import Rotation as R
 
 # ===============================
 # Stage definition
@@ -21,6 +22,7 @@ class Stage(Enum):
     CROP = 2
     DOWNSAMPLE = 3
     SAVE = 4
+    SYNTHETIC = 5
 
 class ToolMode(Enum):
     NONE = 0
@@ -44,6 +46,8 @@ class MeshSamplingApp:
         self.raw_pcd = None
         self.cropped_pcd = None
         self.down_pcd = None
+        self.visible_target_pcd = None
+        self.occluders_pcd = None
 
         self.stage_init = {}        
         self.stage_init[Stage.IMPORT_MESH] = self.load_mesh_stage_init
@@ -51,8 +55,10 @@ class MeshSamplingApp:
         self.stage_init[Stage.CROP] = self.crop_stage_init
         self.stage_init[Stage.DOWNSAMPLE] = self.downsample_stage_init
         self.stage_init[Stage.SAVE] = self.save_stage_init
+        self.stage_init[Stage.SYNTHETIC] = self.synthetic_stage_init
 
         # === State parameters ===
+        self.mesh_basename = None
         self.camera_distance = 1.5
         self.num_views = 20
         self.ray_margin_mm = 10.0
@@ -62,6 +68,11 @@ class MeshSamplingApp:
         self.coarse_factor = 2
         self.curvature_k_neighbors = 5
         self.bbox_corners = None
+        self.synthetic_occlusion = True
+        self.fov_deg = 60
+        self.res_width = 1920
+        self.res_height = 1080
+        self.max_occlusion_ratio = 0.3
 
         if not self.headless:
             # === Scene widget ===
@@ -108,6 +119,7 @@ class MeshSamplingApp:
             self.stage_panels[Stage.CROP] = self._crop_panel()
             self.stage_panels[Stage.DOWNSAMPLE] = self._downsample_panel()
             self.stage_panels[Stage.SAVE] = self._save_panel()
+            self.stage_panels[Stage.SYNTHETIC] = self._synthetic_panel()
 
             for p in self.stage_panels.values():
                 p.visible = False
@@ -225,29 +237,32 @@ class MeshSamplingApp:
             self.progress_panel.visible = False
         gui.Application.instance.post_to_main_thread(self.window, _hide)
         
-    def safe_scene_update(self, fn):
+    def main_thread(self, fn):
         gui.Application.instance.post_to_main_thread(self.window, fn)
 
+    def enable_button(self, button, enabled:bool):
+        button.enabled = enabled
     # ===============================
     # File dialogs
     # ===============================
     def _open_stl_dialog(self):
         Tk().withdraw()
-        path = filedialog.askopenfilename(filetypes=[("STL files", "*.stl *.STL")])
+        path = filedialog.askopenfilename(initialdir=Path.cwd(), filetypes=[("STL files", "*.stl *.STL")])
         if not path:
             return None
         path = Path(path)
-        self.stl_basename = path.stem  # filename without extension
+        self.mesh_basename = path.stem  # filename without extension
         return path
 
     def _save_ply_dialog(self):
         Tk().withdraw()
         default_name = "output.ply"
-        if hasattr(self, "stl_basename") and self.stl_basename:
-            default_name = f"{self.stl_basename}.ply"
+        if hasattr(self, "mesh_basename") and self.mesh_basename:
+            default_name = f"{self.mesh_basename}.ply"
 
         path = filedialog.asksaveasfilename(
             defaultextension=".ply",
+            initialdir=Path.cwd(), 
             initialfile=default_name,
             filetypes=[("PLY files", "*.ply")]
         )
@@ -256,12 +271,12 @@ class MeshSamplingApp:
     
     def _open_source_folder_dialog(self):
         Tk().withdraw()
-        path = filedialog.askdirectory(title="Select source folder (STL files)")
+        path = filedialog.askdirectory(initialdir=Path.cwd(), title="Select source folder (STL files)")
         return Path(path) if path else None
 
     def _open_dest_folder_dialog(self):
         Tk().withdraw()
-        path = filedialog.askdirectory(title="Select destination folder (PLY output)")
+        path = filedialog.askdirectory(initialdir=Path.cwd(), title="Select destination folder (PLY output)")
         return Path(path) if path else None
     
     # ===============================
@@ -360,36 +375,38 @@ class MeshSamplingApp:
     def load_mesh_stage_init(self):
         if self.headless:
             return
-        self.worker_buttons[Stage.IMPORT_MESH].enabled = True
-        self.next_stage_buttons[Stage.IMPORT_MESH].enabled = (self.target_mesh != None)
-        self.btn_express.enabled = (self.target_mesh != None)
+        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.IMPORT_MESH], True))
+        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.IMPORT_MESH], (self.target_mesh != None)))
+        self.main_thread(lambda: self.enable_button(self.btn_express, (self.target_mesh != None)))
         if self.target_mesh is not None:
-            self.safe_scene_update(lambda: self._clear_scene())
-            self.safe_scene_update(lambda: self.scene.scene.add_geometry("mesh", self.target_mesh, self.default_material))
+            self.main_thread(lambda: self._clear_scene())
+            self.main_thread(lambda: self.scene.scene.add_geometry("mesh", self.target_mesh, self.default_material))
 
     def reset_mesh_stage(self):
         self.target_mesh = None
         self.raw_pcd = None
         self.cropped_pcd = None
         self.down_pcd = None
-        self.worker_buttons[Stage.IMPORT_MESH].enabled = True
-        self.next_stage_buttons[Stage.IMPORT_MESH].enabled = False
-        self.btn_express.enabled = False
-        self.safe_scene_update(lambda: self._clear_scene())
+        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.IMPORT_MESH], True))
+        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.IMPORT_MESH], False))
+        self.main_thread(lambda: self.enable_button(self.btn_express, False))
+        self.main_thread(lambda: self._clear_scene())
 
     def import_mesh(self):
-        self.worker_buttons[Stage.IMPORT_MESH].enabled = False
+        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.IMPORT_MESH], False))
         self.file_path = self._open_stl_dialog()
         if not self.file_path:
-            self.worker_buttons[Stage.IMPORT_MESH].enabled = True
+            self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.IMPORT_MESH], True))
             return
+        
         self._load_mesh_worker()
-        self.next_stage_buttons[Stage.IMPORT_MESH].enabled = True
+
         if self.headless:
             return
-        self.btn_express.enabled = True
-        self.safe_scene_update(lambda: self._clear_scene())
-        self.safe_scene_update(lambda: self.scene.scene.add_geometry("mesh", self.target_mesh, self.default_material))
+        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.IMPORT_MESH], True))
+        self.main_thread(lambda: self.enable_button(self.btn_express, True))
+        self.main_thread(lambda: self._clear_scene())
+        self.main_thread(lambda: self.scene.scene.add_geometry("mesh", self.target_mesh, self.default_material))
         self._reframe()
 
     def _load_mesh_worker(self):
@@ -464,11 +481,11 @@ class MeshSamplingApp:
     def raycast_stage_init(self):
         if self.headless:
             return
-        self.worker_buttons[Stage.RAYCAST].enabled = True
-        self.next_stage_buttons[Stage.RAYCAST].enabled = (self.raw_pcd != None)
+        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.RAYCAST], True))
+        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.RAYCAST], (self.raw_pcd != None)))
         if self.raw_pcd is not None:
-            self.safe_scene_update(lambda: self._clear_scene())
-            self.safe_scene_update(lambda: self.scene.scene.add_geometry("raw_pcd", self.raw_pcd, self.default_material))
+            self.main_thread(lambda: self._clear_scene())
+            self.main_thread(lambda: self.scene.scene.add_geometry("raw_pcd", self.raw_pcd, self.default_material))
 
     def reset_raycast_stage(self):
         self.raw_pcd = None
@@ -476,10 +493,10 @@ class MeshSamplingApp:
         self.down_pcd = None
         if self.headless: 
             return
-        self.worker_buttons[Stage.RAYCAST].enabled = True
-        self.next_stage_buttons[Stage.RAYCAST].enabled = (self.raw_pcd != None)
-        self.safe_scene_update(lambda: self._clear_scene())
-        self.safe_scene_update(lambda: self.scene.scene.add_geometry("mesh", self.target_mesh, self.default_material))
+        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.RAYCAST], True))
+        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.RAYCAST], (self.raw_pcd != None)))
+        self.main_thread(lambda: self._clear_scene())
+        self.main_thread(lambda: self.scene.scene.add_geometry("mesh", self.target_mesh, self.default_material))
 
     def start_raycasting(self):
         self.set_stage(Stage.RAYCAST)
@@ -491,8 +508,8 @@ class MeshSamplingApp:
             print("[WARN] No mesh loaded")
             return
         if not self.headless:
-            self.worker_buttons[Stage.RAYCAST].enabled = False
-            self.next_stage_buttons[Stage.RAYCAST].enabled = False
+            self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.RAYCAST], False))
+            self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.RAYCAST], False))
             self.camera_distance = self.camera_distance_slider.double_value
             self.num_views = self.num_views_slider.int_value
             self.show_progress("Raycasting mesh...")
@@ -584,10 +601,10 @@ class MeshSamplingApp:
         self.cropped_pcd = copy.deepcopy(self.raw_pcd) # for crop stage
 
         if not self.headless:
-            self.safe_scene_update(lambda: self._clear_scene())
-            self.safe_scene_update(lambda: self.scene.scene.add_geometry("raw_pcd", self.raw_pcd, self.default_point_material))
-            self.next_stage_buttons[Stage.RAYCAST].enabled = True
-            self.worker_buttons[Stage.RAYCAST].enabled = True
+            self.main_thread(lambda: self._clear_scene())
+            self.main_thread(lambda: self.scene.scene.add_geometry("raw_pcd", self.raw_pcd, self.default_point_material))
+            self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.RAYCAST], True))
+            self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.RAYCAST], True))
             self.hide_progress()
         print("raycast finished")
 
@@ -666,9 +683,9 @@ class MeshSamplingApp:
         self.cropped_pcd = copy.deepcopy(self.raw_pcd) if self.cropped_pcd == None else self.cropped_pcd
         if self.headless:
             return
-        self.worker_buttons[Stage.CROP].enabled = (len(self.selected_indices) != 0)
-        self.safe_scene_update(lambda: self._clear_scene())
-        self.safe_scene_update(lambda: self.scene.scene.add_geometry("crop_pcd", self.cropped_pcd, self.default_point_material))
+        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.CROP], (len(self.selected_indices) != 0)))
+        self.main_thread(lambda: self._clear_scene())
+        self.main_thread(lambda: self.scene.scene.add_geometry("crop_pcd", self.cropped_pcd, self.default_point_material))
 
     def reset_crop_stage(self):
         self.down_pcd = None
@@ -676,9 +693,9 @@ class MeshSamplingApp:
         self.cropped_pcd = copy.deepcopy(self.raw_pcd)
         if self.headless:
             return
-        self.worker_buttons[Stage.CROP].enabled = (len(self.selected_indices) != 0)
-        self.safe_scene_update(lambda: self._clear_scene())
-        self.safe_scene_update(lambda: self.scene.scene.add_geometry("cropped", self.cropped_pcd, self.default_point_material))
+        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.CROP], (len(self.selected_indices) != 0)))
+        self.main_thread(lambda: self._clear_scene())
+        self.main_thread(lambda: self.scene.scene.add_geometry("cropped", self.cropped_pcd, self.default_point_material))
 
     def _select_points_screen_space(self):
         valid_idx, screen_pts = self.project_world_to_screen(np.asarray(self.cropped_pcd.points))
@@ -694,11 +711,11 @@ class MeshSamplingApp:
         selected_pcd = mask_point_cloud(self.cropped_pcd, ~selection_mask)
         non_selected_pcd = mask_point_cloud(self.cropped_pcd, selection_mask)
 
-        self.safe_scene_update(lambda: self._clear_scene())
-        self.safe_scene_update(lambda: self.scene.scene.add_geometry("selected", selected_pcd, self.overlay_material))
-        self.safe_scene_update(lambda: self.scene.scene.add_geometry("non selected", non_selected_pcd, self.default_point_material))
-        self.worker_buttons[Stage.CROP].enabled = (len(self.selected_indices) != 0)
-        self.next_stage_buttons[Stage.CROP].enabled = True
+        self.main_thread(lambda: self._clear_scene())
+        self.main_thread(lambda: self.scene.scene.add_geometry("selected", selected_pcd, self.overlay_material))
+        self.main_thread(lambda: self.scene.scene.add_geometry("non selected", non_selected_pcd, self.default_point_material))
+        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.CROP], (len(self.selected_indices) != 0)))
+        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.CROP], True))
 
     def delete_selected_points(self):
         mask = np.ones(len(self.cropped_pcd.points), dtype=bool)
@@ -706,9 +723,9 @@ class MeshSamplingApp:
         self.cropped_pcd = mask_point_cloud(self.cropped_pcd, mask)
         print(f"[INFO] Deleted selected {len(self.selected_indices)} points. Remaining points: {len(self.cropped_pcd.points)}")
         self.selected_indices = []
-        self.safe_scene_update(lambda: self._clear_scene())
-        self.safe_scene_update(lambda: self.scene.scene.add_geometry("cropped", self.cropped_pcd, self.default_point_material))
-        self.worker_buttons[Stage.CROP].enabled = (len(self.selected_indices) != 0)
+        self.main_thread(lambda: self._clear_scene())
+        self.main_thread(lambda: self.scene.scene.add_geometry("cropped", self.cropped_pcd, self.default_point_material))
+        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.CROP], (len(self.selected_indices) != 0)))
 
     def _enable_box_selection(self):
         if self.btn_box_select.is_on:
@@ -785,24 +802,25 @@ class MeshSamplingApp:
     def downsample_stage_init(self): 
         if self.headless:
             return       
-        self.worker_buttons[Stage.DOWNSAMPLE].enabled = True
-        self.next_stage_buttons[Stage.DOWNSAMPLE].enabled = (self.down_pcd != None)
+        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.DOWNSAMPLE], True))
+        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.DOWNSAMPLE], (self.down_pcd != None)))
+
         if self.down_pcd != None:
-            self.safe_scene_update(lambda: self._clear_scene())
-            self.safe_scene_update(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
+            self.main_thread(lambda: self._clear_scene())
+            self.main_thread(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
         elif self.cropped_pcd != None:
-            self.safe_scene_update(lambda: self._clear_scene())
-            self.safe_scene_update(lambda: self.scene.scene.add_geometry("cropped_pcd", self.cropped_pcd, self.default_point_material))
+            self.main_thread(lambda: self._clear_scene())
+            self.main_thread(lambda: self.scene.scene.add_geometry("cropped_pcd", self.cropped_pcd, self.default_point_material))
 
     def reset_downsample_stage(self):
         self.down_pcd = None
         self.downsample_stage_init()
         # if self.headless:
         #     return
-        # self.worker_buttons[Stage.DOWNSAMPLE].enabled = True
-        # self.next_stage_buttons[Stage.DOWNSAMPLE].enabled = (self.down_pcd != None)
-        # self.safe_scene_update(lambda: self._clear_scene())
-        # self.safe_scene_update(lambda: self.scene.scene.add_geometry("cropped_pcd", self.cropped_pcd, self.default_point_material))
+        # self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.CROP], True))
+        # self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.CROP], (self.down_pcd != None)))
+        # self.main_thread(lambda: self._clear_scene())
+        # self.main_thread(lambda: self.scene.scene.add_geometry("cropped_pcd", self.cropped_pcd, self.default_point_material))
 
     def start_downsampling(self):
         self.set_stage(Stage.DOWNSAMPLE)
@@ -812,7 +830,7 @@ class MeshSamplingApp:
     def _downsample_worker(self):
         if not self.headless:
             self.use_adaptive = self.adaptive_checkbox.checked
-            self.worker_buttons[Stage.DOWNSAMPLE].enabled = False
+            self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.DOWNSAMPLE], False))
         if self.cropped_pcd is None:
             print("cropped pcd is none")
             return
@@ -824,10 +842,10 @@ class MeshSamplingApp:
 
         if self.headless:
             return
-        self.worker_buttons[Stage.DOWNSAMPLE].enabled = True
-        self.next_stage_buttons[Stage.DOWNSAMPLE].enabled = (self.down_pcd != None)
-        self.safe_scene_update(lambda: self._clear_scene())
-        self.safe_scene_update(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
+        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.DOWNSAMPLE], True))
+        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.DOWNSAMPLE], (self.down_pcd != None)))
+        self.main_thread(lambda: self._clear_scene())
+        self.main_thread(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
  
     def uniform_voxel_downsample(self):
         self.down_pcd = normalize_normals(self.cropped_pcd.voxel_down_sample(self.voxel_size))
@@ -869,8 +887,8 @@ class MeshSamplingApp:
         self.target_mesh.transform(T)
         self.raw_pcd.transform(T)
         self.cropped_pcd.transform(T)
-        self.safe_scene_update(lambda: self._clear_scene())
-        self.safe_scene_update(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
+        self.main_thread(lambda: self._clear_scene())
+        self.main_thread(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
         print("recentered pointcloud")
 
     # ===============================
@@ -883,6 +901,8 @@ class MeshSamplingApp:
         btn_save = gui.Button("Export Point Cloud")
         btn_save.set_on_clicked(self.save_pcd)
 
+        btn_next = gui.Button("Next: Synthetic Target")
+        btn_next.set_on_clicked(lambda: self.set_stage(Stage(self.stage.value + 1)))
         btn_back = gui.Button("Back: Downsample")
         btn_back.set_on_clicked(lambda: self.set_stage(Stage(self.stage.value - 1)))
 
@@ -898,6 +918,7 @@ class MeshSamplingApp:
         v.add_child(gui.Label(""))
         v.add_child(gui.Label(""))
         v.add_child(btn_back)
+        v.add_child(btn_next)
         v.add_child(btn_restart)
 
         print("loaded save panel")
@@ -906,27 +927,200 @@ class MeshSamplingApp:
     def save_stage_init(self):
         if self.headless:
             return
-        self.worker_buttons[Stage.SAVE].enabled = True
         if self.down_pcd != None:
-            self.safe_scene_update(lambda: self._clear_scene())
-            self.safe_scene_update(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
+            self.main_thread(lambda: self._clear_scene())
+            self.main_thread(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
+            self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SAVE], True))
 
     def save_pcd(self):
         if self.down_pcd is None:
-            self.worker_buttons[Stage.SAVE].enabled = True
+            self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SAVE], True))
             print("[WARN] No pointcloud to save")
             return
-        self.worker_buttons[Stage.SAVE].enabled = False
-        path = self._save_ply_dialog()
-        self.worker_buttons[Stage.SAVE].enabled = True
-        if not path:
-            return
+        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SAVE], False))
+        # path = self._save_ply_dialog()
+        # path = ""
+        # if not path:
+        #     return
         try:
-            pointcloud_to_ply(self.down_pcd, str(path))
-            print(f"[INFO] Point cloud saved to {path}")
+            pcd_path = Path.cwd() / "reference_pcd" / (self.mesh_basename + ".ply")
+            pointcloud_to_ply(self.down_pcd, str(pcd_path))
+            print(f"[INFO] Point cloud saved to {pcd_path}")
         except Exception as e:
             print(f"[ERROR] Failed to save PLY: {e}")
             return
+        finally:
+            self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SAVE], True))
+
+    # ===============================
+    # Synthetic Target Stage
+    # ===============================
+
+    def _synthetic_panel(self):
+        v = gui.Vert(4)
+
+        self.num_targets_slider = gui.Slider(gui.Slider.INT)
+        self.num_targets_slider.set_limits(5, 100)
+        self.num_targets_slider.int_value = 20
+        self.occlusion_checkbox = gui.Checkbox("Occlusion")
+        self.occlusion_checkbox.checked = self.synthetic_occlusion
+        btn_generate = gui.Button("Generate Synthetic Targets")
+        btn_generate.set_on_clicked(self.start_synthetic)
+        btn_back = gui.Button("Back: SAVE")
+        btn_back.set_on_clicked(lambda: self.set_stage(Stage(self.stage.value - 1)))
+
+        btn_restart = gui.Button("Restart")
+        btn_restart.set_on_clicked(lambda: self._restart())
+        self.worker_buttons[Stage.SYNTHETIC] = btn_generate
+        v.add_child(gui.Label("Generate Synthetic Targets"))
+        v.add_child(gui.Label(""))
+        v.add_child(self.occlusion_checkbox)
+        v.add_child(self.num_targets_slider)
+        v.add_child(btn_generate)
+        v.add_child(gui.Label(""))
+        v.add_child(gui.Label(""))
+        v.add_child(gui.Label(""))
+        v.add_child(gui.Label(""))
+        v.add_child(gui.Label(""))
+        v.add_child(btn_back)
+        v.add_child(btn_restart)
+
+        print("loaded synthetic panel")
+        return v
+        
+    def start_synthetic(self):
+        self.set_stage(Stage.SYNTHETIC)
+        print("started synthetic generation")
+        self.synthetic_thread = threading.Thread(target=self._synthetic_target_worker)
+        self.synthetic_thread.start()
+
+    def synthetic_stage_init(self):
+        if self.headless:
+            return
+        if self.target_mesh != None:
+            self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SYNTHETIC], True))
+            self.main_thread(lambda: self._clear_scene())
+            self.main_thread(lambda: self.scene.scene.add_geometry("mesh", self.target_mesh, self.default_material))
+    
+    def _synthetic_target_worker(self):
+        self.show_progress("Generating synthetic targets")
+        self.num_targerts =  self.num_targets_slider.int_value
+        self.view_sphere = fibonacci_sphere(self.num_targerts)  # or 500
+        self.visible_target_pcd = o3d.geometry.PointCloud()
+        self.occluders_pcd = o3d.geometry.PointCloud()
+        self.synthetic_occlusion = self.occlusion_checkbox.checked
+        for i in range(self.num_targerts):
+            print("synthetic generation")
+            cam_pos, look_at, up = random_camera(self.view_sphere[i], self.camera_distance)
+            if self.synthetic_occlusion:
+                self._scene_cast(cam_pos, look_at)
+            else:
+                self._scene_cast(cam_pos, look_at, num_occluders=0)
+            self.visible_target_pcd = add_surface_noise(self.visible_target_pcd)
+            self.visible_target_pcd = add_outliers(self.visible_target_pcd)
+            self.visible_target_pcd.voxel_down_sample(0.001)
+            self.visible_target_pcd.estimate_normals()
+            orient_normals_using_cameras(self.visible_target_pcd, cam_pos)
+            self.visible_target_pcd = normalize_normals(self.visible_target_pcd)
+            validate_normals(self.visible_target_pcd)
+            if self.synthetic_occlusion:
+                save_path = Path.cwd() / "synthetic_target" / "occluded" /f"sample_{i}.ply"
+            else:
+                save_path = Path.cwd() / "synthetic_target" / "normal" /f"sample_{i}.ply"
+            pointcloud_to_ply(self.visible_target_pcd, save_path)
+            if not self.headless:
+                self.update_progress((i + 1) / self.num_targerts)
+        self.hide_progress()
+    
+    def _scene_cast(self, cam_pos, look_at, num_occluders=3, max_trials=50):
+        target_center = self.target_mesh.get_center()
+        view_dir = (target_center - cam_pos)
+        view_dir = view_dir / np.linalg.norm(view_dir)
+        scene_meshes = [self.target_mesh]
+
+        # orthonormal basis around view dir
+        right = np.cross(view_dir, [0,0,1])
+        if np.linalg.norm(right) < 1e-6:
+            right = np.cross(view_dir, [0,1,0])
+        right /= np.linalg.norm(right)
+        up = np.cross(right, view_dir)
+
+        # --- Target only ---
+        initial_res = scene_render(scene_meshes, cam_pos, look_at, self.fov_deg, self.res_width, self.res_height)
+        target_hit_ids = initial_res["geom_ids_hit"]
+        target_geom_ids = [int(i) for i in np.unique(target_hit_ids) if i != 4294967295]
+        if len(target_geom_ids) != 1 or target_geom_ids[0] != 0:
+            raise RuntimeError("Foreign id in target generation")
+        target_geom_id = target_geom_ids[0]
+        target_pixels = len(target_hit_ids)
+        print(f"target pixels: {target_pixels}")
+
+        self.occluders = []
+        view_dir = (target_center - cam_pos)
+        view_dir = view_dir / np.linalg.norm(view_dir)
+        target_extent = self.target_mesh.get_axis_aligned_bounding_box().get_extent()
+        target_radius = 0.5 * np.linalg.norm(target_extent)
+        occlusion_ratio = 0
+        for occ_idx in range(num_occluders):
+            success = False
+
+            for trial in range(max_trials):
+                occ = copy.deepcopy(self.target_mesh)
+                occ.rotate(R.random().as_matrix(), center=(0,0,0))
+
+                depth_offset = np.random.uniform(1, 3) * target_radius
+                base_pos = target_center - view_dir * depth_offset
+                lateral = (
+                    right * np.random.uniform(-1.5*target_radius, 1.5*target_radius) +
+                    up    * np.random.uniform(-1.5*target_radius, 1.5*target_radius)
+                )
+                occ.translate(base_pos + lateral)
+
+                # --- Intersection checks ---
+                if any(meshes_intersect(m, occ) for m in scene_meshes):
+                    print(f"intersection detected, regenerating")
+                    continue
+
+                # --- Test occlusion ---
+                test_scene = scene_meshes + [occ]
+                res = scene_render(test_scene, cam_pos, look_at, self.fov_deg, self.res_width, self.res_height)
+
+                self.ray_origins = res["ray_origins"]
+                self.ray_hits    = res["ray_hits"]
+                geom_ids_hit     = res["geom_ids_hit"]
+                scene_pcd        = res["pcd"]
+
+                scene_pcd.estimate_normals()
+                orient_normals_using_cameras(scene_pcd, cam_pos)
+                scene_pcd = normalize_normals(scene_pcd)
+                validate_normals(scene_pcd)
+                target_hit_mask = geom_ids_hit == target_geom_id
+                self.visible_target_pcd = mask_point_cloud(scene_pcd, target_hit_mask)
+                self.occluders_pcd      = mask_point_cloud(scene_pcd, ~target_hit_mask)
+                visible_pixels = len(self.visible_target_pcd.points)
+                occlusion_ratio = 1 - (visible_pixels / target_pixels)
+                if occlusion_ratio > self.max_occlusion_ratio:
+                    print(f"occlusion ratio exceed threshold: {occlusion_ratio}")
+                    continue
+
+                # --- Accept ---
+                self.occluders.append(occ)
+                scene_meshes.append(occ)
+                success = True
+                break
+
+            if not success:
+                raise RuntimeError(f"Failed to generate occluder {occ_idx}")
+
+        if not self.synthetic_occlusion: # handles no occlusion data
+            print("estimating normals")
+            self.visible_target_pcd = initial_res["pcd"]
+            self.visible_target_pcd.estimate_normals()
+            orient_normals_using_cameras(self.visible_target_pcd, cam_pos)
+            self.visible_target_pcd = normalize_normals(self.visible_target_pcd)
+            validate_normals(self.visible_target_pcd)
+            print("estimated normals")
+        print(f"Target pcd occlusion ratio: {occlusion_ratio}")    
 
     def _restart(self):
         print("restart wizard")
@@ -935,11 +1129,15 @@ class MeshSamplingApp:
         self.cropped_pcd = None
         self.down_pcd = None
         self.set_stage(Stage.IMPORT_MESH)
-        self.safe_scene_update(lambda: self._clear_scene())
+        self.main_thread(lambda: self._clear_scene())
+
+    # ===============================
+    # Express Handler
+    # ===============================
 
     def _express_sampling(self):
         self._raycasting_worker()
-        self.down_pcd=app.raw_pcd
+        self.down_pcd=self.raw_pcd
         self._downsample_worker()
         self.set_stage(Stage.SAVE)
 
@@ -948,7 +1146,8 @@ class MeshSamplingApp:
         if src_dir is None:
             return
 
-        dst_dir = self._open_dest_folder_dialog()
+        # dst_dir = self._open_dest_folder_dialog()
+        dst_dir = Path.cwd() / "reference_pcd"
         if dst_dir is None:
             return
 
