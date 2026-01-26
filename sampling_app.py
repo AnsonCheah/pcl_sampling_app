@@ -74,6 +74,7 @@ class MeshSamplingApp:
         self.res_height = 1080
         self.min_occlusion_ratio = 0.1
         self.max_occlusion_ratio = 0.3
+        self.synthetic_targets = []
 
         if not self.headless:
             # === Scene widget ===
@@ -921,6 +922,13 @@ class MeshSamplingApp:
         self.occlusion_checkbox.checked = self.synthetic_occlusion
         btn_generate = gui.Button("Generate Synthetic Targets")
         btn_generate.set_on_clicked(self.start_synthetic)
+        btn_reset = gui.Button("Clear Synthetic Targets")
+        btn_reset.set_on_clicked(self.clear_synthetic)
+        self.combobox_targets = gui.Combobox()
+        self.combobox_targets.set_on_selection_changed(self.preview_synthetic_target)
+        btn_export = gui.Button("Export Synthetic Targets")
+        btn_export.set_on_clicked(self.save_synthetic_targets)
+
         btn_back = gui.Button("Back: SAVE")
         btn_back.set_on_clicked(lambda: self.set_stage(Stage(self.stage.value - 1)))
 
@@ -932,6 +940,9 @@ class MeshSamplingApp:
         v.add_child(self.occlusion_checkbox)
         v.add_child(self.num_targets_slider)
         v.add_child(btn_generate)
+        v.add_child(btn_reset)
+        v.add_child(self.combobox_targets)
+        v.add_child(btn_export)
         v.add_child(gui.Label(""))
         v.add_child(gui.Label(""))
         v.add_child(gui.Label(""))
@@ -944,9 +955,11 @@ class MeshSamplingApp:
         return v
         
     def start_synthetic(self):
-        self.set_stage(Stage.SYNTHETIC)
         self.synthetic_thread = threading.Thread(target=self._synthetic_target_worker)
         self.synthetic_thread.start()
+        if not self.headless:
+            self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SYNTHETIC], False))
+            self.show_progress("Generating synthetic targets")
 
     def synthetic_stage_init(self):
         if self.headless:
@@ -956,9 +969,12 @@ class MeshSamplingApp:
             self.main_thread(lambda: self._clear_scene())
             self.main_thread(lambda: self.scene.scene.add_geometry("mesh", self.target_mesh, self.default_material))
     
+    def clear_synthetic(self):
+        self.synthetic_targets = [] # {"pointcloud": pcd object, "occluded": "True"}
+        self.combobox_targets.clear_items()
+        self.synthetic_stage_init()
+
     def _synthetic_target_worker(self):
-        if not self.headless:
-            self.show_progress("Generating synthetic targets")
         self.num_targerts =  self.num_targets_slider.int_value
         self.view_sphere = fibonacci_sphere(self.num_targerts)
         self.visible_target_pcd = o3d.geometry.PointCloud()
@@ -966,8 +982,6 @@ class MeshSamplingApp:
         self.synthetic_occlusion = self.occlusion_checkbox.checked
         for i in range(self.num_targerts):
             cam_pos, look_at, up = random_camera(self.view_sphere[i], self.camera_distance)
-
-            # self._scene_cast(cam_pos, look_at, num_occluders=(0 if not self.synthetic_occlusion else 1))
 
             target_center = self.target_mesh.get_center()
             view_dir = (target_center - cam_pos)
@@ -1039,7 +1053,7 @@ class MeshSamplingApp:
                 if not success:
                     raise RuntimeError(f"Failed to generate occluder {occ_idx}")
 
-            if not self.synthetic_occlusion: # handles no occlusion data
+            if not self.synthetic_occlusion: # handles no occlusion
                 self.visible_target_pcd = initial_res["pcd"]
                 self.visible_target_pcd.estimate_normals()
             orient_normals_using_cameras(self.visible_target_pcd, cam_pos)
@@ -1054,15 +1068,30 @@ class MeshSamplingApp:
             orient_normals_using_cameras(self.visible_target_pcd, cam_pos)
             normalize_normals(self.visible_target_pcd)
             validate_normals(self.visible_target_pcd)
-            folder_path = Path.cwd() / "synthetic_target" / ("occluded" if self.synthetic_occlusion else "normal")
-            folder_path.mkdir(parents=True, exist_ok=True)
-            save_path = folder_path / f"sample_{i}.ply"
+            pcd_name = f"{self.mesh_basename}_{('' if self.synthetic_occlusion else 'un') + 'occluded'}_{len(self.synthetic_targets)}"
+            self.synthetic_targets.append({pcd_name: self.visible_target_pcd})
 
-            pointcloud_to_ply(self.visible_target_pcd, save_path)
             if not self.headless:
+                self.combobox_targets.add_item(pcd_name)
                 self.update_progress((i + 1) / self.num_targerts)
+
         if not self.headless:
             self.hide_progress()
+            self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SYNTHETIC], True))
+
+    def save_synthetic_targets(self):
+        folder_path = Path.cwd() / "synthetic_target" / self.mesh_basename
+        folder_path.mkdir(parents=True, exist_ok=True)
+        for pcd in self.synthetic_targets:
+            pcd_name, pointcloud_object = next(iter(pcd.items()))
+            pointcloud_to_ply(pointcloud_object, folder_path / f"{pcd_name}.ply")
+
+    def preview_synthetic_target(self, selected_text: str, selected_index: int) -> None:
+        if self.headless:
+            return
+        if self.synthetic_targets[selected_index] != None:
+            self.main_thread(lambda: self._clear_scene())
+            self.main_thread(lambda: self.scene.scene.add_geometry("synthetic_target", self.synthetic_targets[selected_index][selected_text], self.default_point_material))
 
     def _restart(self):
         print("restart wizard")
@@ -1084,7 +1113,7 @@ class MeshSamplingApp:
         self.down_pcd=self.raw_pcd
         self.start_downsampling()
         self.downsampling_thread.join()
-        self.set_stage(Stage.SAVE)
+        # self.set_stage(Stage.SAVE)
 
     def _batch_sampling(self):
         src_dir = self._open_source_folder_dialog()
