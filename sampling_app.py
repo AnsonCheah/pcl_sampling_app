@@ -357,7 +357,7 @@ class MeshSamplingApp:
         btn_reset = gui.Button("Clear Mesh")
         btn_reset.set_on_clicked(self.reset_mesh_stage)
         self.btn_express = gui.Button("Express Sampling")
-        self.btn_express.set_on_clicked(self._express_sampling)
+        self.btn_express.set_on_clicked(self.start_express_sampling)
         btn_batch =  gui.Button("Batch Sampling")
         btn_batch.set_on_clicked(self._batch_sampling)
 
@@ -837,7 +837,11 @@ class MeshSamplingApp:
         return curv
 
     def recenter_mesh_pcd(self):
-        self.down_pcd, T = center_pointcloud_to_geometric_center(self.down_pcd)
+        if self.cropped_pcd == None:
+            return
+        T = get_tf_to_origin(self.cropped_pcd)
+        if self.down_pcd != None:
+            self.down_pcd.transform(T)
         self.target_mesh.transform(T)
         self.raw_pcd.transform(T)
         self.cropped_pcd.transform(T)
@@ -1061,7 +1065,9 @@ class MeshSamplingApp:
             validate_normals(self.visible_target_pcd)
             print(f"Accepted pcd occlusion ratio: {occlusion_ratio}")    
 
-            self.visible_target_pcd = add_surface_noise(self.visible_target_pcd)
+            # self.visible_target_pcd = add_surface_noise(self.visible_target_pcd)
+            camera = self.scene.scene.camera
+            self.visible_target_pcd = add_depth_noise(self.visible_target_pcd, camera)
             self.visible_target_pcd = add_outliers(self.visible_target_pcd)
             self.visible_target_pcd.voxel_down_sample(0.001)
             self.visible_target_pcd.estimate_normals()
@@ -1106,14 +1112,15 @@ class MeshSamplingApp:
     # ===============================
     # Express Handler
     # ===============================
+    def start_express_sampling(self):
+        self._express_sampling_thread = threading.Thread(target=self._express_sampling_worker)
+        self._express_sampling_thread.start()
 
-    def _express_sampling(self):
-        self.start_raycasting()
-        self.raycasting_thread.join()
+    def _express_sampling_worker(self):
+        self._raycasting_worker()
         self.down_pcd=self.raw_pcd
-        self.start_downsampling()
-        self.downsampling_thread.join()
-        # self.set_stage(Stage.SAVE)
+        self._downsample_worker()
+        self.set_stage(Stage.SAVE)
 
     def _batch_sampling(self):
         src_dir = self._open_source_folder_dialog()
@@ -1132,7 +1139,7 @@ class MeshSamplingApp:
             print(f"[INFO] Processing {stl_path.name}")
             self.file_path = stl_path
             self._load_mesh_worker()
-            self._express_sampling()
+            self.start_express_sampling()
             pointcloud_to_ply(self.down_pcd, str(dst_dir / (stl_path.stem + ".ply")))
 
 # ===============================
