@@ -2,7 +2,7 @@ import numpy as np
 import struct
 import open3d as o3d
 
-def center_pointcloud_to_geometric_center(pcd):
+def get_tf_to_origin(pcd):
     """
     Aligns the pointcloud so that its geometric center (mean of all points)
     lies at the origin (0,0,0).
@@ -22,8 +22,7 @@ def center_pointcloud_to_geometric_center(pcd):
     T[:3, 3] = centroid
     T[:3, :3] = pcd.get_minimal_oriented_bounding_box().R
     T = np.linalg.inv(T)
-    pcd_centered = pcd.transform(T)
-    return pcd_centered, T
+    return T
 
 def normalize_normals(pcd):
     """
@@ -371,6 +370,25 @@ def add_surface_noise(pcd:o3d.geometry.PointCloud, sigma=0.002):
     pcd.points = o3d.utility.Vector3dVector(pts + nrm * noise)
     return pcd
 
+def add_depth_noise(pcd: o3d.geometry.PointCloud, cam_pos, look_at, sigma=0.001):
+    """
+    Adds depth noise along the camera optical axis.
+
+    Args:
+        pcd: Open3D PointCloud
+        cam_pos: (3,) camera position in world
+        look_at: (3,) camera target
+        sigma: std dev of depth noise (world units)
+    """
+
+    pts = np.asarray(pcd.points)
+    forward = look_at - cam_pos
+    forward = forward / np.linalg.norm(forward)
+    noise = np.random.normal(0, sigma, (len(pts), 1))
+    pts_noisy = pts + noise * forward
+    pcd.points = o3d.utility.Vector3dVector(pts_noisy)
+    return pcd
+
 def add_outliers(pcd:o3d.geometry.PointCloud):
     bbox = pcd.get_axis_aligned_bounding_box()
     extent = bbox.get_extent()
@@ -443,3 +461,14 @@ def random_camera(viewpoint, distance, jitter=0.05):
     )
 
     return cam_pos, look_at, up
+
+# if __name__=="__main__":
+#     all_points = fibonacci_sphere(200)
+#     pcd1 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(all_points[0::2]))
+#     pcd2 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(all_points[1::2]))
+#     pcd1.paint_uniform_color([1.0,0.0,0.0])
+#     pcd2.paint_uniform_color([0.0,.00,1.0])
+#     o3d.visualization.draw_geometries(
+#             [pcd1, pcd2],
+#             width=1400, height=900, zoom=1.0
+#         )

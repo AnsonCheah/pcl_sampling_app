@@ -920,14 +920,14 @@ class MeshSamplingApp:
         v = gui.Vert(4)
 
         self.num_targets_slider = gui.Slider(gui.Slider.INT)
-        self.num_targets_slider.set_limits(5, 500)
-        self.num_targets_slider.int_value = 20
-        self.occlusion_checkbox = gui.Checkbox("Occlusion")
-        self.occlusion_checkbox.checked = self.synthetic_occlusion
+        self.num_targets_slider.set_limits(5, 200)
+        self.num_targets_slider.int_value = 10
+        # self.occlusion_checkbox = gui.Checkbox("Occlusion")
+        # self.occlusion_checkbox.checked = self.synthetic_occlusion
         btn_generate = gui.Button("Generate Synthetic Targets")
         btn_generate.set_on_clicked(self.start_synthetic)
-        btn_reset = gui.Button("Clear Synthetic Targets")
-        btn_reset.set_on_clicked(self.clear_synthetic)
+        self.clear_synthetic_btn = gui.Button("Clear Synthetic Targets")
+        self.clear_synthetic_btn.set_on_clicked(self.clear_synthetic)
         self.combobox_targets = gui.Combobox()
         self.combobox_targets.set_on_selection_changed(self.preview_synthetic_target)
         btn_export = gui.Button("Export Synthetic Targets")
@@ -941,10 +941,10 @@ class MeshSamplingApp:
         self.worker_buttons[Stage.SYNTHETIC] = btn_generate
         v.add_child(gui.Label("Generate Synthetic Targets"))
         v.add_child(gui.Label(""))
-        v.add_child(self.occlusion_checkbox)
+        # v.add_child(self.occlusion_checkbox)
         v.add_child(self.num_targets_slider)
         v.add_child(btn_generate)
-        v.add_child(btn_reset)
+        v.add_child(self.clear_synthetic_btn)
         v.add_child(self.combobox_targets)
         v.add_child(btn_export)
         v.add_child(gui.Label(""))
@@ -970,6 +970,7 @@ class MeshSamplingApp:
             return
         if self.target_mesh != None:
             self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SYNTHETIC], True))
+            self.main_thread(lambda: self.enable_button(self.clear_synthetic_btn, (len(self.synthetic_targets)>0)))
             self.main_thread(lambda: self._clear_scene())
             self.main_thread(lambda: self.scene.scene.add_geometry("mesh", self.target_mesh, self.default_material))
     
@@ -979,12 +980,12 @@ class MeshSamplingApp:
         self.synthetic_stage_init()
 
     def _synthetic_target_worker(self):
-        self.num_targerts =  self.num_targets_slider.int_value
-        self.view_sphere = fibonacci_sphere(self.num_targerts)
+        self.num_targets =  self.num_targets_slider.int_value
+        self.view_sphere = fibonacci_sphere(self.num_targets)
         self.visible_target_pcd = o3d.geometry.PointCloud()
         self.occluders_pcd = o3d.geometry.PointCloud()
-        self.synthetic_occlusion = self.occlusion_checkbox.checked
-        for i in range(self.num_targerts):
+        # self.synthetic_occlusion = self.occlusion_checkbox.checked
+        for i in range(self.num_targets):
             cam_pos, look_at, up = random_camera(self.view_sphere[i], self.camera_distance)
 
             target_center = self.target_mesh.get_center()
@@ -1014,6 +1015,7 @@ class MeshSamplingApp:
             target_extent = self.target_mesh.get_axis_aligned_bounding_box().get_extent()
             target_radius = 0.5 * np.linalg.norm(target_extent)
             occlusion_ratio = 0
+            self.synthetic_occlusion = i>=(self.num_targets>>1)
             num_occluders = (0 if not self.synthetic_occlusion else 1)
             max_trials = 50
             for occ_idx in range(num_occluders):
@@ -1065,39 +1067,43 @@ class MeshSamplingApp:
             validate_normals(self.visible_target_pcd)
             print(f"Accepted pcd occlusion ratio: {occlusion_ratio}")    
 
-            # self.visible_target_pcd = add_surface_noise(self.visible_target_pcd)
-            camera = self.scene.scene.camera
-            self.visible_target_pcd = add_depth_noise(self.visible_target_pcd, camera)
+            self.visible_target_pcd = add_depth_noise(self.visible_target_pcd, cam_pos, look_at)
             self.visible_target_pcd = add_outliers(self.visible_target_pcd)
             self.visible_target_pcd.voxel_down_sample(0.001)
             self.visible_target_pcd.estimate_normals()
             orient_normals_using_cameras(self.visible_target_pcd, cam_pos)
             normalize_normals(self.visible_target_pcd)
             validate_normals(self.visible_target_pcd)
-            pcd_name = f"{self.mesh_basename}_{('' if self.synthetic_occlusion else 'un') + 'occluded'}_{len(self.synthetic_targets)}"
-            self.synthetic_targets.append({pcd_name: self.visible_target_pcd})
+            self.synthetic_targets.append(self.visible_target_pcd)
 
             if not self.headless:
-                self.combobox_targets.add_item(pcd_name)
-                self.update_progress((i + 1) / self.num_targerts)
+                self.combobox_targets.add_item(f"synthetic_sample_{len(self.synthetic_targets)}")
+                self.update_progress((i + 1) / self.num_targets)
 
         if not self.headless:
             self.hide_progress()
+            self.main_thread(lambda: self.enable_button(self.clear_synthetic_btn, (len(self.synthetic_targets)>0)))
             self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SYNTHETIC], True))
 
     def save_synthetic_targets(self):
-        folder_path = Path.cwd() / "synthetic_target" / self.mesh_basename
+        train_set = self.synthetic_targets[0::2]
+        test_set = self.synthetic_targets[1::2]
+        folder_path = Path.cwd() / "synthetic_target" / self.mesh_basename / "train"
         folder_path.mkdir(parents=True, exist_ok=True)
-        for pcd in self.synthetic_targets:
-            pcd_name, pointcloud_object = next(iter(pcd.items()))
-            pointcloud_to_ply(pointcloud_object, folder_path / f"{pcd_name}.ply")
+        for i, training_pcd in enumerate(train_set):
+            pointcloud_to_ply(training_pcd, folder_path / f"train_sample_{i}.ply")
+            
+        folder_path = Path.cwd() / "synthetic_target" / self.mesh_basename/ "test"
+        folder_path.mkdir(parents=True, exist_ok=True)
+        for i, training_pcd in enumerate(test_set):
+            pointcloud_to_ply(training_pcd, folder_path / f"test_sample_{i}.ply")
 
     def preview_synthetic_target(self, selected_text: str, selected_index: int) -> None:
         if self.headless:
             return
         if self.synthetic_targets[selected_index] != None:
             self.main_thread(lambda: self._clear_scene())
-            self.main_thread(lambda: self.scene.scene.add_geometry("synthetic_target", self.synthetic_targets[selected_index][selected_text], self.default_point_material))
+            self.main_thread(lambda: self.scene.scene.add_geometry("synthetic_target", self.synthetic_targets[selected_index], self.default_point_material))
 
     def _restart(self):
         print("restart wizard")
