@@ -363,31 +363,31 @@ def meshes_intersect(mesh1, mesh2):
     sdf = scene.compute_signed_distance(query).numpy()
     return np.any(sdf < 0)
 
-def add_surface_noise(pcd:o3d.geometry.PointCloud, sigma=0.002):
+def add_surface_noise(pcd:o3d.geometry.PointCloud, sigma=0.001):
     pts = np.asarray(pcd.points)
     nrm = np.asarray(pcd.normals)
     noise = np.random.normal(0, sigma, (len(pts), 1))
     pcd.points = o3d.utility.Vector3dVector(pts + nrm * noise)
     return pcd
 
-def add_depth_noise(pcd: o3d.geometry.PointCloud, cam_pos, look_at, sigma=0.001):
+def ray_depth_noise(origins, directions, t_hit, acc_sigma=0.0001, depth_sigma=0.0001):
     """
-    Adds depth noise along the camera optical axis.
+    Apply noise along ray direction (depth noise).
 
-    Args:
-        pcd: Open3D PointCloud
-        cam_pos: (3,) camera position in world
-        look_at: (3,) camera target
-        sigma: std dev of depth noise (world units)
+    origins: (N,3)
+    directions: (N,3) normalized
+    t_hit: (N,)
     """
 
-    pts = np.asarray(pcd.points)
-    forward = look_at - cam_pos
-    forward = forward / np.linalg.norm(forward)
-    noise = np.random.normal(0, sigma, (len(pts), 1))
-    pts_noisy = pts + noise * forward
-    pcd.points = o3d.utility.Vector3dVector(pts_noisy)
-    return pcd
+    sigma_vals = acc_sigma + depth_sigma * (t_hit ** 2)
+    noise = np.random.normal(0, sigma_vals)
+
+    t_noisy = t_hit + noise
+    t_noisy = np.clip(t_noisy, 0, None)
+
+    pts_noisy = origins + directions * t_noisy[:, None]
+    return pts_noisy, t_noisy
+
 
 def add_outliers(pcd:o3d.geometry.PointCloud):
     bbox = pcd.get_axis_aligned_bounding_box()
@@ -400,7 +400,14 @@ def add_outliers(pcd:o3d.geometry.PointCloud):
     pcd.points = o3d.utility.Vector3dVector(np.vstack([pts, out]))
     return pcd
 
-def scene_render(meshes, cam_pos, look_at, fov, res_width, res_height):
+def jitter_ray_direction(dirs, sigma_angle=0.001):
+    noise = np.random.normal(0, sigma_angle, dirs.shape)
+    dirs_noisy = dirs + noise
+    dirs_noisy /= np.linalg.norm(dirs_noisy, axis=1, keepdims=True)
+    return dirs_noisy
+
+def scene_render(meshes, cam_pos, look_at, fov, res_width, res_height, angular_noise_sigma=0.0005):
+    
     scene = o3d.t.geometry.RaycastingScene()
     for m in meshes:
         scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(m))
@@ -409,7 +416,7 @@ def scene_render(meshes, cam_pos, look_at, fov, res_width, res_height):
         fov_deg=fov,
         center=look_at,
         eye=cam_pos,
-        up=[0,0,1],
+        up=[0, 0, 1],
         width_px=res_width,
         height_px=res_height
     )
@@ -424,12 +431,25 @@ def scene_render(meshes, cam_pos, look_at, fov, res_width, res_height):
 
     origins = rays_np[hit_indices, :3]
     dirs    = rays_np[hit_indices, 3:]
-    points  = origins + dirs * t_hit[hit_indices][:, None]
+
+    # ---- Optional angular noise ----
+    if angular_noise_sigma > 0:
+        dirs = jitter_ray_direction(dirs, angular_noise_sigma)
+
+    # ---- Depth noise (THIS IS THE KEY PART) ----
+    points_noisy, t_noisy = ray_depth_noise(
+        origins,
+        dirs,
+        t_hit[hit_indices],
+        acc_sigma=0.0001,
+        depth_sigma=0.0001,
+    )
 
     geom_ids_all = ans['geometry_ids'].numpy().reshape(-1)
     geom_ids_hit = geom_ids_all[hit_indices]
 
-    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points))
+    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points_noisy))
+
     return {
         "pcd": pcd,
         "hit_indices": hit_indices,
@@ -437,7 +457,8 @@ def scene_render(meshes, cam_pos, look_at, fov, res_width, res_height):
         "geom_ids_all": geom_ids_all.reshape(res_height, res_width),
         "hit_mask_img": hit.reshape(res_height, res_width),
         "ray_origins": origins,
-        "ray_hits": points
+        "ray_hits": points_noisy,
+        "t_hit_noisy": t_noisy
     }
 
 def random_camera(viewpoint, distance, jitter=0.05):

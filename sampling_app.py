@@ -1067,7 +1067,6 @@ class MeshSamplingApp:
             validate_normals(self.visible_target_pcd)
             print(f"Accepted pcd occlusion ratio: {occlusion_ratio}")    
 
-            self.visible_target_pcd = add_depth_noise(self.visible_target_pcd, cam_pos, look_at)
             self.visible_target_pcd = add_outliers(self.visible_target_pcd)
             self.visible_target_pcd.voxel_down_sample(0.001)
             self.visible_target_pcd.estimate_normals()
