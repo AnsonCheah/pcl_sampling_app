@@ -1,6 +1,23 @@
 import numpy as np
 import struct
 import open3d as o3d
+from scipy.spatial.transform import Rotation as R
+
+def import_ply(file_path):
+    """
+    Import a PLY file into Open3D pointcloud.
+    
+    Args:
+        file_path: Path to the .ply file
+        
+    Returns:
+        o3d.geometry.PointCloud object
+    """
+    pcd = o3d.io.read_point_cloud(file_path)
+    if pcd.is_empty():
+        raise ValueError(f"Failed to load pointcloud from {file_path}")
+    print(f"Loaded {file_path} with {len(pcd.points)}")
+    return pcd
 
 def get_tf_to_origin(pcd):
     """
@@ -23,6 +40,26 @@ def get_tf_to_origin(pcd):
     T[:3, :3] = pcd.get_minimal_oriented_bounding_box().R
     T = np.linalg.inv(T)
     return T
+
+def pcd_geocenter(pcd):
+    """
+    Returns quaternion in [x, y, z, w] format (scalar last).
+    """
+    points = np.asarray(pcd.points)
+    center = points.mean(axis=0)
+    # PCA
+    centered_points = points - center
+    cov_matrix = np.cov(centered_points.T)
+    eigenvalues, eigenvectors = np.linalg.eig(cov_matrix)
+    # Sort by eigenvalues (descending)
+    idx = eigenvalues.argsort()[::-1]
+    rotation_matrix = eigenvectors[:, idx]
+    # Apply signs [1, -1, -1] to match third-party
+    rotation_matrix[:, 1] *= -1
+    rotation_matrix[:, 2] *= -1
+    quat = R.from_matrix(rotation_matrix).as_quat()
+
+    return center, quat
 
 def normalize_normals(pcd):
     """
@@ -406,20 +443,29 @@ def jitter_ray_direction(dirs, sigma_angle=0.001):
     dirs_noisy /= np.linalg.norm(dirs_noisy, axis=1, keepdims=True)
     return dirs_noisy
 
-def scene_render(meshes, cam_pos, look_at, fov, res_width, res_height, angular_noise_sigma=0.0005):
+def random_point_dropout(mask_size, dropout_prob):
+    """
+    Returns a boolean mask of points to KEEP.
+    """
+    keep_mask = np.random.rand(mask_size) > dropout_prob
+    return keep_mask
+
+def depth_based_dropout(t_hit, base_p=0.02, depth_scale=0.15):
+    """
+    Dropout probability increases with depth.
+    """
+    p = base_p + depth_scale * (t_hit / np.max(t_hit))
+    p = np.clip(p, 0.0, 0.9)
+    keep_mask = np.random.rand(len(t_hit)) > p
+    return keep_mask
+
+def scene_render(meshes, cam_pos, look_at, fov, res_width, res_height, angular_noise_sigma=0.0005, dropout_prob=0.1):
     
     scene = o3d.t.geometry.RaycastingScene()
     for m in meshes:
         scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(m))
 
-    rays = scene.create_rays_pinhole(
-        fov_deg=fov,
-        center=look_at,
-        eye=cam_pos,
-        up=[0, 0, 1],
-        width_px=res_width,
-        height_px=res_height
-    )
+    rays = scene.create_rays_pinhole(fov_deg=fov, center=look_at, eye=cam_pos, up=[0, 0, 1], width_px=res_width, height_px=res_height)
 
     ans = scene.cast_rays(rays)
 
@@ -432,19 +478,18 @@ def scene_render(meshes, cam_pos, look_at, fov, res_width, res_height, angular_n
     origins = rays_np[hit_indices, :3]
     dirs    = rays_np[hit_indices, 3:]
 
-    # ---- Optional angular noise ----
     if angular_noise_sigma > 0:
         dirs = jitter_ray_direction(dirs, angular_noise_sigma)
 
-    # ---- Depth noise (THIS IS THE KEY PART) ----
-    points_noisy, t_noisy = ray_depth_noise(
-        origins,
-        dirs,
-        t_hit[hit_indices],
-        acc_sigma=0.0001,
-        depth_sigma=0.0001,
-    )
+    points_noisy, t_noisy = ray_depth_noise(origins, dirs, t_hit[hit_indices], acc_sigma=0.0001, depth_sigma=0.0001)
+    # ---- random dropout ----
+    if dropout_prob > 0:
+        keep_mask = random_point_dropout(len(t_noisy), dropout_prob)
 
+        points_noisy = points_noisy[keep_mask]
+        origins      = origins[keep_mask]
+        t_noisy      = t_noisy[keep_mask]
+        hit_indices  = hit_indices[keep_mask]
     geom_ids_all = ans['geometry_ids'].numpy().reshape(-1)
     geom_ids_hit = geom_ids_all[hit_indices]
 
@@ -483,13 +528,9 @@ def random_camera(viewpoint, distance, jitter=0.05):
 
     return cam_pos, look_at, up
 
-# if __name__=="__main__":
-#     all_points = fibonacci_sphere(200)
-#     pcd1 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(all_points[0::2]))
-#     pcd2 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(all_points[1::2]))
-#     pcd1.paint_uniform_color([1.0,0.0,0.0])
-#     pcd2.paint_uniform_color([0.0,.00,1.0])
-#     o3d.visualization.draw_geometries(
-#             [pcd1, pcd2],
-#             width=1400, height=900, zoom=1.0
-#         )
+if __name__=="__main__":
+    pcd = import_ply("reference_pcd/25333MB000.ply")
+    pcd.paint_uniform_color([0.0,1.0,0.0])
+    pcd_geocenter(pcd=pcd)
+    pcd1 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(fibonacci_sphere(200)))
+    o3d.visualization.draw_geometries([pcd, pcd1], width=1080, height=720, zoom=1.0)
