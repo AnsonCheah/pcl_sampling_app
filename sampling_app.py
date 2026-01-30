@@ -69,7 +69,7 @@ class MeshSamplingApp:
         self.curvature_k_neighbors = 5
         self.bbox_corners = None
         self.synthetic_occlusion = True
-        self.fov_deg = 60
+        self.fov_deg = 15
         self.res_width = 1920
         self.res_height = 1200
         self.min_occlusion_ratio = 0.1
@@ -98,11 +98,11 @@ class MeshSamplingApp:
             self.default_material = rendering.MaterialRecord()
             self.default_material.shader = "defaultLit"
             self.default_point_material = rendering.MaterialRecord()
-            self.default_point_material.shader = "defaultUnlit"
+            # self.default_point_material.shader = "Unlit"
             self.default_point_material.point_size = 1.5
             self.default_point_material.base_color = [1.0, 1.0, 1.0, 1.0]
             self.overlay_material = rendering.MaterialRecord()
-            self.overlay_material.shader = "defaultUnlit"
+            # self.overlay_material.shader = "Unlit"
             self.overlay_material.point_size = 1.5
             self.overlay_material.base_color = [1.0, 0.5, 0.3, 1.0]
 
@@ -180,7 +180,7 @@ class MeshSamplingApp:
     def _clear_scene(self):
         self.scene.scene.clear_geometry()
 
-    def _reframe(self, fov_deg=60.0, margin=1.0):
+    def _reframe(self, fov_deg=25.0, margin=1.0):
         """
         Dynamically frame object based on its bounding box size.
         """
@@ -197,7 +197,7 @@ class MeshSamplingApp:
             bbox = self.target_mesh.get_axis_aligned_bounding_box()
             center = bbox.get_center()
             extent = bbox.get_extent()
-            radius = 0.5 * np.linalg.norm(extent)
+            radius = 0.2 * np.linalg.norm(extent)
             if radius < 1e-6:
                 return
 
@@ -639,147 +639,6 @@ class MeshSamplingApp:
                 return o3d.visualization.gui.Widget.EventCallbackResult.HANDLED
         return o3d.visualization.gui.Widget.EventCallbackResult.IGNORED
 
-    def _get_selection_frustum_corners(self):
-        """Get the 3D corners of the selection frustum in world space"""
-        if self.drag_start is None or self.drag_end is None:
-            return None
-        
-        x1, y1 = self.drag_start
-        x2, y2 = self.drag_end
-        
-        # Check minimum selection size (at least 5 pixels)
-        if abs(x2 - x1) < 5 or abs(y2 - y1) < 5:
-            return None
-        
-        cam = self.scene.scene.camera
-        view_matrix = np.asarray(cam.get_view_matrix())
-        proj_matrix = np.asarray(cam.get_projection_matrix())
-        
-        # Get camera position
-        inv_view = np.linalg.inv(view_matrix)
-        cam_pos = inv_view[:3, 3]
-        
-        # Find target depth from point cloud
-        target_depth = 0.5  # Default - use a reasonable value
-        if hasattr(self, 'cropped_pcd') and self.cropped_pcd is not None:
-            points = np.asarray(self.cropped_pcd.points)
-            if len(points) > 0:
-                valid_idx, screen_pts = self.project_world_to_screen(points)
-                if len(valid_idx) > 0:
-                    center_x = (x1 + x2) / 2
-                    center_y = (y1 + y2) / 2
-                    distances = np.sqrt((screen_pts[:, 0] - center_x)**2 + (screen_pts[:, 1] - center_y)**2)
-                    closest_idx = valid_idx[np.argmin(distances)]
-                    closest_point = points[closest_idx]
-                    target_depth = np.linalg.norm(closest_point - cam_pos)
-        
-        # Screen corners
-        corners_screen = [
-            (x1, y1),
-            (x2, y1),
-            (x2, y2),
-            (x1, y2)
-        ]
-        
-        corners_world = []
-        inv_proj_view = np.linalg.inv(proj_matrix @ view_matrix)
-        
-        for sx, sy in corners_screen:
-            # Convert to NDC
-            ndc_x = (2.0 * sx / self.scene.frame.width) - 1.0
-            ndc_y = 1.0 - (2.0 * sy / self.scene.frame.height)
-            
-            # Use only the NEAR plane (z=-1) which has valid w-component
-            near_ndc = np.array([ndc_x, ndc_y, -1.0, 1.0])
-            
-            # Transform to world space
-            near_world_h = inv_proj_view @ near_ndc
-            
-            # Perspective divide
-            if abs(near_world_h[3]) > 1e-6:
-                near_world = near_world_h[:3] / near_world_h[3]
-                
-                # Calculate ray direction from camera to near point
-                ray_dir = near_world - cam_pos
-                ray_length = np.linalg.norm(ray_dir)
-                
-                if ray_length > 1e-6:
-                    ray_dir = ray_dir / ray_length
-                    # Place point at target depth along the ray
-                    point = cam_pos + ray_dir * target_depth
-                    corners_world.append(point)
-                else:
-                    return None
-            else:
-                return None
-        
-        # Verify corners form a non-degenerate rectangle
-        corners_array = np.array(corners_world)
-        bbox_min = corners_array.min(axis=0)
-        bbox_max = corners_array.max(axis=0)
-        bbox_size = bbox_max - bbox_min
-        
-        # Check if bounding box is too small
-        if np.any(bbox_size < 1e-6):
-            return None
-        
-        return corners_world
-
-    def _draw_selection_rectangle(self):
-        """Draw a live rectangle overlay during box selection"""
-        if self.drag_start is None or self.drag_end is None:
-            return
-        
-        # Remove previous rectangle if it exists
-        if self.scene.scene.has_geometry("selection_rect"):
-            self.scene.scene.remove_geometry("selection_rect")
-        
-        # Get world space corners
-        corners_world = self._get_selection_frustum_corners()
-        
-        if corners_world is None or len(corners_world) != 4:
-            return
-        
-        # Verify all corners are valid
-        for corner in corners_world:
-            if not np.all(np.isfinite(corner)):
-                return
-        
-        # Create a 3D line set for the rectangle
-        lines = [[0, 1],[1, 2],[2, 3],[3, 0]]
-        
-        # Create LineSet
-        line_set = o3d.geometry.LineSet()
-        line_set.points = o3d.utility.Vector3dVector(corners_world)
-        line_set.lines = o3d.utility.Vector2iVector(lines)
-        
-        # Set color (bright yellow for visibility)
-        colors = [[1.0, 1.0, 0.0] for _ in range(len(lines))]
-        line_set.colors = o3d.utility.Vector3dVector(colors)
-        
-        # Verify the line set has valid bounds
-        if not line_set.has_points() or len(line_set.points) == 0:
-            return
-        
-        # Material for the selection rectangle
-        rect_material = rendering.MaterialRecord()
-        rect_material.shader = "unlitLine"
-        rect_material.line_width = 3.0
-        rect_material.base_color = [1.0, 1.0, 0.0, 1.0]
-        
-        try:
-            # Add to scene
-            self.scene.scene.add_geometry("selection_rect", line_set, rect_material)
-            self.scene.force_redraw()
-        except Exception as e:
-            print(f"[WARNING] Could not draw selection rectangle: {e}")
-
-    def _clear_selection_rectangle(self):
-        """Remove the selection rectangle from the scene"""
-        if self.scene.scene.has_geometry("selection_rect"):
-            self.scene.scene.remove_geometry("selection_rect")
-            self.scene.force_redraw()
-
     def crop_stage_init(self):
         self.selected_indices = []
         if self.headless:
@@ -832,11 +691,13 @@ class MeshSamplingApp:
             self._clear_selection_rectangle()
 
     def _inside_rect(self, x, y):
+        """Check if a point is inside the selection rectangle"""
         xmin, xmax = sorted([self.drag_start[0], self.drag_end[0]])
         ymin, ymax = sorted([self.drag_start[1], self.drag_end[1]])
         return xmin <= x <= xmax and ymin <= y <= ymax
     
     def project_world_to_screen(self, points):
+        """Project 3D world points to 2D screen coordinates"""
         cam = self.scene.scene.camera
         view = np.asarray(cam.get_view_matrix())
         proj = np.asarray(cam.get_projection_matrix())
@@ -845,13 +706,17 @@ class MeshSamplingApp:
         pts_h = np.hstack([points, np.ones((len(points), 1))])
         clip = (proj @ view @ pts_h.T).T
 
+        # Cull points behind camera BEFORE perspective divide (more efficient)
+        valid = clip[:, 3] > 0
+        
+        if not np.any(valid):
+            return np.array([], dtype=int), np.empty((0, 2))
+        
+        clip = clip[valid]
+        valid_indices = np.where(valid)[0]
+
         # Perspective divide
         ndc = clip[:, :3] / clip[:, 3:4]
-
-        # Cull points behind camera
-        valid = clip[:, 3] > 0
-        ndc = ndc[valid]
-        valid_indices = np.where(valid)[0]
 
         # NDC → screen
         x = (ndc[:, 0] * 0.5 + 0.5) * self.scene.frame.width
@@ -859,6 +724,214 @@ class MeshSamplingApp:
 
         return valid_indices, np.column_stack([x, y])
     
+    def _get_selection_frustum_corners(self):
+        """Get the 3D corners of the selection frustum in world space"""
+        if self.drag_start is None or self.drag_end is None:
+            return None
+        
+        x1, y1 = self.drag_start
+        x2, y2 = self.drag_end
+        
+        # Check minimum selection size (at least 5 pixels)
+        if abs(x2 - x1) < 5 or abs(y2 - y1) < 5:
+            return None
+        
+        cam = self.scene.scene.camera
+        view_matrix = np.asarray(cam.get_view_matrix())
+        proj_matrix = np.asarray(cam.get_projection_matrix())
+        
+        # Pre-compute inverse matrices (only once)
+        inv_view = np.linalg.inv(view_matrix)
+        inv_proj_view = np.linalg.inv(proj_matrix @ view_matrix)
+        cam_pos = inv_view[:3, 3]  # Camera position
+        
+        # Calculate target depth
+        target_depth = self._calculate_selection_depth(x1, y1, x2, y2, cam_pos)
+        
+        # Screen corners
+        corners_screen = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+        corners_world = []
+        
+        # Pre-calculate NDC-to-screen conversion factors
+        width = self.scene.frame.width
+        height = self.scene.frame.height
+        
+        for sx, sy in corners_screen:
+            # Convert to Normalized Device Coordinates
+            ndc_x = (2.0 * sx / width) - 1.0
+            ndc_y = 1.0 - (2.0 * sy / height)
+            # Use only the NEAR plane (z=-1) which has valid w-component
+            near_ndc = np.array([ndc_x, ndc_y, -1.0, 1.0])
+            # Transform to world space
+            near_world_h = inv_proj_view @ near_ndc
+            # Perspective divide with safety check
+            w = near_world_h[3]
+            if abs(w) < 1e-6:
+                return None
+            
+            near_world = near_world_h[:3] / w
+            
+            # Calculate ray direction from camera to near point
+            ray_dir = near_world - cam_pos
+            ray_length = np.linalg.norm(ray_dir)
+            
+            if ray_length < 1e-6:
+                return None
+            
+            ray_dir = ray_dir / ray_length
+            
+            # Place point at target depth along the ray
+            point = cam_pos + ray_dir * target_depth
+            corners_world.append(point)
+        
+        # Verify corners form a non-degenerate rectangle
+        if not self._validate_rectangle_corners(corners_world):
+            return None
+        
+        return corners_world
+    
+    def _calculate_selection_depth(self, x1, y1, x2, y2, cam_pos):
+        """Calculate the optimal depth for the selection rectangle"""
+        # Default depth
+        default_depth = 0.5
+        
+        if not hasattr(self, 'cropped_pcd') or self.cropped_pcd is None:
+            return default_depth
+        
+        points = np.asarray(self.cropped_pcd.points)
+        if len(points) == 0:
+            return default_depth
+        
+        # Project all points to screen (this is cached-friendly)
+        valid_idx, screen_pts = self.project_world_to_screen(points)
+        
+        if len(valid_idx) == 0:
+            return default_depth
+        
+        # Find points within the selection rectangle (vectorized)
+        xmin, xmax = sorted([x1, x2])
+        ymin, ymax = sorted([y1, y2])
+        in_rect = (
+            (screen_pts[:, 0] >= xmin) & 
+            (screen_pts[:, 0] <= xmax) & 
+            (screen_pts[:, 1] >= ymin) & 
+            (screen_pts[:, 1] <= ymax)
+        )
+        
+        if np.any(in_rect):
+            # Get the closest point within the selection (vectorized)
+            rect_points = points[valid_idx[in_rect]]
+            distances_to_cam = np.linalg.norm(rect_points - cam_pos, axis=1)
+            min_depth = np.min(distances_to_cam)
+            
+            # Place rectangle significantly in front (50% closer for better visibility)
+            return min_depth * 0.50
+        else:
+            # No points in selection, use center-based approach
+            center_x = (x1 + x2) / 2.0
+            center_y = (y1 + y2) / 2.0
+            
+            # Vectorized distance calculation
+            distances = np.linalg.norm(
+                screen_pts - np.array([center_x, center_y]), 
+                axis=1
+            )
+            closest_idx = valid_idx[np.argmin(distances)]
+            closest_point = points[closest_idx]
+            
+            # Use 90% depth for fallback (less aggressive than selected points)
+            return np.linalg.norm(closest_point - cam_pos) * 0.90
+    
+    def _validate_rectangle_corners(self, corners_world):
+        """Validate that the rectangle corners form a non-degenerate shape"""
+        if corners_world is None or len(corners_world) != 4:
+            return False
+        
+        # Check all corners are finite
+        corners_array = np.array(corners_world)
+        if not np.all(np.isfinite(corners_array)):
+            return False
+        
+        # Check bounding box has non-zero volume
+        bbox_min = corners_array.min(axis=0)
+        bbox_max = corners_array.max(axis=0)
+        bbox_size = bbox_max - bbox_min
+        
+        # All dimensions should be larger than epsilon
+        return np.all(bbox_size >= 1e-6)
+    
+    def _select_points_screen_space(self):
+        """Select points within the screen-space rectangle"""
+        valid_idx, screen_pts = self.project_world_to_screen(np.asarray(self.cropped_pcd.points))
+        
+        # Vectorized selection (much faster than loop)
+        xmin, xmax = sorted([self.drag_start[0], self.drag_end[0]])
+        ymin, ymax = sorted([self.drag_start[1], self.drag_end[1]])
+        
+        in_rect = (
+            (screen_pts[:, 0] >= xmin) & 
+            (screen_pts[:, 0] <= xmax) & 
+            (screen_pts[:, 1] >= ymin) & 
+            (screen_pts[:, 1] <= ymax)
+        )
+        
+        selected = valid_idx[in_rect].tolist()
+        
+        print(f"[INFO] Selected {len(selected)} points")
+        self.selected_indices = selected
+
+        # Create masks (vectorized)
+        selection_mask = np.ones(len(self.cropped_pcd.points), dtype=bool)
+        selection_mask[selected] = False
+        
+        selected_pcd = mask_point_cloud(self.cropped_pcd, ~selection_mask)
+        non_selected_pcd = mask_point_cloud(self.cropped_pcd, selection_mask)
+
+        # Update UI
+        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.CROP], True))
+        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.CROP], (len(self.selected_indices) != 0)))
+        self.main_thread(lambda: self._clear_scene())
+        self.main_thread(lambda: self.scene.scene.add_geometry("selected", selected_pcd, self.overlay_material))
+        self.main_thread(lambda: self.scene.scene.add_geometry("non selected", non_selected_pcd, self.default_point_material))
+
+    def _draw_selection_rectangle(self):
+        """Draw a live rectangle overlay during box selection"""
+        if self.drag_start is None or self.drag_end is None:
+            return
+        if self.scene.scene.has_geometry("selection_rect"):
+            self.scene.scene.remove_geometry("selection_rect")
+
+        corners_world = self._get_selection_frustum_corners()
+        if corners_world is None or len(corners_world) != 4:
+            return
+        
+        for corner in corners_world:
+            if not np.all(np.isfinite(corner)):
+                return
+        
+        lines = [[0, 1],[1, 2],[2, 3],[3, 0]]
+        line_set = o3d.geometry.LineSet()
+        line_set.points = o3d.utility.Vector3dVector(corners_world)
+        line_set.lines = o3d.utility.Vector2iVector(lines)
+        line_set.colors = o3d.utility.Vector3dVector([[1.0, 1.0, 0.0] for _ in range(len(lines))])
+        
+        rect_material = rendering.MaterialRecord()
+        rect_material.shader = "unlitLine"
+        rect_material.line_width = 3.0
+        rect_material.base_color = [1.0, 1.0, 0.0, 1.0]
+        
+        try:
+            self.scene.scene.add_geometry("selection_rect", line_set, rect_material)
+            self.scene.force_redraw()
+        except Exception as e:
+            print(f"[WARNING] Could not draw selection rectangle: {e}")
+
+    def _clear_selection_rectangle(self):
+        """Remove the selection rectangle from the scene"""
+        if self.scene.scene.has_geometry("selection_rect"):
+            self.scene.scene.remove_geometry("selection_rect")
+            self.scene.force_redraw()
+
     # ===============================
     # Downsampling stage functions
     # ===============================
@@ -952,17 +1025,25 @@ class MeshSamplingApp:
 
     def compute_curvature(self, pcd):
         pts = np.asarray(pcd.points)
+        n_points = len(pts)
         tree = o3d.geometry.KDTreeFlann(pcd)
-        curv = np.zeros(len(pts))
-
-        for i in range(len(pts)):
+        curv = np.zeros(n_points, dtype=np.float64)
+        batch_size = max(1, n_points // 100)  # Update progress every 1%
+        
+        for i in range(n_points):
             _, idx, _ = tree.search_knn_vector_3d(pts[i], self.curvature_k_neighbors)
             nbrs = pts[idx]
-            C = np.cov(nbrs.T)
+            centered = nbrs - nbrs.mean(axis=0)
+            C = (centered.T @ centered) / (len(nbrs) - 1)
             eigvals = np.linalg.eigvalsh(C)
-            curv[i] = eigvals[0] / eigvals.sum()   # smallest eigenvalue ratio
-            if not self.headless:
-                self.update_progress((i + 1) / len(pts))
+            eigval_sum = eigvals.sum()
+            curv[i] = eigvals[0] / eigval_sum if eigval_sum > 1e-12 else 0.0
+            if not self.headless and (i + 1) % batch_size == 0:
+                self.update_progress((i + 1) / n_points)
+        
+        if not self.headless:
+            self.update_progress(1.0)
+        
         return curv
 
     def recenter_mesh_pcd(self):
@@ -1049,10 +1130,8 @@ class MeshSamplingApp:
         v = gui.Vert(4)
 
         self.num_targets_slider = gui.Slider(gui.Slider.INT)
-        self.num_targets_slider.set_limits(5, 200)
-        self.num_targets_slider.int_value = 10
-        # self.occlusion_checkbox = gui.Checkbox("Occlusion")
-        # self.occlusion_checkbox.checked = self.synthetic_occlusion
+        self.num_targets_slider.set_limits(2, 200)
+        self.num_targets_slider.int_value = 6
         btn_generate = gui.Button("Generate Synthetic Targets")
         btn_generate.set_on_clicked(self.start_synthetic)
         self.clear_synthetic_btn = gui.Button("Clear Synthetic Targets")
@@ -1070,7 +1149,6 @@ class MeshSamplingApp:
         self.worker_buttons[Stage.SYNTHETIC] = btn_generate
         v.add_child(gui.Label("Generate Synthetic Targets"))
         v.add_child(gui.Label(""))
-        # v.add_child(self.occlusion_checkbox)
         v.add_child(self.num_targets_slider)
         v.add_child(btn_generate)
         v.add_child(self.clear_synthetic_btn)
@@ -1099,15 +1177,17 @@ class MeshSamplingApp:
             return
         self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SYNTHETIC], True))
         self.main_thread(lambda: self.enable_button(self.clear_synthetic_btn, (len(self.synthetic_targets)>0)))
-        if self.synthetic_targets[0] != None:
+        if self.synthetic_targets != []:
+            print("showing syn targ")
             self.main_thread(lambda: self._clear_scene())
             self.main_thread(lambda: self.scene.scene.add_geometry("synthetic_target", self.synthetic_targets[0], self.default_point_material))
         elif self.target_mesh != None:
+            print("showing mesh")
             self.main_thread(lambda: self._clear_scene())
             self.main_thread(lambda: self.scene.scene.add_geometry("mesh", self.target_mesh, self.default_material))
     
     def clear_synthetic(self):
-        self.synthetic_targets = [] # {"pointcloud": pcd object, "occluded": "True"}
+        self.synthetic_targets = []
         self.combobox_targets.clear_items()
         self.synthetic_stage_init()
 
@@ -1116,10 +1196,11 @@ class MeshSamplingApp:
         self.view_sphere = fibonacci_sphere(self.num_targets)
         self.visible_target_pcd = o3d.geometry.PointCloud()
         self.occluders_pcd = o3d.geometry.PointCloud()
-        # self.synthetic_occlusion = self.occlusion_checkbox.checked
+        dropout = 0.1
         for i in range(self.num_targets):
             cam_pos, look_at, up = random_camera(self.view_sphere[i], self.camera_distance)
-
+            proj_pos = projector_from_camera(cam_pos, look_at, baseline=0.3)
+            print(cam_pos, proj_pos)
             target_center = self.target_mesh.get_center()
             view_dir = (target_center - cam_pos)
             view_dir = view_dir / np.linalg.norm(view_dir)
@@ -1132,7 +1213,8 @@ class MeshSamplingApp:
             up = np.cross(right, view_dir)
 
             # --- Target only ---
-            initial_res = scene_render(scene_meshes, cam_pos, look_at, self.fov_deg, self.res_width, self.res_height)
+            initial_res = scene_render(scene_meshes, cam_pos, proj_pos, look_at, self.fov_deg, self.res_width, self.res_height, dropout_prob=dropout)
+
             target_hit_ids = initial_res["geom_ids_hit"]
             target_geom_ids = [int(i) for i in np.unique(target_hit_ids) if i != 4294967295]
             if len(target_geom_ids) != 1 or target_geom_ids[0] != 0:
@@ -1167,7 +1249,7 @@ class MeshSamplingApp:
                         continue
 
                     test_scene = scene_meshes + [occ]
-                    res = scene_render(test_scene, cam_pos, look_at, self.fov_deg, self.res_width, self.res_height)
+                    res = scene_render(test_scene, cam_pos, proj_pos, look_at, self.fov_deg, self.res_width, self.res_height, dropout_prob=dropout)
                     self.ray_origins = res["ray_origins"]
                     self.ray_hits    = res["ray_hits"]
                     geom_ids_hit     = res["geom_ids_hit"]
@@ -1182,6 +1264,7 @@ class MeshSamplingApp:
                     if not (self.min_occlusion_ratio < occlusion_ratio < self.max_occlusion_ratio):
                         print(f"occlusion ratio out of range: {occlusion_ratio}")
                         continue
+                    print(f"Accepted pcd occlusion ratio: {occlusion_ratio}")    
 
                     self.occluders.append(occ)
                     scene_meshes.append(occ)
@@ -1194,13 +1277,14 @@ class MeshSamplingApp:
             if not self.synthetic_occlusion: # handles no occlusion
                 self.visible_target_pcd = initial_res["pcd"]
                 self.visible_target_pcd.estimate_normals()
-            orient_normals_using_cameras(self.visible_target_pcd, cam_pos)
-            normalize_normals(self.visible_target_pcd)
-            validate_normals(self.visible_target_pcd)
-            print(f"Accepted pcd occlusion ratio: {occlusion_ratio}")    
+            # orient_normals_using_cameras(self.visible_target_pcd, cam_pos)
+            # normalize_normals(self.visible_target_pcd)
+            # validate_normals(self.visible_target_pcd)
 
-            self.visible_target_pcd = add_outliers(self.visible_target_pcd)
-            self.visible_target_pcd.voxel_down_sample(0.001)
+            # self.visible_target_pcd = add_outliers(self.visible_target_pcd)
+            print(f"num point bef ds: {len(self.visible_target_pcd.points)}")
+            self.visible_target_pcd = self.visible_target_pcd.voxel_down_sample(0.001)
+            print(f"num point aft ds: {len(self.visible_target_pcd.points)}")
             self.visible_target_pcd.estimate_normals()
             orient_normals_using_cameras(self.visible_target_pcd, cam_pos)
             normalize_normals(self.visible_target_pcd)
@@ -1213,8 +1297,6 @@ class MeshSamplingApp:
 
         if not self.headless:
             self.hide_progress()
-            # self.main_thread(lambda: self.enable_button(self.clear_synthetic_btn, (len(self.synthetic_targets)>0)))
-            # self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SYNTHETIC], True))
             self.synthetic_stage_init()
 
     def save_synthetic_targets(self):
@@ -1238,6 +1320,8 @@ class MeshSamplingApp:
         self.raw_pcd = None
         self.cropped_pcd = None
         self.down_pcd = None
+        self.synthetic_targets = []
+        self.combobox_targets.clear_items()
         self.set_stage(Stage.IMPORT_MESH)
         if not self.headless:
             self.main_thread(lambda: self._clear_scene())

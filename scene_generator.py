@@ -258,44 +258,6 @@ class SyntheticSceneGenerator:
     # Visualization
     # ----------------------------
 
-    def visualize(self, cam_pos, look_at):
-        self.target_mesh.paint_uniform_color([0,1,0])
-        self.visible_target_pcd.paint_uniform_color([0,0,1])
-        self.occluders_pcd.paint_uniform_color([0.6,0.6,0.6])
-        for o in self.occluders:
-            o.paint_uniform_color([1.0,1.0,0.7])
-
-        cam = o3d.geometry.TriangleMesh.create_sphere(0.02)
-        cam.translate(cam_pos)
-        cam.paint_uniform_color([1,1,0])
-
-        # ---- Rays (subsample) ----
-        idx = np.random.choice(len(self.ray_hits), size=min(1000, len(self.ray_hits)), replace=False)
-        lines = [[i, i+len(idx)] for i in range(len(idx))]
-        points = np.vstack([self.ray_origins[idx], self.ray_hits[idx]])
-        colors = [[0.7,0.7,0.7] for _ in lines]
-        ray_lines = o3d.geometry.LineSet(
-            o3d.utility.Vector3dVector(points),
-            o3d.utility.Vector2iVector(lines)
-        )
-        ray_lines.colors = o3d.utility.Vector3dVector(colors)
-
-        # ---- Ground grid ----
-        view_dir = (look_at - cam_pos)
-        view_dir /= np.linalg.norm(view_dir)
-        bottom_center = self.target_mesh.get_center() # + view_dir * target.get_axis_aligned_bounding_box().get_max_bound()[2]
-        grid = make_grid(bottom_center, -view_dir, size=1.0, step=0.1)
-        # ---- Camera frustum ----
-        frustum = make_camera_frustum(cam_pos, look_at, fov_deg=60, depth=0.5)
-
-        o3d.visualization.draw_geometries(
-            [self.target_mesh, *self.occluders, self.visible_target_pcd, self.occluders_pcd, grid],
-            width=1400, height=900, zoom=0.1
-        )
-        # o3d.visualization.draw_geometries(
-        #     [self.target_mesh, *self.occluders, self.visible_target_pcd, self.occluders_pcd, ray_lines, cam, grid, frustum],
-        #     width=1400, height=900, zoom=0.05
-        # )
 
     # ----------------------------
     # Public API

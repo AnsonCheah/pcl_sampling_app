@@ -2,6 +2,7 @@ import numpy as np
 import struct
 import open3d as o3d
 from scipy.spatial.transform import Rotation as R
+import copy
 
 def import_ply(file_path):
     """
@@ -80,6 +81,8 @@ def normalize_normals(pcd):
     
     normals = np.asarray(pcd.normals, dtype=np.float64)
     points = np.asarray(pcd.points, dtype=np.float64)
+    
+    # Vectorized magnitude calculation
     magnitudes = np.linalg.norm(normals, axis=1)
     valid_mask = magnitudes > 1e-10
     num_removed = np.sum(~valid_mask)
@@ -90,7 +93,9 @@ def normalize_normals(pcd):
         normals = normals[valid_mask]
         magnitudes = magnitudes[valid_mask]
     
-    normalized = normals / magnitudes[:, np.newaxis]
+    # Vectorized normalization - no need for np.newaxis, broadcasting handles it
+    normalized = normals / magnitudes[:, None]
+    
     pcd.points = o3d.utility.Vector3dVector(points)
     pcd.normals = o3d.utility.Vector3dVector(normalized)
     
@@ -210,32 +215,38 @@ def plot_curvature_cdf(curvature,
 def find_cdf_knee(curvature):
     curv = np.asarray(curvature)
     curv = curv[np.isfinite(curv)]
-    curv_sorted = np.sort(curv)
-
-    n = len(curv_sorted)
-    if n < 10:
+    
+    if len(curv) < 10:
         raise ValueError("Not enough points for knee detection")
-
-    x = (curv_sorted - curv_sorted.min()) / (np.ptp(curv_sorted) + 1e-12)
+    
+    curv_sorted = np.sort(curv)
+    n = len(curv_sorted)
+    curv_min = curv_sorted[0]
+    curv_range = curv_sorted[-1] - curv_min
+    x = (curv_sorted - curv_min) / (curv_range + 1e-12)
     y = np.linspace(0, 1, n)
-
     p1 = np.array([x[0], y[0]])
     p2 = np.array([x[-1], y[-1]])
     line_vec = p2 - p1
-    line_vec /= np.linalg.norm(line_vec)
-
-    distances = np.zeros(n)
-    for i in range(n):
-        p = np.array([x[i], y[i]])
-        proj = p1 + np.dot(p - p1, line_vec) * line_vec
-        distances[i] = np.linalg.norm(p - proj)
-
+    line_vec_norm = np.linalg.norm(line_vec)
+    
+    if line_vec_norm > 1e-12:
+        line_vec = line_vec / line_vec_norm
+    else:
+        # Degenerate case: all points on a vertical or horizontal line
+        return curv_sorted[n // 2], 50, n // 2
+    
+    points = np.column_stack([x, y])
+    vec_to_points = points - p1
+    projections = np.dot(vec_to_points, line_vec)[:, None] * line_vec
+    proj_points = p1 + projections
+    distances = np.linalg.norm(points - proj_points, axis=1)
     knee_idx = np.argmax(distances)
-
     threshold = curv_sorted[knee_idx]
     percentile = 100.0 * knee_idx / (n - 1)
-    print(f"calculated percentile: {percentile}")
-    print(f"rounded percentile: {int(np.floor(percentile))}")
+    print(f"Calculated percentile: {percentile:.2f}")
+    print(f"Rounded percentile: {int(np.floor(percentile))}")
+    
     return threshold, int(np.floor(percentile)), knee_idx
 
 def pointcloud_to_ply(pcd, ply_path):
@@ -313,73 +324,6 @@ end_header
         f.write(struct.pack("<i", 480))  # viewporty
         f.write(struct.pack("<f", 0.0))  # k1
         f.write(struct.pack("<f", 0.0))  # k2
-
-
-def make_camera_frustum(cam_pos, look_at, fov_deg=60, aspect=1.0, depth=0.5):
-    forward = look_at - cam_pos
-    forward /= np.linalg.norm(forward)
-
-    right = np.cross(forward, [0,0,1])
-    if np.linalg.norm(right) < 1e-6:
-        right = np.cross(forward, [0,1,0])
-    right /= np.linalg.norm(right)
-    up = np.cross(right, forward)
-
-    h = np.tan(np.deg2rad(fov_deg/2)) * depth
-    w = h * aspect
-
-    center = cam_pos + forward * depth
-    corners = [
-        center + up*h + right*w,
-        center + up*h - right*w,
-        center - up*h - right*w,
-        center - up*h + right*w,
-    ]
-
-    points = [cam_pos] + corners
-    lines = [
-        [0,1],[0,2],[0,3],[0,4],
-        [1,2],[2,3],[3,4],[4,1]
-    ]
-
-    frustum = o3d.geometry.LineSet(
-        o3d.utility.Vector3dVector(points),
-        o3d.utility.Vector2iVector(lines)
-    )
-    frustum.paint_uniform_color([1,0,0])
-    return frustum
-
-def make_grid(center, normal, size=1.0, step=0.1):
-    normal = normal / np.linalg.norm(normal)
-
-    # find two orthogonal axes on plane
-    tmp = np.array([1,0,0]) if abs(normal[0]) < 0.9 else np.array([0,1,0])
-    axis1 = np.cross(normal, tmp)
-    axis1 /= np.linalg.norm(axis1)
-    axis2 = np.cross(normal, axis1)
-
-    lines = []
-    points = []
-    n = int(size / step)
-
-    for i in range(-n, n+1):
-        p1 = center + axis1 * i * step + axis2 * size
-        p2 = center + axis1 * i * step - axis2 * size
-        p3 = center + axis2 * i * step + axis1 * size
-        p4 = center + axis2 * i * step - axis1 * size
-
-        points.append(p1); points.append(p2)
-        lines.append([len(points)-2, len(points)-1])
-
-        points.append(p3); points.append(p4)
-        lines.append([len(points)-2, len(points)-1])
-
-    grid = o3d.geometry.LineSet(
-        o3d.utility.Vector3dVector(points),
-        o3d.utility.Vector2iVector(lines)
-    )
-    grid.paint_uniform_color([0.3,0.3,0.3])
-    return grid
 
 def meshes_intersect(mesh1, mesh2):
     aabb1 = mesh1.get_axis_aligned_bounding_box()
@@ -459,51 +403,90 @@ def depth_based_dropout(t_hit, base_p=0.02, depth_scale=0.15):
     keep_mask = np.random.rand(len(t_hit)) > p
     return keep_mask
 
-def scene_render(meshes, cam_pos, look_at, fov, res_width, res_height, angular_noise_sigma=0.0005, dropout_prob=0.1):
-    
+def scene_render(meshes, cam_pos, proj_pos, look_at, fov, res_width, res_height,
+    angular_noise_sigma=0.0001, dropout_prob=0.1, cam_grazing_cos_thresh=0.5, proj_grazing_cos_thresh=0.5):
     scene = o3d.t.geometry.RaycastingScene()
     for m in meshes:
         scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(m))
 
-    rays = scene.create_rays_pinhole(fov_deg=fov, center=look_at, eye=cam_pos, up=[0, 0, 1], width_px=res_width, height_px=res_height)
+    # ---------------- Camera raycast ----------------
+    rays = scene.create_rays_pinhole(
+        fov_deg=fov, center=look_at, eye=cam_pos, up=[0, 0, 1],
+        width_px=res_width, height_px=res_height)
 
     ans = scene.cast_rays(rays)
 
-    hit = ans['t_hit'].isfinite().numpy().reshape(-1)
-    hit_indices = np.where(hit)[0]
-
+    hit_mask = ans["t_hit"].isfinite().numpy().reshape(-1)
+    hit_indices = np.where(hit_mask)[0]
     rays_np = rays.numpy().reshape(-1, 6)
-    t_hit = ans['t_hit'].numpy().reshape(-1)
-
+    t_hit = ans["t_hit"].numpy().reshape(-1)
     origins = rays_np[hit_indices, :3]
-    dirs    = rays_np[hit_indices, 3:]
+    dirs = rays_np[hit_indices, 3:]
 
-    if angular_noise_sigma > 0:
-        dirs = jitter_ray_direction(dirs, angular_noise_sigma)
+    # ---------------- Camera noise ----------------
+    dirs = jitter_ray_direction(dirs, angular_noise_sigma)
+    points_noisy, t_noisy = ray_depth_noise(origins,dirs,t_hit[hit_indices],acc_sigma=0.002,depth_sigma=0.002)
 
-    points_noisy, t_noisy = ray_depth_noise(origins, dirs, t_hit[hit_indices], acc_sigma=0.0001, depth_sigma=0.0001)
-    # ---- random dropout ----
-    if dropout_prob > 0:
-        keep_mask = random_point_dropout(len(t_noisy), dropout_prob)
+    # ---------------- Camera outlier removal ----------------
+    pcd_noisy = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points_noisy))
+    # pcd_noisy.remove_radius_outlier(nb_points=16, radius=0.01)
+    # pcd_noisy.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
 
-        points_noisy = points_noisy[keep_mask]
-        origins      = origins[keep_mask]
-        t_noisy      = t_noisy[keep_mask]
-        hit_indices  = hit_indices[keep_mask]
-    geom_ids_all = ans['geometry_ids'].numpy().reshape(-1)
+    # ---------------- Surface normals ----------------
+    pcd_noisy.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius = 0.005, max_nn = 60))
+    normals = np.asarray(pcd_noisy.normals)
+    normals = normals[:len(points_noisy)]
+
+    # ---------------- Camera grazing dropout ----------------
+    v_cam = -dirs / np.linalg.norm(dirs, axis=1, keepdims=True)
+    cam_cos = np.abs(np.sum(v_cam * normals, axis=1))
+    cam_keep = cam_cos > cam_grazing_cos_thresh
+
+    # ---------------- Projector shadow test ----------------
+    proj_dirs = points_noisy - proj_pos
+    proj_dist = np.linalg.norm(proj_dirs, axis=1)
+    proj_dirs /= proj_dist[:, None]
+    proj_rays = o3d.core.Tensor(
+        np.hstack([np.repeat(proj_pos[None, :], len(points_noisy), axis=0), proj_dirs]),
+        dtype=o3d.core.Dtype.Float32)
+    proj_hits = scene.cast_rays(proj_rays)
+    proj_t = proj_hits["t_hit"].numpy()
+    proj_visible = np.abs(proj_t - proj_dist) < 1e-3
+    print(f"proj_visible: {len(proj_visible)}")
+    # ---------------- Projector grazing dropout ----------------
+    v_proj = -proj_dirs
+    proj_cos = np.abs(np.sum(v_proj * normals, axis=1))
+    proj_keep = proj_cos > proj_grazing_cos_thresh
+
+    # ---------------- Random dropout ----------------
+    # rand_keep = np.random.rand(len(visibility_mask)) > dropout_prob
+
+    # ---------------- Combine visibility ----------------
+    visibility_mask = cam_keep & proj_visible & proj_keep
+
+    # ---------------- Apply final mask ----------------
+    points_final = points_noisy[visibility_mask]
+    origins = origins[visibility_mask]
+    t_noisy = t_noisy[visibility_mask]
+    hit_indices = hit_indices[visibility_mask]
+
+    geom_ids_all = ans["geometry_ids"].numpy().reshape(-1)
     geom_ids_hit = geom_ids_all[hit_indices]
 
-    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points_noisy))
+    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points_final))
 
     return {
         "pcd": pcd,
         "hit_indices": hit_indices,
         "geom_ids_hit": geom_ids_hit,
         "geom_ids_all": geom_ids_all.reshape(res_height, res_width),
-        "hit_mask_img": hit.reshape(res_height, res_width),
+        "hit_mask_img": hit_mask.reshape(res_height, res_width),
         "ray_origins": origins,
-        "ray_hits": points_noisy,
-        "t_hit_noisy": t_noisy
+        "ray_hits": points_final,
+        "t_hit_noisy": t_noisy,
+        "proj_visibility_mask": proj_visible,
+        "cam_grazing_cos": cam_cos,
+        "proj_grazing_cos": proj_cos,
     }
 
 def random_camera(viewpoint, distance, jitter=0.05):
@@ -528,9 +511,171 @@ def random_camera(viewpoint, distance, jitter=0.05):
 
     return cam_pos, look_at, up
 
+def camera_frame(cam_pos, look_at, up=np.array([0, 0, 1])):
+    """
+    Returns rotation matrix R_cam (camera → world)
+    Columns: [right, up, forward]
+    """
+    forward = look_at - cam_pos
+    forward = forward / np.linalg.norm(forward)
+    right = np.cross(forward, up)
+    right = right / np.linalg.norm(right)
+    true_up = np.cross(right, forward)
+    R_cam = np.stack([right, true_up, forward], axis=1)
+    return R_cam
+
+def projector_from_camera(cam_pos, look_at, baseline=0.25, vertical_offset=0.0, forward_offset=0.0):
+    """
+    Create a projector rigidly connected to the camera.
+
+    baseline: lateral offset (meters, camera-right direction)
+    vertical_offset: vertical offset (meters)
+    forward_offset: forward offset (meters)
+    """
+    R_cam = camera_frame(cam_pos, look_at)
+    t_cp = np.array([baseline, vertical_offset, forward_offset])
+    projector_pos = cam_pos + R_cam @ t_cp
+    return projector_pos
+
 if __name__=="__main__":
-    pcd = import_ply("reference_pcd/25333MB000.ply")
-    pcd.paint_uniform_color([0.0,1.0,0.0])
-    pcd_geocenter(pcd=pcd)
-    pcd1 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(fibonacci_sphere(200)))
-    o3d.visualization.draw_geometries([pcd, pcd1], width=1080, height=720, zoom=1.0)
+    # target_mesh = import_ply("mesh_raw/972703T000.ply")
+    # pcd.paint_uniform_color([0.0,1.0,0.0])
+    # pcd_geocenter(pcd=pcd)
+    # pcd1 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(fibonacci_sphere(1000)))
+    # o3d.visualization.draw_geometries([pcd, pcd1], width=1080, height=720, zoom=1.0)
+
+    file_path = "mesh_raw/972703T000.STL"
+    mesh = o3d.io.read_triangle_mesh(file_path)
+    if mesh.is_empty():
+        print("[WARN] Empty mesh")
+        exit()
+
+    bbox = mesh.get_axis_aligned_bounding_box()
+    extent_max = bbox.get_extent().max()
+    unit_conversion = 1.0
+    if extent_max > 5 and extent_max < 5000.0:
+        # Likely in millimeters -> convert to meters
+        print(f"[INFO] Converting units from mm to m for: {file_path}")
+        unit_conversion = 0.001
+        mesh.scale(unit_conversion, center=(0, 0, 0))
+
+    mesh.compute_vertex_normals()
+    mesh.translate(-mesh.get_center())
+    target_mesh = mesh
+
+    bbox = mesh.get_axis_aligned_bounding_box()
+    bbox_corners = np.asarray(bbox.get_box_points())
+    extent_min = bbox.get_extent().min()   # (dx, dy, dz) in world units
+    # ray_spacing = np.round(np.clip((extent_min / 100), 0.0005, 0.003), 4)
+    # voxel_size = np.round(np.clip((extent_min / 50), 0.001, 0.005), 4)
+    # print(f"calculated ray spacing: {ray_spacing*1000}mm")
+    # print(f"calculated voxel size needed: {voxel_size * 1000}mm")
+
+    num_targets = 6
+    view_sphere = fibonacci_sphere(num_targets)
+    visible_target_pcd = o3d.geometry.PointCloud()
+    occluders_pcd = o3d.geometry.PointCloud()
+    dropout = 0.1
+
+    fov_deg = 15
+    res_width = 1920
+    res_height = 1200
+    synthetic_occlusion = False
+    min_occlusion_ratio = 0.1
+    max_occlusion_ratio = 0.3
+    synthetic_targets = []
+    for i in range(num_targets):
+        cam_pos, look_at, up = random_camera(view_sphere[i], 1.5)
+        proj_pos = projector_from_camera(cam_pos, look_at, baseline=0.3)
+        target_center = target_mesh.get_center()
+        view_dir = (target_center - cam_pos)
+        view_dir = view_dir / np.linalg.norm(view_dir)
+        scene_meshes = [target_mesh]
+
+        # orthonormal basis around view dir
+        right = np.cross(view_dir, [0,0,1])
+        right = np.cross(view_dir, [0,1,0]) if np.linalg.norm(right) < 1e-6 else right
+        right /= np.linalg.norm(right)
+        up = np.cross(right, view_dir)
+
+        # --- Target only ---
+        initial_res = scene_render(scene_meshes, cam_pos, proj_pos, look_at, fov_deg, res_width, res_height, dropout_prob=dropout)
+
+        target_hit_ids = initial_res["geom_ids_hit"]
+        target_geom_ids = [int(i) for i in np.unique(target_hit_ids) if i != 4294967295]
+        if len(target_geom_ids) != 1 or target_geom_ids[0] != 0:
+            raise RuntimeError("Foreign id in target generation")
+        target_geom_id = target_geom_ids[0]
+        target_pixels = len(target_hit_ids)
+        print(f"target pixels: {target_pixels}")
+
+        occluders = []
+        view_dir = (target_center - cam_pos)
+        view_dir = view_dir / np.linalg.norm(view_dir)
+        target_extent = target_mesh.get_axis_aligned_bounding_box().get_extent()
+        target_radius = 0.5 * np.linalg.norm(target_extent)
+        occlusion_ratio = 0
+        synthetic_occlusion = i>=(num_targets>>1)
+        num_occluders = (0 if not synthetic_occlusion else 1)
+        max_trials = 1000
+        # for occ_idx in range(num_occluders):
+        #     success = False
+
+        #     for trial in range(max_trials):
+        #         occ = copy.deepcopy(target_mesh)
+        #         occ.rotate(R.random().as_matrix(), center=(0,0,0))
+        #         right_offset = right * np.random.uniform(-1.5*target_radius, 1.5*target_radius)
+        #         up_offset = up * np.random.uniform(-1.5*target_radius, 1.5*target_radius)
+        #         depth_offset = np.random.uniform(1, 3) * target_radius
+        #         base_pos = target_center - view_dir * depth_offset
+        #         occ.translate(base_pos + right_offset + up_offset)
+
+        #         if any(meshes_intersect(m, occ) for m in scene_meshes):
+        #             print(f"intersection detected, regenerating")
+        #             continue
+
+        #         test_scene = scene_meshes + [occ]
+        #         res = scene_render(test_scene, cam_pos, proj_pos, look_at, fov_deg, res_width, res_height, dropout_prob=dropout)
+        #         ray_origins = res["ray_origins"]
+        #         ray_hits    = res["ray_hits"]
+        #         geom_ids_hit     = res["geom_ids_hit"]
+        #         scene_pcd        = res["pcd"]
+
+        #         scene_pcd.estimate_normals()
+        #         target_hit_mask = geom_ids_hit == target_geom_id
+        #         visible_target_pcd = mask_point_cloud(scene_pcd, target_hit_mask)
+        #         occluders_pcd      = mask_point_cloud(scene_pcd, ~target_hit_mask)
+        #         visible_pixels = len(visible_target_pcd.points)
+        #         print(f"target visible in occluded scene: {visible_pixels}")
+        #         occlusion_ratio = 1 - (visible_pixels / target_pixels)
+        #         if not (min_occlusion_ratio < occlusion_ratio < max_occlusion_ratio):
+        #             print(f"occlusion ratio out of range: {occlusion_ratio}")
+        #             continue
+        #         print(f"Accepted pcd occlusion ratio: {occlusion_ratio}")    
+
+        #         occluders.append(occ)
+        #         scene_meshes.append(occ)
+        #         success = True
+        #         break
+
+        #     if not success:
+        #         raise RuntimeError(f"Failed to generate occluder {occ_idx}")
+
+        # if not synthetic_occlusion: # handles no occlusion
+        visible_target_pcd = initial_res["pcd"]
+        visible_target_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius = 0.005, max_nn = 60))
+
+        # self.visible_target_pcd = add_outliers(self.visible_target_pcd)
+        print(f"num point bef ds: {len(visible_target_pcd.points)}")
+        visible_target_pcd = visible_target_pcd.voxel_down_sample(0.001)
+        print(f"num point aft ds: {len(visible_target_pcd.points)}")
+        visible_target_pcd.estimate_normals()
+        orient_normals_using_cameras(visible_target_pcd, cam_pos)
+        normalize_normals(visible_target_pcd)
+        validate_normals(visible_target_pcd)
+        visible_target_pcd.paint_uniform_color([0.0,1.0,0.0])
+        synthetic_targets.append(visible_target_pcd)
+
+    # for i in synthetic_targets:
+    o3d.visualization.draw_geometries([synthetic_targets[2]], width=1080, height=720, zoom=1.0)
+
