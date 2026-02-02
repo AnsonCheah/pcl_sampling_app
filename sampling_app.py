@@ -64,12 +64,12 @@ class MeshSamplingApp:
         self.ray_margin_mm = 10.0
         self.ray_spacing = 0.001
         self.voxel_size = 0.001
-        self.use_adaptive = True
+        self.use_adaptive = False
         self.coarse_factor = 2
         self.curvature_k_neighbors = 5
         self.bbox_corners = None
         self.synthetic_occlusion = True
-        self.fov_deg = 15
+        self.fov_deg = 25
         self.res_width = 1920
         self.res_height = 1200
         self.min_occlusion_ratio = 0.1
@@ -1177,13 +1177,10 @@ class MeshSamplingApp:
             return
         self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SYNTHETIC], True))
         self.main_thread(lambda: self.enable_button(self.clear_synthetic_btn, (len(self.synthetic_targets)>0)))
+        self.main_thread(lambda: self._clear_scene())
         if self.synthetic_targets != []:
-            print("showing syn targ")
-            self.main_thread(lambda: self._clear_scene())
             self.main_thread(lambda: self.scene.scene.add_geometry("synthetic_target", self.synthetic_targets[0], self.default_point_material))
         elif self.target_mesh != None:
-            print("showing mesh")
-            self.main_thread(lambda: self._clear_scene())
             self.main_thread(lambda: self.scene.scene.add_geometry("mesh", self.target_mesh, self.default_material))
     
     def clear_synthetic(self):
@@ -1250,8 +1247,8 @@ class MeshSamplingApp:
 
                     test_scene = scene_meshes + [occ]
                     res = scene_render(test_scene, cam_pos, proj_pos, look_at, self.fov_deg, self.res_width, self.res_height, dropout_prob=dropout)
-                    self.ray_origins = res["ray_origins"]
-                    self.ray_hits    = res["ray_hits"]
+                    # self.ray_origins = res["ray_origins"]
+                    # self.ray_hits    = res["ray_hits"]
                     geom_ids_hit     = res["geom_ids_hit"]
                     scene_pcd        = res["pcd"]
 

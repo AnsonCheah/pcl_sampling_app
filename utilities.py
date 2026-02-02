@@ -2,6 +2,7 @@ import numpy as np
 import struct
 import open3d as o3d
 from scipy.spatial.transform import Rotation as R
+from scipy.spatial import KDTree
 import copy
 
 def import_ply(file_path):
@@ -351,25 +352,6 @@ def add_surface_noise(pcd:o3d.geometry.PointCloud, sigma=0.001):
     pcd.points = o3d.utility.Vector3dVector(pts + nrm * noise)
     return pcd
 
-def ray_depth_noise(origins, directions, t_hit, acc_sigma=0.0001, depth_sigma=0.0001):
-    """
-    Apply noise along ray direction (depth noise).
-
-    origins: (N,3)
-    directions: (N,3) normalized
-    t_hit: (N,)
-    """
-
-    sigma_vals = acc_sigma + depth_sigma * (t_hit ** 2)
-    noise = np.random.normal(0, sigma_vals)
-
-    t_noisy = t_hit + noise
-    t_noisy = np.clip(t_noisy, 0, None)
-
-    pts_noisy = origins + directions * t_noisy[:, None]
-    return pts_noisy, t_noisy
-
-
 def add_outliers(pcd:o3d.geometry.PointCloud):
     bbox = pcd.get_axis_aligned_bounding_box()
     extent = bbox.get_extent()
@@ -387,106 +369,158 @@ def jitter_ray_direction(dirs, sigma_angle=0.001):
     dirs_noisy /= np.linalg.norm(dirs_noisy, axis=1, keepdims=True)
     return dirs_noisy
 
-def random_point_dropout(mask_size, dropout_prob):
+def edge_dropout(edge_strength, p_base=0.02, p_edge=0.4, gamma=2.0):
     """
-    Returns a boolean mask of points to KEEP.
+    edge_strength: (N,) in [0,1]
+    returns: keep_mask (True = keep point)
     """
-    keep_mask = np.random.rand(mask_size) > dropout_prob
-    return keep_mask
+    edge_strength = np.clip(edge_strength, 0.0, 1.0)
 
-def depth_based_dropout(t_hit, base_p=0.02, depth_scale=0.15):
-    """
-    Dropout probability increases with depth.
-    """
-    p = base_p + depth_scale * (t_hit / np.max(t_hit))
-    p = np.clip(p, 0.0, 0.9)
-    keep_mask = np.random.rand(len(t_hit)) > p
-    return keep_mask
+    p_drop = p_base + p_edge * (edge_strength ** gamma)
+    p_drop = np.clip(p_drop, 0.0, 0.95)  # safety
+
+    rand = np.random.rand(len(edge_strength))
+    keep = rand > p_drop
+    return keep, p_drop
 
 def scene_render(meshes, cam_pos, proj_pos, look_at, fov, res_width, res_height,
-    angular_noise_sigma=0.0001, dropout_prob=0.1, cam_grazing_cos_thresh=0.5, proj_grazing_cos_thresh=0.5):
+    depth_sigma=0.0005, angular_noise_sigma=0.00005, dropout_prob=0.1,
+    cam_grazing_cos_thresh=0.5, proj_grazing_cos_thresh=0.5,
+    ):
+
+    # ---------------- Scene ----------------
     scene = o3d.t.geometry.RaycastingScene()
     for m in meshes:
         scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(m))
 
-    # ---------------- Camera raycast ----------------
-    rays = scene.create_rays_pinhole(
-        fov_deg=fov, center=look_at, eye=cam_pos, up=[0, 0, 1],
-        width_px=res_width, height_px=res_height)
+    # ---------------- Camera rays (1 ray per pixel) ----------------
+    rays = scene.create_rays_pinhole(fov_deg=fov, center=look_at, eye=cam_pos, up=[0, 0, 1],
+                                    width_px=res_width, height_px=res_height)
 
-    ans = scene.cast_rays(rays)
-
-    hit_mask = ans["t_hit"].isfinite().numpy().reshape(-1)
-    hit_indices = np.where(hit_mask)[0]
     rays_np = rays.numpy().reshape(-1, 6)
+    ray_origins = rays_np[:, :3]
+    ray_dirs = rays_np[:, 3:]
+
+    # ---------------- Exact raycast ----------------
+    ans = scene.cast_rays(rays)
     t_hit = ans["t_hit"].numpy().reshape(-1)
-    origins = rays_np[hit_indices, :3]
-    dirs = rays_np[hit_indices, 3:]
+    hit_mask = np.isfinite(t_hit)
+    geom_ids_all = ans["geometry_ids"].numpy().reshape(-1)
+    geom_ids_hit = geom_ids_all[hit_mask]
+    # Early exit
+    if not np.any(hit_mask):
+        return None
 
-    # ---------------- Camera noise ----------------
-    dirs = jitter_ray_direction(dirs, angular_noise_sigma)
-    points_noisy, t_noisy = ray_depth_noise(origins,dirs,t_hit[hit_indices],acc_sigma=0.002,depth_sigma=0.002)
+    # Active pixels
+    origins = ray_origins[hit_mask]
+    dirs = ray_dirs[hit_mask]
+    t = t_hit[hit_mask]
+    points_exact = origins + t[:, None] * dirs
 
-    # ---------------- Camera outlier removal ----------------
-    pcd_noisy = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points_noisy))
-    # pcd_noisy.remove_radius_outlier(nb_points=16, radius=0.01)
-    # pcd_noisy.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+    # ---------------- Depth image (measurement space) ----------------
+    depth_img = np.full(res_width * res_height, np.nan)
+    depth_img[hit_mask] = t_hit[hit_mask]
+    depth_img = depth_img.reshape(res_height, res_width)
+    dz_dx = np.zeros_like(depth_img)
+    dz_dy = np.zeros_like(depth_img)
+    dz_dx[:, 1:-1] = np.abs(depth_img[:, 2:] - depth_img[:, :-2])
+    dz_dy[1:-1, :] = np.abs(depth_img[2:, :] - depth_img[:-2, :])
 
-    # ---------------- Surface normals ----------------
-    pcd_noisy.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius = 0.005, max_nn = 60))
-    normals = np.asarray(pcd_noisy.normals)
-    normals = normals[:len(points_noisy)]
+    edge_strength_img = np.sqrt(dz_dx**2 + dz_dy**2)
+    edge_strength_img /= (np.nanpercentile(edge_strength_img, 95) + 1e-6)
+    edge_strength_img = np.clip(edge_strength_img, 0.0, 1.0)
+    edge_strength_flat = edge_strength_img.reshape(-1)
+    edge_strength_img = np.nan_to_num(
+        edge_strength_img,
+        nan=0.0,      # interior pixels → low noise
+        posinf=1.0,
+        neginf=0.0,
+    )
 
-    # ---------------- Camera grazing dropout ----------------
+    # ---------------- Surface normals (exact geometry) ----------------
+    pcd_exact = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points_exact))
+    pcd_exact.estimate_normals(
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(
+            radius=0.005, max_nn=50
+        )
+    )
+    normals = np.asarray(pcd_exact.normals)
+
+    # ---------------- Camera grazing test ----------------
     v_cam = -dirs / np.linalg.norm(dirs, axis=1, keepdims=True)
     cam_cos = np.abs(np.sum(v_cam * normals, axis=1))
     cam_keep = cam_cos > cam_grazing_cos_thresh
 
-    # ---------------- Projector shadow test ----------------
-    proj_dirs = points_noisy - proj_pos
+    # ---------------- Projector visibility test (exact surface) ----------------
+    proj_dirs = points_exact - proj_pos
     proj_dist = np.linalg.norm(proj_dirs, axis=1)
     proj_dirs /= proj_dist[:, None]
     proj_rays = o3d.core.Tensor(
-        np.hstack([np.repeat(proj_pos[None, :], len(points_noisy), axis=0), proj_dirs]),
-        dtype=o3d.core.Dtype.Float32)
+        np.hstack([np.repeat(proj_pos[None, :], len(points_exact), axis=0), proj_dirs]),
+        dtype=o3d.core.Dtype.Float32,
+    )
     proj_hits = scene.cast_rays(proj_rays)
     proj_t = proj_hits["t_hit"].numpy()
     proj_visible = np.abs(proj_t - proj_dist) < 1e-3
-    print(f"proj_visible: {len(proj_visible)}")
-    # ---------------- Projector grazing dropout ----------------
+
+    # ---------------- Projector grazing test ----------------
     v_proj = -proj_dirs
     proj_cos = np.abs(np.sum(v_proj * normals, axis=1))
     proj_keep = proj_cos > proj_grazing_cos_thresh
 
-    # ---------------- Random dropout ----------------
-    # rand_keep = np.random.rand(len(visibility_mask)) > dropout_prob
+    # ---------------- Random pixel dropout ----------------
+    rand_keep = np.random.rand(len(t)) > dropout_prob
 
-    # ---------------- Combine visibility ----------------
-    visibility_mask = cam_keep & proj_visible & proj_keep
-
-    # ---------------- Apply final mask ----------------
-    points_final = points_noisy[visibility_mask]
+    # ---------------- Final visibility mask (measurement space) ----------------
+    visibility_mask = cam_keep & proj_visible & proj_keep & rand_keep
+    # ---------------- Apply mask ----------------
     origins = origins[visibility_mask]
-    t_noisy = t_noisy[visibility_mask]
-    hit_indices = hit_indices[visibility_mask]
+    dirs = dirs[visibility_mask]
+    t = t[visibility_mask]
+    normals = normals[visibility_mask]
+    geom_ids_hit = geom_ids_hit[visibility_mask]
+    edge_strength = edge_strength_flat[hit_mask][visibility_mask]
+    
+    edge_keep, p_drop = edge_dropout(
+        edge_strength,
+        p_base=dropout_prob,   # reuse existing param
+        p_edge=0.4,
+        gamma=2.5
+    )
 
-    geom_ids_all = ans["geometry_ids"].numpy().reshape(-1)
-    geom_ids_hit = geom_ids_all[hit_indices]
+    origins = origins[edge_keep]
+    dirs = dirs[edge_keep]
+    t = t[edge_keep]
+    normals = normals[edge_keep]
+    geom_ids_hit = geom_ids_hit[edge_keep]
+    edge_strength = edge_strength[edge_keep]
+    # ---------------- Measurement-space noise ----------------
+    # ---------------- Edge-aware depth noise ----------------
+    edge_gain = 2.0  # tune this
+    sigma_depth = depth_sigma * (1.0 + edge_gain * edge_strength)
+    sigma_depth = np.nan_to_num(sigma_depth, nan=depth_sigma)
+    if not np.all(np.isfinite(sigma_depth)):
+        raise RuntimeError("Non-finite sigma_depth detected")
+    t_noisy = t + np.random.normal(0.0, sigma_depth)
+    t_noisy = np.clip(t_noisy, 0.0, None)
+    if angular_noise_sigma > 0:
+        noise = np.random.normal(0.0, angular_noise_sigma, size=dirs.shape)
+        dirs_noisy = dirs + noise
+        dirs_noisy /= np.linalg.norm(dirs_noisy, axis=1, keepdims=True)
+    else:
+        dirs_noisy = dirs
+
+    # ---------------- Single back-projection ----------------
+    points_final = origins + t_noisy[:, None] * dirs_noisy
 
     pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points_final))
+    pcd.normals = o3d.utility.Vector3dVector(normals)
 
     return {
         "pcd": pcd,
-        "hit_indices": hit_indices,
         "geom_ids_hit": geom_ids_hit,
-        "geom_ids_all": geom_ids_all.reshape(res_height, res_width),
-        "hit_mask_img": hit_mask.reshape(res_height, res_width),
         "ray_origins": origins,
         "ray_hits": points_final,
-        "t_hit_noisy": t_noisy,
-        "proj_visibility_mask": proj_visible,
-        "cam_grazing_cos": cam_cos,
-        "proj_grazing_cos": proj_cos,
     }
 
 def random_camera(viewpoint, distance, jitter=0.05):
@@ -566,10 +600,6 @@ if __name__=="__main__":
     bbox = mesh.get_axis_aligned_bounding_box()
     bbox_corners = np.asarray(bbox.get_box_points())
     extent_min = bbox.get_extent().min()   # (dx, dy, dz) in world units
-    # ray_spacing = np.round(np.clip((extent_min / 100), 0.0005, 0.003), 4)
-    # voxel_size = np.round(np.clip((extent_min / 50), 0.001, 0.005), 4)
-    # print(f"calculated ray spacing: {ray_spacing*1000}mm")
-    # print(f"calculated voxel size needed: {voxel_size * 1000}mm")
 
     num_targets = 6
     view_sphere = fibonacci_sphere(num_targets)
@@ -577,7 +607,7 @@ if __name__=="__main__":
     occluders_pcd = o3d.geometry.PointCloud()
     dropout = 0.1
 
-    fov_deg = 15
+    fov_deg = 25
     res_width = 1920
     res_height = 1200
     synthetic_occlusion = False
@@ -586,7 +616,7 @@ if __name__=="__main__":
     synthetic_targets = []
     for i in range(num_targets):
         cam_pos, look_at, up = random_camera(view_sphere[i], 1.5)
-        proj_pos = projector_from_camera(cam_pos, look_at, baseline=0.3)
+        proj_pos = projector_from_camera(cam_pos, look_at, baseline=0.27)
         target_center = target_mesh.get_center()
         view_dir = (target_center - cam_pos)
         view_dir = view_dir / np.linalg.norm(view_dir)
@@ -599,12 +629,12 @@ if __name__=="__main__":
         up = np.cross(right, view_dir)
 
         # --- Target only ---
-        initial_res = scene_render(scene_meshes, cam_pos, proj_pos, look_at, fov_deg, res_width, res_height, dropout_prob=dropout)
+        initial_res = scene_render(scene_meshes, cam_pos, proj_pos, look_at, fov_deg, res_width, res_height)
 
         target_hit_ids = initial_res["geom_ids_hit"]
         target_geom_ids = [int(i) for i in np.unique(target_hit_ids) if i != 4294967295]
         if len(target_geom_ids) != 1 or target_geom_ids[0] != 0:
-            raise RuntimeError("Foreign id in target generation")
+            raise RuntimeError(f"Foreign id in target generation: {target_geom_ids}")
         target_geom_id = target_geom_ids[0]
         target_pixels = len(target_hit_ids)
         print(f"target pixels: {target_pixels}")
@@ -617,51 +647,6 @@ if __name__=="__main__":
         occlusion_ratio = 0
         synthetic_occlusion = i>=(num_targets>>1)
         num_occluders = (0 if not synthetic_occlusion else 1)
-        max_trials = 1000
-        # for occ_idx in range(num_occluders):
-        #     success = False
-
-        #     for trial in range(max_trials):
-        #         occ = copy.deepcopy(target_mesh)
-        #         occ.rotate(R.random().as_matrix(), center=(0,0,0))
-        #         right_offset = right * np.random.uniform(-1.5*target_radius, 1.5*target_radius)
-        #         up_offset = up * np.random.uniform(-1.5*target_radius, 1.5*target_radius)
-        #         depth_offset = np.random.uniform(1, 3) * target_radius
-        #         base_pos = target_center - view_dir * depth_offset
-        #         occ.translate(base_pos + right_offset + up_offset)
-
-        #         if any(meshes_intersect(m, occ) for m in scene_meshes):
-        #             print(f"intersection detected, regenerating")
-        #             continue
-
-        #         test_scene = scene_meshes + [occ]
-        #         res = scene_render(test_scene, cam_pos, proj_pos, look_at, fov_deg, res_width, res_height, dropout_prob=dropout)
-        #         ray_origins = res["ray_origins"]
-        #         ray_hits    = res["ray_hits"]
-        #         geom_ids_hit     = res["geom_ids_hit"]
-        #         scene_pcd        = res["pcd"]
-
-        #         scene_pcd.estimate_normals()
-        #         target_hit_mask = geom_ids_hit == target_geom_id
-        #         visible_target_pcd = mask_point_cloud(scene_pcd, target_hit_mask)
-        #         occluders_pcd      = mask_point_cloud(scene_pcd, ~target_hit_mask)
-        #         visible_pixels = len(visible_target_pcd.points)
-        #         print(f"target visible in occluded scene: {visible_pixels}")
-        #         occlusion_ratio = 1 - (visible_pixels / target_pixels)
-        #         if not (min_occlusion_ratio < occlusion_ratio < max_occlusion_ratio):
-        #             print(f"occlusion ratio out of range: {occlusion_ratio}")
-        #             continue
-        #         print(f"Accepted pcd occlusion ratio: {occlusion_ratio}")    
-
-        #         occluders.append(occ)
-        #         scene_meshes.append(occ)
-        #         success = True
-        #         break
-
-        #     if not success:
-        #         raise RuntimeError(f"Failed to generate occluder {occ_idx}")
-
-        # if not synthetic_occlusion: # handles no occlusion
         visible_target_pcd = initial_res["pcd"]
         visible_target_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius = 0.005, max_nn = 60))
 
@@ -677,5 +662,5 @@ if __name__=="__main__":
         synthetic_targets.append(visible_target_pcd)
 
     # for i in synthetic_targets:
-    o3d.visualization.draw_geometries([synthetic_targets[2]], width=1080, height=720, zoom=1.0)
+    o3d.visualization.draw_geometries([synthetic_targets[2]], width=1080, height=720, zoom=0.5)
 
