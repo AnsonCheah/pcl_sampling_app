@@ -202,5 +202,6 @@ $RECYCLE.BIN/
 *.ply
 *.zip
 *.cgr
+*.stp
 
 # End of https://www.toptal.com/developers/gitignore/api/windows,python
