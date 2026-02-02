@@ -198,10 +198,9 @@ $RECYCLE.BIN/
 
 # Windows shortcuts
 *.lnk
-
 *.stl
 *.ply
-.zip
-.cgr
+*.zip
+*.cgr
 
 # End of https://www.toptal.com/developers/gitignore/api/windows,python
