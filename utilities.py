@@ -383,6 +383,44 @@ def edge_dropout(edge_strength, p_base=0.02, p_edge=0.4, gamma=2.0):
     keep = rand > p_drop
     return keep, p_drop
 
+def generate_ray_outliers(origins, dirs, edge_strength, depth_low, depth_high, outlier_prob=0.15):
+    """
+    Generate exactly ONE false depth per selected ray.
+    Depths are sampled independently per ray within object depth span.
+    """
+
+    N = len(origins)
+
+    # Edge-biased selection probability
+    p = outlier_prob * (0.75 + 0.25 * edge_strength)
+    use = np.random.rand(N) < p
+
+    if not np.any(use):
+        return None, use
+
+    # --- Independent depth sampling per ray ---
+    # Use a mixture: uniform + object-biased Gaussian
+    num = np.sum(use)
+
+    # Uniform component
+    t_uniform = np.random.uniform(depth_low, depth_high, size=num)
+
+    # Object-centered Gaussian
+    mu = 0.5 * (depth_low + depth_high)
+    sigma = 0.35 * (depth_high - depth_low)
+    t_gauss = np.random.normal(mu, sigma, size=num)
+
+    # Mixture selection per ray
+    mix = np.random.rand(num) < 0.6
+    t_out = np.where(mix, t_gauss, t_uniform)
+    # Final clamp
+    t_out = np.clip(t_out, depth_low, depth_high)
+
+    # Back-project
+    pts_out = origins[use] + t_out[:, None] * dirs[use]
+
+    return pts_out, use
+
 def scene_render(meshes, cam_pos, proj_pos, look_at, fov, res_width, res_height,
     depth_sigma=0.0005, angular_noise_sigma=0.00005, dropout_prob=0.1,
     cam_grazing_cos_thresh=0.5, proj_grazing_cos_thresh=0.5,
@@ -416,6 +454,11 @@ def scene_render(meshes, cam_pos, proj_pos, look_at, fov, res_width, res_height,
     dirs = ray_dirs[hit_mask]
     t = t_hit[hit_mask]
     points_exact = origins + t[:, None] * dirs
+
+    num_rays = res_width * res_height # 
+    ray_indices = np.arange(num_rays) # 
+    hit_idx = ray_indices[hit_mask] # 
+    nohit_idx = ray_indices[~hit_mask] # 
 
     # ---------------- Depth image (measurement space) ----------------
     depth_img = np.full(res_width * res_height, np.nan)
@@ -473,6 +516,9 @@ def scene_render(meshes, cam_pos, proj_pos, look_at, fov, res_width, res_height,
 
     # ---------------- Final visibility mask (measurement space) ----------------
     visibility_mask = cam_keep & proj_visible & proj_keep & rand_keep
+    visible_hit_idx = hit_idx[visibility_mask]        # A
+    invalid_hit_idx = hit_idx[~visibility_mask]       # B
+
     # ---------------- Apply mask ----------------
     origins = origins[visibility_mask]
     dirs = dirs[visibility_mask]
@@ -513,8 +559,45 @@ def scene_render(meshes, cam_pos, proj_pos, look_at, fov, res_width, res_height,
     # ---------------- Single back-projection ----------------
     points_final = origins + t_noisy[:, None] * dirs_noisy
 
-    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points_final))
-    pcd.normals = o3d.utility.Vector3dVector(normals)
+    t_min = np.min(t)
+    t_max = np.max(t)
+    depth_margin = 0.15 * (t_max - t_min)
+    depth_low = max(0.0, t_min - depth_margin)
+    depth_high = t_max + depth_margin
+
+    # ---------------- Lift visibility mask back to pixel space ----------------
+    visible_pixel_mask = np.zeros_like(hit_mask, dtype=bool)
+    visible_pixel_mask[np.where(hit_mask)[0][visibility_mask]] = True
+
+    orig_B = ray_origins[invalid_hit_idx]
+    dirs_B = ray_dirs[invalid_hit_idx]
+    edge_B = edge_strength_flat[invalid_hit_idx]
+    print(f"Generating outliers for {len(hit_idx)} invalid hit rays")
+    pts_B, use_B = generate_ray_outliers(orig_B, dirs_B, edge_B, depth_low, depth_high, outlier_prob=0.15)
+    print(f"Generated {len(pts_B)} outliers for invalid rays")
+
+    orig_C = ray_origins[nohit_idx]
+    dirs_C = ray_dirs[nohit_idx]
+    edge_C = edge_strength_flat[nohit_idx]
+    print(f"Generating outliers for {len(nohit_idx)} no-hit rays")
+    pts_C, use_C = generate_ray_outliers(orig_C, dirs_C, edge_C, depth_low, depth_high, outlier_prob=0.05)
+    # print(f"Generated {len(pts_C)} outliers for no-hit rays")
+
+    points_all = [points_final]
+    if pts_B is not None:
+        points_all.append(pts_B)
+    if pts_C is not None:
+        points_all.append(pts_C)
+
+    points_with_outliers = np.vstack(points_all)
+    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points_with_outliers))
+
+    pcd.normals = o3d.utility.Vector3dVector(
+        np.vstack([
+            normals,
+            np.zeros((len(points_with_outliers) - len(normals), 3))
+        ])
+    )
 
     return {
         "pcd": pcd,
@@ -632,7 +715,7 @@ if __name__=="__main__":
         initial_res = scene_render(scene_meshes, cam_pos, proj_pos, look_at, fov_deg, res_width, res_height)
 
         target_hit_ids = initial_res["geom_ids_hit"]
-        target_geom_ids = [int(i) for i in np.unique(target_hit_ids) if i != 4294967295]
+        target_geom_ids = [int(i) for i in np.unique(target_hit_ids) if i != 4294967295 and i != -1]
         if len(target_geom_ids) != 1 or target_geom_ids[0] != 0:
             raise RuntimeError(f"Foreign id in target generation: {target_geom_ids}")
         target_geom_id = target_geom_ids[0]
@@ -661,6 +744,6 @@ if __name__=="__main__":
         visible_target_pcd.paint_uniform_color([0.0,1.0,0.0])
         synthetic_targets.append(visible_target_pcd)
 
-    # for i in synthetic_targets:
-    o3d.visualization.draw_geometries([synthetic_targets[2]], width=1080, height=720, zoom=0.5)
+    for i in synthetic_targets:
+        o3d.visualization.draw_geometries([i], width=1080, height=720, zoom=0.5)
 

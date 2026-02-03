@@ -1213,7 +1213,7 @@ class MeshSamplingApp:
             initial_res = scene_render(scene_meshes, cam_pos, proj_pos, look_at, self.fov_deg, self.res_width, self.res_height, dropout_prob=dropout)
 
             target_hit_ids = initial_res["geom_ids_hit"]
-            target_geom_ids = [int(i) for i in np.unique(target_hit_ids) if i != 4294967295]
+            target_geom_ids = [int(i) for i in np.unique(target_hit_ids) if i != 4294967295 and i != -1]
             if len(target_geom_ids) != 1 or target_geom_ids[0] != 0:
                 raise RuntimeError("Foreign id in target generation")
             target_geom_id = target_geom_ids[0]
