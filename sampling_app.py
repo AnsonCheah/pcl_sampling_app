@@ -367,12 +367,13 @@ class MeshSamplingApp:
     def load_mesh_stage_init(self):
         if self.headless:
             return
-        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.IMPORT_MESH], True))
-        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.IMPORT_MESH], (self.target_mesh != None)))
-        self.main_thread(lambda: self.enable_button(self.btn_express, (self.target_mesh != None)))
         self.main_thread(lambda: self._clear_scene())
         if self.target_mesh is not None:
             self.main_thread(lambda: self.scene.scene.add_geometry("mesh", self.target_mesh, self.default_material))
+        self.scene.force_redraw()
+        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.IMPORT_MESH], True))
+        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.IMPORT_MESH], (self.target_mesh != None)))
+        self.main_thread(lambda: self.enable_button(self.btn_express, (self.target_mesh != None)))
 
     def reset_mesh_stage(self):
         self.target_mesh = None
@@ -465,14 +466,15 @@ class MeshSamplingApp:
     def raycast_stage_init(self):
         if self.headless:
             return
-        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.RAYCAST], True))
-        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.RAYCAST], (self.raw_pcd != None)))
         if self.raw_pcd is not None:
             self.main_thread(lambda: self._clear_scene())
             self.main_thread(lambda: self.scene.scene.add_geometry("raw_pcd", self.raw_pcd, self.default_material))
         elif self.target_mesh is not None:
             self.main_thread(lambda: self._clear_scene())
             self.main_thread(lambda: self.scene.scene.add_geometry("mesh", self.target_mesh, self.default_material))
+        self.scene.force_redraw()
+        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.RAYCAST], True))
+        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.RAYCAST], (self.raw_pcd != None)))
 
     def reset_raycast_stage(self):
         self.raw_pcd = None
@@ -643,10 +645,11 @@ class MeshSamplingApp:
         self.selected_indices = []
         if self.headless:
             return
-        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.CROP], True))
-        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.CROP], (len(self.selected_indices) != 0)))
         self.main_thread(lambda: self._clear_scene())
         self.main_thread(lambda: self.scene.scene.add_geometry("crop_pcd", self.cropped_pcd, self.default_point_material))
+        self.scene.force_redraw()
+        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.CROP], True))
+        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.CROP], (len(self.selected_indices) != 0)))
 
     def reset_crop_stage(self):
         self.down_pcd = None
@@ -672,6 +675,7 @@ class MeshSamplingApp:
         self.main_thread(lambda: self._clear_scene())
         self.main_thread(lambda: self.scene.scene.add_geometry("selected", selected_pcd, self.overlay_material))
         self.main_thread(lambda: self.scene.scene.add_geometry("non selected", non_selected_pcd, self.default_point_material))
+        self.scene.force_redraw()
 
     def delete_selected_points(self):
         mask = np.ones(len(self.cropped_pcd.points), dtype=bool)
@@ -893,6 +897,7 @@ class MeshSamplingApp:
         self.main_thread(lambda: self._clear_scene())
         self.main_thread(lambda: self.scene.scene.add_geometry("selected", selected_pcd, self.overlay_material))
         self.main_thread(lambda: self.scene.scene.add_geometry("non selected", non_selected_pcd, self.default_point_material))
+        self.scene.force_redraw()
 
     def _draw_selection_rectangle(self):
         """Draw a live rectangle overlay during box selection"""
@@ -942,8 +947,8 @@ class MeshSamplingApp:
         self.adaptive_checkbox.checked = self.use_adaptive
         btn_downsample = gui.Button("Downsample")
         btn_downsample.set_on_clicked(self.start_downsampling)
-        btn_recenter = gui.Button("Recenter Point Cloud")
-        btn_recenter.set_on_clicked(self.recenter_mesh_pcd)
+        self.btn_recenter = gui.Button("Recenter Point Cloud")
+        self.btn_recenter.set_on_clicked(self.recenter_mesh_pcd)
 
         btn_reset = gui.Button("Restart Downsample")
         btn_reset.set_on_clicked(self.reset_downsample_stage)
@@ -958,7 +963,7 @@ class MeshSamplingApp:
         v.add_child(gui.Label(""))
         v.add_child(self.adaptive_checkbox)
         v.add_child(self.worker_buttons[Stage.DOWNSAMPLE])
-        v.add_child(btn_recenter)
+        v.add_child(self.btn_recenter)
         v.add_child(btn_reset)
         v.add_child(gui.Label(""))
         v.add_child(gui.Label(""))
@@ -971,8 +976,6 @@ class MeshSamplingApp:
     def downsample_stage_init(self): 
         if self.headless:
             return       
-        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.DOWNSAMPLE], True))
-        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.DOWNSAMPLE], (self.down_pcd != None)))
 
         if self.down_pcd != None:
             self.main_thread(lambda: self._clear_scene())
@@ -980,6 +983,10 @@ class MeshSamplingApp:
         elif self.cropped_pcd != None:
             self.main_thread(lambda: self._clear_scene())
             self.main_thread(lambda: self.scene.scene.add_geometry("cropped_pcd", self.cropped_pcd, self.default_point_material))
+        self.scene.force_redraw()
+        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.DOWNSAMPLE], True))
+        self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.DOWNSAMPLE], (self.down_pcd != None)))
+        self.main_thread(lambda: self.enable_button(self.btn_recenter, True))
 
     def reset_downsample_stage(self):
         self.down_pcd = None
@@ -1049,7 +1056,9 @@ class MeshSamplingApp:
     def recenter_mesh_pcd(self):
         if self.cropped_pcd == None:
             return
-        T = get_tf_to_origin(self.cropped_pcd)
+        if not self.headless:
+            self.main_thread(lambda: self.enable_button(self.btn_recenter, False))
+        T = pcd_geocenter(self.cropped_pcd)
         if self.down_pcd != None:
             self.down_pcd.transform(T)
         self.target_mesh.transform(T)
@@ -1097,6 +1106,7 @@ class MeshSamplingApp:
         if self.down_pcd != None:
             self.main_thread(lambda: self._clear_scene())
             self.main_thread(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
+            self.scene.force_redraw()
             self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SAVE], True))
 
     def save_pcd(self):
@@ -1175,13 +1185,14 @@ class MeshSamplingApp:
     def synthetic_stage_init(self):
         if self.headless:
             return
-        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SYNTHETIC], True))
-        self.main_thread(lambda: self.enable_button(self.clear_synthetic_btn, (len(self.synthetic_targets)>0)))
         self.main_thread(lambda: self._clear_scene())
         if self.synthetic_targets != []:
             self.main_thread(lambda: self.scene.scene.add_geometry("synthetic_target", self.synthetic_targets[0], self.default_point_material))
         elif self.target_mesh != None:
             self.main_thread(lambda: self.scene.scene.add_geometry("mesh", self.target_mesh, self.default_material))
+        self.scene.force_redraw()
+        self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SYNTHETIC], True))
+        self.main_thread(lambda: self.enable_button(self.clear_synthetic_btn, (len(self.synthetic_targets)>0)))
     
     def clear_synthetic(self):
         self.synthetic_targets = []
@@ -1234,7 +1245,7 @@ class MeshSamplingApp:
 
                 for trial in range(max_trials):
                     occ = copy.deepcopy(self.target_mesh)
-                    occ.rotate(R.random().as_matrix(), center=(0,0,0))
+                    occ.rotate(random_rotation_matrix(), center=(0,0,0))
                     right_offset = right * np.random.uniform(-1.5*target_radius, 1.5*target_radius)
                     up_offset = up * np.random.uniform(-1.5*target_radius, 1.5*target_radius)
                     depth_offset = np.random.uniform(1, 3) * target_radius
@@ -1310,6 +1321,7 @@ class MeshSamplingApp:
         if self.synthetic_targets[selected_index] != None:
             self.main_thread(lambda: self._clear_scene())
             self.main_thread(lambda: self.scene.scene.add_geometry("synthetic_target", self.synthetic_targets[selected_index], self.default_point_material))
+        self.scene.force_redraw()
 
     def _restart(self):
         print("restart wizard")
@@ -1334,6 +1346,7 @@ class MeshSamplingApp:
         self._raycasting_worker()
         self.down_pcd=self.raw_pcd
         self._downsample_worker()
+        self.recenter_mesh_pcd()
         self.set_stage(Stage.SAVE)
 
     def _batch_sampling(self):

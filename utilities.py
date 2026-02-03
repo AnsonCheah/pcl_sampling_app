@@ -2,8 +2,10 @@ import numpy as np
 import struct
 import open3d as o3d
 from scipy.spatial.transform import Rotation as R
-from scipy.spatial import KDTree
 import copy
+
+def random_rotation_matrix():
+    return R.random().as_matrix()
 
 def import_ply(file_path):
     """
@@ -37,7 +39,6 @@ def get_tf_to_origin(pcd):
     # True geometric center of sampled surface
     centroid = pts.mean(axis=0) # translation only
     T = np.eye(4)
-    # T[:3, 3] = -centroid
     T[:3, 3] = centroid
     T[:3, :3] = pcd.get_minimal_oriented_bounding_box().R
     T = np.linalg.inv(T)
@@ -45,23 +46,39 @@ def get_tf_to_origin(pcd):
 
 def pcd_geocenter(pcd):
     """
-    Returns quaternion in [x, y, z, w] format (scalar last).
+    Returns transformation matrix with consistent orientation.
     """
     points = np.asarray(pcd.points)
     center = points.mean(axis=0)
-    # PCA
+    
     centered_points = points - center
     cov_matrix = np.cov(centered_points.T)
     eigenvalues, eigenvectors = np.linalg.eig(cov_matrix)
+    
     # Sort by eigenvalues (descending)
     idx = eigenvalues.argsort()[::-1]
     rotation_matrix = eigenvectors[:, idx]
-    # Apply signs [1, -1, -1] to match third-party
-    rotation_matrix[:, 1] *= -1
-    rotation_matrix[:, 2] *= -1
-    quat = R.from_matrix(rotation_matrix).as_quat()
+    if np.linalg.det(rotation_matrix) < 0:
+        rotation_matrix[:, 2] *= -1
 
-    return center, quat
+    for i in range(3):
+        axis = rotation_matrix[:, i]
+        # Find the component with largest absolute value
+        max_idx = np.argmax(np.abs(axis))
+        # If that component is negative, flip the entire axis
+        if axis[max_idx] < 0:
+            rotation_matrix[:, i] *= -1
+    
+    if np.linalg.det(rotation_matrix) < 0:
+        rotation_matrix[:, 2] *= -1
+    
+    rotation_matrix = np.round(rotation_matrix, decimals=3)
+    tf = np.eye(4)
+    tf[:3, 3] = center
+    tf[:3, :3] = rotation_matrix
+    tf = np.linalg.inv(tf)
+    
+    return tf
 
 def normalize_normals(pcd):
     """
@@ -171,47 +188,47 @@ def plot_curvature_cdf(curvature,
                         threshold=None,
                         percentile=None,
                         title="Curvature Cumulative Distribution"):
-        """
-        Plot cumulative distribution function (CDF) of curvature.
+    """
+    Plot cumulative distribution function (CDF) of curvature.
 
-        Args:
-            curvature (np.ndarray): curvature values
-            threshold (float, optional): curvature threshold to annotate
-            percentile (float, optional): percentile of threshold (0-100)
-        """
-        import matplotlib.pyplot as plt
-        curvature = np.asarray(curvature)
-        curvature = curvature[np.isfinite(curvature)]
+    Args:
+        curvature (np.ndarray): curvature values
+        threshold (float, optional): curvature threshold to annotate
+        percentile (float, optional): percentile of threshold (0-100)
+    """
+    import matplotlib.pyplot as plt
+    curvature = np.asarray(curvature)
+    curvature = curvature[np.isfinite(curvature)]
 
-        if len(curvature) == 0:
-            print("[WARN] No valid curvature values to plot.")
-            return
+    if len(curvature) == 0:
+        print("[WARN] No valid curvature values to plot.")
+        return
 
-        curv_sorted = np.sort(curvature)
-        cdf = np.linspace(0, 1, len(curv_sorted))
+    curv_sorted = np.sort(curvature)
+    cdf = np.linspace(0, 1, len(curv_sorted))
 
-        plt.figure(figsize=(7, 5))
-        plt.plot(curv_sorted, cdf, linewidth=2)
+    plt.figure(figsize=(7, 5))
+    plt.plot(curv_sorted, cdf, linewidth=2)
 
-        if threshold is not None:
-            plt.axvline(threshold, linestyle="--", linewidth=2)
-            label = f"Threshold = {threshold:.2e}"
-            if percentile is not None:
-                label += f"\nPercentile = {percentile:.1f}%"
-            plt.text(
-                threshold,
-                0.05,
-                label,
-                rotation=90,
-                verticalalignment="bottom"
-            )
+    if threshold is not None:
+        plt.axvline(threshold, linestyle="--", linewidth=2)
+        label = f"Threshold = {threshold:.2e}"
+        if percentile is not None:
+            label += f"\nPercentile = {percentile:.1f}%"
+        plt.text(
+            threshold,
+            0.05,
+            label,
+            rotation=90,
+            verticalalignment="bottom"
+        )
 
-        plt.xlabel("Curvature")
-        plt.ylabel("Cumulative probability")
-        plt.title(title)
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        plt.show()
+    plt.xlabel("Curvature")
+    plt.ylabel("Cumulative probability")
+    plt.title(title)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
 
 def find_cdf_knee(curvature):
     curv = np.asarray(curvature)
@@ -655,11 +672,12 @@ def projector_from_camera(cam_pos, look_at, baseline=0.25, vertical_offset=0.0, 
     return projector_pos
 
 if __name__=="__main__":
-    # target_mesh = import_ply("mesh_raw/972703T000.ply")
-    # pcd.paint_uniform_color([0.0,1.0,0.0])
-    # pcd_geocenter(pcd=pcd)
-    # pcd1 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(fibonacci_sphere(1000)))
-    # o3d.visualization.draw_geometries([pcd, pcd1], width=1080, height=720, zoom=1.0)
+    pcd = import_ply("reference_pcd/25333MB000.ply")
+    pcd.paint_uniform_color([0.0,1.0,0.0])
+    print(pcd_geocenter(pcd))
+    pcd1 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(fibonacci_sphere(1000)))
+    o3d.visualization.draw_geometries([pcd, pcd1], width=1080, height=720, zoom=1.0)
+    exit()
 
     file_path = "mesh_raw/972703T000.STL"
     mesh = o3d.io.read_triangle_mesh(file_path)
