@@ -327,7 +327,7 @@ class MeshSamplingApp:
         self.btn_express = gui.Button("Express Sampling")
         self.btn_express.set_on_clicked(self.start_express_sampling)
         btn_batch =  gui.Button("Batch Sampling")
-        btn_batch.set_on_clicked(self._batch_sampling)
+        btn_batch.set_on_clicked(self.start_batch_sampling)
 
         btn_next = gui.Button("Next: Raycast")
         btn_next.set_on_clicked(lambda: self.set_stage(Stage(self.stage.value + 1)))
@@ -1409,25 +1409,43 @@ class MeshSamplingApp:
         self.recenter_mesh_pcd()
         self.set_stage(Stage.SAVE)
 
-    def _batch_sampling(self):
-        src_dir = self._open_source_folder_dialog()
-        if src_dir is None:
+    def start_batch_sampling(self):
+        self.src_dir = self._open_source_folder_dialog()
+        if self.src_dir is None:
+            print("No source path selected")
             return
+        
+        self._batch_sampling_thread = threading.Thread(target=self._batch_sampling_worker)
+        self._batch_sampling_thread.start()
+
+    def _batch_sampling_worker(self):
 
         # dst_dir = self._open_dest_folder_dialog()
         dst_dir = Path.cwd() / "reference_pcd"
         if dst_dir is None:
+            print("No destination path selected")
             return
 
-        stl_files = list(src_dir.glob("*.stl"))
+        stl_files = list(self.src_dir.glob("*.stl"))
         print(f"[INFO] Found {len(stl_files)} STL files")
-
+        
         for stl_path in stl_files:
-            print(f"[INFO] Processing {stl_path.name}")
-            self.file_path = stl_path
-            self._load_mesh_worker()
-            self.start_express_sampling()
-            pointcloud_to_ply(self.down_pcd, str(dst_dir / (stl_path.stem + ".ply")))
+            try:
+                print(f"[INFO] Processing {stl_path.name}")
+                self.file_path = stl_path
+                self._load_mesh_worker()
+                self._express_sampling_worker()
+                pointcloud_to_ply(self.down_pcd, str(dst_dir / (stl_path.stem + ".ply")))
+
+                if self.headless:
+                    continue
+                self.main_thread(lambda: self._clear_scene())
+                self.main_thread(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
+                self.scene.force_redraw()
+                self._reframe()
+            except Exception as e:
+                print(f"[ERROR] Failed to process {stl_path.name}: {e}")
+                continue
 
 # ===============================
 # Entry point
