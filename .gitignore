@@ -16,7 +16,7 @@ __pycache__/
 *.zip
 *.cgr
 *.stp
-.png
+*.png
 
 # Distribution / packaging
 .Python
