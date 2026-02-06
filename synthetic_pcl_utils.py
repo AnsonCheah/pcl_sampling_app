@@ -23,6 +23,17 @@ def add_outliers(pcd:o3d.geometry.PointCloud):
     pcd.points = o3d.utility.Vector3dVector(np.vstack([pts, out]))
     return pcd
 
+def apply_dropout(edge_strength, p_base=0.1, p_edge=0.4, gamma=2.5):
+    p = p_base + p_edge * (edge_strength ** gamma)
+    keep = np.random.rand(len(p)) > p
+    return keep
+
+def apply_depth_noise(t, edge_strength, depth_sigma, edge_gain=2.0):
+    sigma = depth_sigma * (1.0 + edge_gain * edge_strength)
+    sigma = np.nan_to_num(sigma, nan=depth_sigma)
+    t_noisy = t + np.random.normal(0.0, sigma)
+    return np.clip(t_noisy, 0.0, None)
+
 def jitter_ray_direction(dirs, sigma_angle=0.001):
     noise = np.random.normal(0, sigma_angle, dirs.shape)
     dirs_noisy = dirs + noise
@@ -43,74 +54,9 @@ def edge_dropout(edge_strength, p_base=0.02, p_edge=0.4, gamma=2.0):
     keep = rand > p_drop
     return keep, p_drop
 
-def generate_edge_outliers(
-    origins,
-    dirs,
-    edge_strength,
-    geom_ids,
-    geom_depth_ranges,
-    outlier_prob=0.15,
-    geom_id_outlier=-1,
-    target_geom_id=None
-):
-    """
-    Edge-aware outliers:
-    - Depth range sampled from target geometry when available
-    - Falls back to global depth range otherwise
-    """
-
-    N = len(origins)
-    p = outlier_prob * (0.75 + 0.25 * edge_strength)
-    use = np.random.rand(N) < p
-
-    if not np.any(use):
-        return None, None
-
-    origins_u = origins[use]
-    dirs_u = dirs[use]
-    geom_u = geom_ids[use]
-
-    if target_geom_id is not None:
-        mask = geom_u == target_geom_id
-        origins_u = origins_u[mask]
-        dirs_u = dirs_u[mask]
-        geom_u = geom_u[mask]
-
-    t_out = np.zeros(len(origins_u))
-    for i, gid in enumerate(geom_u):
-        if gid in geom_depth_ranges:
-            d_low, d_high = geom_depth_ranges[gid]
-
-        # Mixture sampling
-        if np.random.rand() < 0.6:
-            mu = 0.5 * (d_low + d_high)
-            sigma = 0.35 * (d_high - d_low)
-            t = np.random.normal(mu, sigma)
-        else:
-            t = np.random.uniform(d_low, d_high)
-
-        t_out[i] = np.clip(t, d_low, d_high)
-
-    pts_out = origins_u + t_out[:, None] * dirs_u
-    geom_out = np.full(len(pts_out), geom_id_outlier)
-    print(f"Generated {len(pts_out)} edge outliers")
-    return pts_out, geom_out
-
-def apply_dropout(edge_strength, p_base=0.1, p_edge=0.4, gamma=2.5):
-    p = p_base + p_edge * (edge_strength ** gamma)
-    keep = np.random.rand(len(p)) > p
-    return keep
-
-def apply_depth_noise(t, edge_strength, depth_sigma, edge_gain=2.0):
-    sigma = depth_sigma * (1.0 + edge_gain * edge_strength)
-    sigma = np.nan_to_num(sigma, nan=depth_sigma)
-    t_noisy = t + np.random.normal(0.0, sigma)
-    return np.clip(t_noisy, 0.0, None)
-
 def compute_edge_strength(depth_img):
     dz_dx = np.zeros_like(depth_img)
     dz_dy = np.zeros_like(depth_img)
-
     dz_dx[:, 1:-1] = np.abs(depth_img[:, 2:] - depth_img[:, :-2])
     dz_dy[1:-1, :] = np.abs(depth_img[2:, :] - depth_img[:-2, :])
 
@@ -125,7 +71,6 @@ def compute_geom_depth_ranges(t_visible, geom_ids_visible, margin_ratio=0.15):
     Returns dict: geom_id -> (depth_low, depth_high)
     """
     depth_ranges = {}
-
     for gid in np.unique(geom_ids_visible):
         if gid < 0:
             continue
@@ -137,18 +82,153 @@ def compute_geom_depth_ranges(t_visible, geom_ids_visible, margin_ratio=0.15):
         d_min = depths.min()
         d_max = depths.max()
         margin = margin_ratio * (d_max - d_min)
-
-        depth_ranges[int(gid)] = (
-            max(0.0, d_min - margin),
-            d_max + margin
-        )
+        depth_ranges[int(gid)] = (max(0.0, d_min - margin), d_max + margin)
 
     return depth_ranges
 
-def scene_render(meshes, cam_pos, proj_pos, look_at, fov,
-                 res_width, res_height,
-                 cam_grazing_cos_thresh=0.3,
-                 proj_grazing_cos_thresh=0.3):
+def compute_shadow_plane(mesh, cam_pos, margin=0.005):
+    """
+    Plane orthogonal to camera view direction,
+    placed just behind the mesh.
+    """
+
+    # View direction
+    mesh_center = mesh.get_center()
+    view_dir = mesh_center - cam_pos
+    view_dir /= np.linalg.norm(view_dir)
+
+    # Mesh vertices
+    verts = np.asarray(mesh.vertices)
+
+    # Project vertices onto view direction
+    proj = np.dot(verts - cam_pos, view_dir)
+
+    # Furthest visible point
+    max_depth = proj.max()
+
+    # Plane position (push slightly behind)
+    plane_point = cam_pos + (max_depth + margin) * view_dir
+
+    # Plane equation: n·x + d = 0
+    n = view_dir
+    d = -np.dot(n, plane_point)
+
+    return {
+        "normal": n,
+        "d": d,
+        "plane_point": plane_point,
+        "depth": max_depth + margin,
+    }
+
+def generate_edge_outliers(
+        origins, dirs, edge_strength, geom_ids, geom_depth_ranges, outlier_prob=0.5, 
+        geom_id_outlier=-1, target_geom_id=None, shadow_frac=0.6, shadow_plane=None, shadow_depth_jitter=0.001,
+):
+    """
+    Edge-aware outliers with shadow layer.
+
+    1) Generate edge-shadow outliers BEHIND target geometry
+    2) Generate remaining edge outliers using per-geometry depth ranges
+    """
+
+    N = len(origins)
+    if N == 0:
+        return None, None
+
+    # -------- Edge-biased ray selection --------
+    p = outlier_prob * (0.25 + 0.75 * edge_strength)
+    use = np.random.rand(N) < p
+
+    if not np.any(use):
+        return None, None
+
+    origins_u = origins[use]
+    dirs_u = dirs[use]
+    geom_u = geom_ids[use]
+
+    # -------- Restrict to target geometry if requested --------
+    if target_geom_id is not None:
+        target_mask = geom_u == target_geom_id
+        if not np.any(target_mask):
+            return None, None
+
+        origins_u = origins_u[target_mask]
+        dirs_u = dirs_u[target_mask]
+        geom_u = geom_u[target_mask]
+
+    M = len(origins_u)
+
+    # -------- Determine how many shadow rays --------
+    num_shadow = int(np.round(shadow_frac * M))
+    shadow_idx = np.random.choice(M, size=num_shadow, replace=False)
+
+    # Remaining rays
+    normal_idx = np.setdiff1d(np.arange(M), shadow_idx)
+
+    pts_all = []
+    geom_all = []
+
+    # ============================================================
+    # 1) SHADOW EDGE OUTLIERS
+    # ============================================================
+    if shadow_plane is not None:
+        n = shadow_plane["normal"]
+        d = shadow_plane["d"]
+
+        for i in shadow_idx:
+            o = origins_u[i]
+            r = dirs_u[i]
+
+            denom = np.dot(n, r)
+            if abs(denom) < 1e-6:
+                continue  # Ray parallel to plane
+
+            t_plane = -(np.dot(n, o) + d) / denom
+            if t_plane <= 0:
+                continue
+
+            # Small depth variation behind plane
+            t_shadow = t_plane * (1.0 + np.random.uniform(0.0, shadow_depth_jitter))
+
+            pt = o + t_shadow * r
+            pts_all.append(pt)
+            geom_all.append(geom_id_outlier)
+
+    # ============================================================
+    # 2) NORMAL EDGE OUTLIERS (remaining rays)
+    # ============================================================
+    for i in normal_idx:
+        gid = geom_u[i]
+
+        if gid not in geom_depth_ranges:
+            continue
+
+        d_low, d_high = geom_depth_ranges[gid]
+
+        # Mixture sampling
+        if np.random.rand() < 0.6:
+            mu = 0.5 * (d_low + d_high)
+            sigma = 0.35 * (d_high - d_low)
+            t = np.random.normal(mu, sigma)
+        else:
+            t = np.random.uniform(d_low, d_high)
+
+        t = np.clip(t, d_low, d_high)
+        pt = origins_u[i] + t * dirs_u[i]
+
+        pts_all.append(pt)
+        geom_all.append(geom_id_outlier)
+
+    if len(pts_all) == 0:
+        return None, None
+
+    pts_out = np.vstack(pts_all)
+    geom_out = np.asarray(geom_all, dtype=int)
+    print(f"Edge outliers: {len(geom_out)} (shadow={len(shadow_idx)}, normal={len(normal_idx)})")
+    return pts_out, geom_out
+
+def scene_render(meshes, cam_pos, proj_pos, look_at, fov, res_width, res_height, 
+                 cam_grazing_cos_thresh=0.3, proj_grazing_cos_thresh=0.3):
 
     # ---------- Scene ----------
     scene = o3d.t.geometry.RaycastingScene()
@@ -244,7 +324,7 @@ def scene_render(meshes, cam_pos, proj_pos, look_at, fov,
     }
 
 if __name__ == "__main__":
-    file_path = "mesh_raw/972703T000.STL"
+    file_path = "mesh_raw/96630MB000.STL"
     mesh = o3d.io.read_triangle_mesh(file_path)
     if mesh.is_empty():
         print("[WARN] Empty mesh")
@@ -266,6 +346,7 @@ if __name__ == "__main__":
     bbox = mesh.get_axis_aligned_bounding_box()
     bbox_corners = np.asarray(bbox.get_box_points())
     extent_min = bbox.get_extent().min()   # (dx, dy, dz) in world units
+    extent_max = bbox.get_extent().max()   # (dx, dy, dz) in world units
 
     num_targets =  6
     view_sphere = fibonacci_sphere(num_targets)
@@ -279,10 +360,11 @@ if __name__ == "__main__":
     max_occlusion_ratio = 0.3
     synthetic_targets = []
     synthetic_scene = []
-
+    depth_sigma = 0.0005
+    angular_sigma = 0.00005
     for i in range(num_targets):
         cam_pos, look_at, up = random_camera(view_sphere[i], 1.5)
-        proj_pos = projector_from_camera(cam_pos, look_at, baseline=0.3)
+        proj_pos = projector_from_camera(cam_pos, look_at, baseline=0.27)
         target_center = target_mesh.get_center()
         view_dir = (target_center - cam_pos)
         view_dir = view_dir / np.linalg.norm(view_dir)
@@ -315,7 +397,10 @@ if __name__ == "__main__":
         if len(target_geom_ids) != 1 or target_geom_ids[0] != 0:
             raise RuntimeError("Foreign id in target generation")
         target_geom_id = target_geom_ids[0]
-        target_pixels = len(geom_ids[geom_ids == target_geom_id])
+        # target_pixels = len(geom_ids[geom_ids == target_geom_id])
+        target_hit_mask = (geom_ids[visibility_mask] == target_geom_id)
+        visible_target_pcd = initial_render["points_exact"][target_hit_mask]
+        target_pixels = len(visible_target_pcd)
         print(f"target pixels: {target_pixels}")
 
         occluders = []
@@ -326,10 +411,9 @@ if __name__ == "__main__":
         occlusion_ratio = 0
         synthetic_occlusion = i>=(num_targets>>1)
         num_occluders = (0 if not synthetic_occlusion else 1)
-        max_trials = 1000
+        max_trials = 100
         for occ_idx in range(num_occluders):
             success = False
-
             for trial in range(max_trials):
                 occ = copy.deepcopy(target_mesh)
                 occ.rotate(random_rotation_matrix(), center=(0,0,0))
@@ -379,15 +463,10 @@ if __name__ == "__main__":
             if not success:
                 raise RuntimeError(f"Failed to generate occluder {occ_idx}")
 
-        if not synthetic_occlusion: # handles no occlusion
-            visible_target_pcd = initial_render["points_exact"]
-
         ############ Depth Noise ################
-        depth_sigma = 0.0005
         t_noisy = apply_depth_noise(t_hit, edge_visible, depth_sigma=depth_sigma, edge_gain=3.0)
 
         ############ Angular Noise ################
-        angular_sigma = 0.00005
         dirs_visible = ray_dirs[visible_hit_idx]
         dirs_noisy = dirs_visible + np.random.normal(0.0, angular_sigma, size=dirs_visible.shape)
         dirs_noisy /= np.linalg.norm(dirs_noisy, axis=1, keepdims=True)
@@ -397,40 +476,26 @@ if __name__ == "__main__":
         origins_kept = ray_origins[visible_hit_idx][keep_mask]
         dirs_kept = dirs_noisy[keep_mask]
         t_kept = t_noisy[keep_mask]
-        normals_kept = normals[keep_mask]
         geom_ids_kept = geom_ids[visibility_mask][keep_mask]
-        print(f"geom_ids_kept: {len(geom_ids_kept)}")
         points_final = origins_kept + t_kept[:, None] * dirs_kept
-        print(f"points_final: {len(points_final)}")
 
         ############ Edge Outliers ################
-        t_min = np.min(t_kept)
-        t_max = np.max(t_kept)
-        depth_margin = 0.15 * (t_max - t_min)
-        depth_low = max(0.0, t_min - depth_margin)
-        depth_high = t_max + depth_margin
-        edge_outlier_origins = ray_origins[invalid_hit_idx]
-        edge_outlier_dirs = ray_dirs[invalid_hit_idx]
-        edge_outlier_edge = edge_flat[invalid_hit_idx]
-        global_depth_range = (depth_low, depth_high)
-
         geom_depth_ranges = compute_geom_depth_ranges(t_kept, geom_ids_kept)
-        
+        shadow_plane = compute_shadow_plane(target_mesh, cam_pos, margin=0.005)
+
         geom_ids_img = np.full_like(hit_mask, fill_value=-1, dtype=int)
         geom_ids_img[hit_mask] = geom_ids
-        print(f"geom_ids_img: {np.unique(geom_ids_img)}")
         pts_out, geom_out = generate_edge_outliers(
             origins=ray_origins[invalid_hit_idx],
             dirs=ray_dirs[invalid_hit_idx],
             edge_strength=edge_flat[invalid_hit_idx],
-            geom_ids=geom_ids_img[invalid_hit_idx],  # FIXED
+            geom_ids=geom_ids_img[invalid_hit_idx],
             geom_depth_ranges=geom_depth_ranges,
-            global_depth_range=global_depth_range,
-            outlier_prob=0.15,
+            outlier_prob=0.5,
             geom_id_outlier=-1,
-            target_geom_id=target_geom_id
+            target_geom_id=target_geom_id,
+            shadow_plane=shadow_plane
         )
-
         target_mask = geom_ids_kept == target_geom_id
         points_all = [points_final[target_mask]]
         geom_all = [geom_ids_kept[target_mask]]
@@ -445,11 +510,9 @@ if __name__ == "__main__":
         geom_all = np.concatenate(geom_all)
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(points_all)
-        # self.visible_target_pcd = add_outliers(self.visible_target_pcd)
-        print(f"num point bef ds: {len(pcd.points)}")
+        pcd = add_outliers(pcd)
         pcd = pcd.voxel_down_sample(0.001)
-        print(f"num point aft ds: {len(pcd.points)}")
-        pcd.estimate_normals()
+        pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=0.005, max_nn=50))
         orient_normals_using_cameras(pcd, cam_pos)
         normalize_normals(pcd)
         validate_normals(pcd)

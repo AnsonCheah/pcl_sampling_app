@@ -59,6 +59,8 @@ class MeshSamplingApp:
         self.min_occlusion_ratio = 0.1
         self.max_occlusion_ratio = 0.3
         self.synthetic_targets = []
+        self.depth_sigma = 0.0005
+        self.angular_sigma = 0.00005
 
         if not self.headless:
             # === Scene widget ===
@@ -1187,7 +1189,7 @@ class MeshSamplingApp:
         dropout = 0.1
         for i in range(self.num_targets):
             cam_pos, look_at, up = random_camera(self.view_sphere[i], 1.5)
-            proj_pos = projector_from_camera(cam_pos, look_at, baseline=0.3)
+            proj_pos = projector_from_camera(cam_pos, look_at, baseline=0.27)
             target_center = self.target_mesh.get_center()
             view_dir = (target_center - cam_pos)
             view_dir = view_dir / np.linalg.norm(view_dir)
@@ -1204,12 +1206,12 @@ class MeshSamplingApp:
             initial_render = scene_render(scene_meshes, cam_pos, proj_pos, look_at, self.fov_deg, self.res_width, self.res_height)
             points_exact = initial_render["points_exact"]
             t_hit = initial_render["t_hit"]
-            normals = initial_render["normals"]
+            # normals = initial_render["normals"]
             geom_ids = initial_render["geom_ids_hit"]
             ray_origins = initial_render["ray_origins"]
             ray_dirs = initial_render["ray_dirs"]
             hit_mask = initial_render["hit_mask"]
-            depth_img = initial_render["depth_img"]
+            # depth_img = initial_render["depth_img"]
             edge_img = initial_render["edge_strength_img"]
             visible_hit_idx = initial_render["visible_hit_idx"]
             invalid_hit_idx = initial_render["invalid_hit_idx"]
@@ -1220,7 +1222,10 @@ class MeshSamplingApp:
             if len(target_geom_ids) != 1 or target_geom_ids[0] != 0:
                 raise RuntimeError("Foreign id in target generation")
             target_geom_id = target_geom_ids[0]
-            target_pixels = len(geom_ids[geom_ids == target_geom_id])
+            # target_pixels = len(geom_ids[geom_ids == target_geom_id])
+            target_hit_mask = (geom_ids[visibility_mask] == target_geom_id)
+            visible_target_pcd = initial_render["points_exact"][target_hit_mask]
+            target_pixels = len(visible_target_pcd)
             print(f"target pixels: {target_pixels}")
 
             occluders = []
@@ -1231,11 +1236,10 @@ class MeshSamplingApp:
             occlusion_ratio = 0
             self.synthetic_occlusion = i>=(self.num_targets>>1)
             num_occluders = (0 if not self.synthetic_occlusion else 1)
-            max_trials = 1000
+            max_trials = 100
             for occ_idx in range(num_occluders):
                 success = False
-
-                for trial in range(max_trials):
+                for _ in range(max_trials):
                     occ = copy.deepcopy(self.target_mesh)
                     occ.rotate(random_rotation_matrix(), center=(0,0,0))
                     right_offset = right * np.random.uniform(-1.5*target_radius, 1.5*target_radius)
@@ -1252,14 +1256,14 @@ class MeshSamplingApp:
                     # synthetic_scene[i] = test_scene
 
                     render = scene_render(test_scene, cam_pos, proj_pos, look_at, self.fov_deg, self.res_width, self.res_height)
-                    points_exact = render["points_exact"]
+                    # points_exact = render["points_exact"]
                     t_hit = render["t_hit"]
-                    normals = render["normals"]
+                    # normals = render["normals"]
                     geom_ids = render["geom_ids_hit"]
                     ray_origins = render["ray_origins"]
                     ray_dirs = render["ray_dirs"]
                     hit_mask = render["hit_mask"]
-                    depth_img = render["depth_img"]
+                    # depth_img = render["depth_img"]
                     edge_img = render["edge_strength_img"]
                     visible_hit_idx = render["visible_hit_idx"]
                     invalid_hit_idx = render["invalid_hit_idx"]
@@ -1284,17 +1288,12 @@ class MeshSamplingApp:
                 if not success:
                     raise RuntimeError(f"Failed to generate occluder {occ_idx}")
 
-            if not self.synthetic_occlusion: # handles no occlusion
-                visible_target_pcd = initial_render["points_exact"]
-
             ############ Depth Noise ################
-            depth_sigma = 0.0005
-            t_noisy = apply_depth_noise(t_hit, edge_visible, depth_sigma=depth_sigma, edge_gain=3.0)
+            t_noisy = apply_depth_noise(t_hit, edge_visible, depth_sigma=self.depth_sigma, edge_gain=3.0)
 
             ############ Angular Noise ################
-            angular_sigma = 0.00005
             dirs_visible = ray_dirs[visible_hit_idx]
-            dirs_noisy = dirs_visible + np.random.normal(0.0, angular_sigma, size=dirs_visible.shape)
+            dirs_noisy = dirs_visible + np.random.normal(0.0, self.angular_sigma, size=dirs_visible.shape)
             dirs_noisy /= np.linalg.norm(dirs_noisy, axis=1, keepdims=True)
 
             ############ Dropouts ################
@@ -1302,39 +1301,26 @@ class MeshSamplingApp:
             origins_kept = ray_origins[visible_hit_idx][keep_mask]
             dirs_kept = dirs_noisy[keep_mask]
             t_kept = t_noisy[keep_mask]
-            normals_kept = normals[keep_mask]
             geom_ids_kept = geom_ids[visibility_mask][keep_mask]
-            print(f"geom_ids_kept: {len(geom_ids_kept)}")
             points_final = origins_kept + t_kept[:, None] * dirs_kept
-            print(f"points_final: {len(points_final)}")
 
             ############ Edge Outliers ################
-            t_min = np.min(t_kept)
-            t_max = np.max(t_kept)
-            depth_margin = 0.15 * (t_max - t_min)
-            depth_low = max(0.0, t_min - depth_margin)
-            depth_high = t_max + depth_margin
-            edge_outlier_origins = ray_origins[invalid_hit_idx]
-            edge_outlier_dirs = ray_dirs[invalid_hit_idx]
-            edge_outlier_edge = edge_flat[invalid_hit_idx]
-            global_depth_range = (depth_low, depth_high)
-
             geom_depth_ranges = compute_geom_depth_ranges(t_kept, geom_ids_kept)
-            
+            shadow_plane = compute_shadow_plane(self.target_mesh, cam_pos, margin=0.005)
+
             geom_ids_img = np.full_like(hit_mask, fill_value=-1, dtype=int)
             geom_ids_img[hit_mask] = geom_ids
-            print(f"geom_ids_img: {np.unique(geom_ids_img)}")
             pts_out, geom_out = generate_edge_outliers(
                 origins=ray_origins[invalid_hit_idx],
                 dirs=ray_dirs[invalid_hit_idx],
                 edge_strength=edge_flat[invalid_hit_idx],
-                geom_ids=geom_ids_img[invalid_hit_idx],  # FIXED
+                geom_ids=geom_ids_img[invalid_hit_idx],
                 geom_depth_ranges=geom_depth_ranges,
-                outlier_prob=0.15,
+                outlier_prob=0.5,
                 geom_id_outlier=-1,
-                target_geom_id=target_geom_id
+                target_geom_id=target_geom_id,
+                shadow_plane=shadow_plane
             )
-
             target_mask = geom_ids_kept == target_geom_id
             points_all = [points_final[target_mask]]
             geom_all = [geom_ids_kept[target_mask]]
@@ -1349,11 +1335,9 @@ class MeshSamplingApp:
             geom_all = np.concatenate(geom_all)
             pcd = o3d.geometry.PointCloud()
             pcd.points = o3d.utility.Vector3dVector(points_all)
-            # self.visible_target_pcd = add_outliers(self.visible_target_pcd)
-            print(f"num point bef ds: {len(pcd.points)}")
+            # pcd = add_outliers(pcd)
             pcd = pcd.voxel_down_sample(0.001)
-            print(f"num point aft ds: {len(pcd.points)}")
-            pcd.estimate_normals()
+            pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=0.005, max_nn=50))
             orient_normals_using_cameras(pcd, cam_pos)
             normalize_normals(pcd)
             validate_normals(pcd)
