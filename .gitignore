@@ -10,6 +10,14 @@ __pycache__/
 # C extensions
 *.so
 
+# input output formats
+*.stl
+*.ply
+*.zip
+*.cgr
+*.stp
+.png
+
 # Distribution / packaging
 .Python
 build/
@@ -198,10 +206,5 @@ $RECYCLE.BIN/
 
 # Windows shortcuts
 *.lnk
-*.stl
-*.ply
-*.zip
-*.cgr
-*.stp
 
 # End of https://www.toptal.com/developers/gitignore/api/windows,python
