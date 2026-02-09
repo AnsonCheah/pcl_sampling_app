@@ -20,37 +20,6 @@ def look_at(camera_pos, target=np.array([0, 0, 0]), up=np.array([0, 0, 1])):
     extrinsic[:3, 3] = t
     return extrinsic
 
-def project_extent(points, cam_pos, cam_dir, up):
-    right = np.cross(cam_dir, up)
-    right /= np.linalg.norm(right)
-    up = np.cross(right, cam_dir)
-
-    rel = points - cam_pos
-    x = rel @ right
-    y = rel @ up
-    return np.max(np.abs(x)), np.max(np.abs(y))
-
-def fit_mesh_in_view_obb(mesh, cam_pos, ctr, margin=1.2):
-    obb = mesh.get_oriented_bounding_box()
-    corners = np.asarray(obb.get_box_points())
-
-    cam_dir = (np.array([0, 0, 0]) - cam_pos)
-    cam_dir /= np.linalg.norm(cam_dir)
-
-    up = np.array([0, 0, 1])
-    if abs(np.dot(cam_dir, up)) > 0.95:
-        up = np.array([0, 1, 0])
-
-    max_x, max_y = project_extent(corners, cam_pos, cam_dir, up)
-
-    dist = np.linalg.norm(cam_pos)
-
-    # Empirical zoom conversion (legacy Open3D quirk)
-    zoom = margin * max(max_x, max_y) / dist
-    # zoom = np.clip(zoom, 0.1, 0.7)
-
-    ctr.set_zoom(zoom)
-
 if __name__=="__main__":
     file_path = "400_97703GI400.stl"
     mesh = o3d.io.read_triangle_mesh(file_path)

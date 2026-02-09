@@ -3,7 +3,8 @@ import struct
 import open3d as o3d
 from scipy.spatial.transform import Rotation as R
 import matplotlib.pyplot as plt
-
+from tkinter import Tk, filedialog
+from pathlib import Path
 
 def random_rotation_matrix():
     return R.random().as_matrix()
@@ -320,6 +321,29 @@ end_header
         f.write(struct.pack("<i", 480))  # viewporty
         f.write(struct.pack("<f", 0.0))  # k1
         f.write(struct.pack("<f", 0.0))  # k2
+
+# ===============================
+# File dialogs
+# ===============================
+
+def save_ply_dialog(default_name=None):
+    Tk().withdraw()
+    default_name = f"{'output' if not default_name else default_name}.ply"
+
+    path = filedialog.asksaveasfilename(
+        defaultextension=".ply",
+        initialdir=Path.cwd(), 
+        initialfile=default_name,
+        filetypes=[("PLY files", "*.ply")]
+    )
+
+    return Path(path) if path else None
+
+def open_source_folder_dialog():
+    Tk().withdraw()
+    path = filedialog.askdirectory(initialdir=Path.cwd(), title="Select source folder (STL files)")
+    return Path(path) if path else None
+
 
 def meshes_intersect(mesh1, mesh2):
     aabb1 = mesh1.get_axis_aligned_bounding_box()
