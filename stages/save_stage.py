@@ -15,8 +15,8 @@ class SaveStage(BaseStage):
         self.btn_save = self.register_widget(gui.Button("Export Point Cloud"))
         self.btn_save.set_on_clicked(self.start)
 
-        # self.btn_next = gui.Button("Next: Synthetic Target")
-        # self.btn_next.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value + 1)))
+        self.btn_next = self.register_widget(gui.Button("Next: Synthetic Target"))
+        self.btn_next.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value + 1)))
         self.btn_back = self.register_widget(gui.Button("Back: Downsample"))
         self.btn_back.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value - 1)))
 
@@ -32,7 +32,7 @@ class SaveStage(BaseStage):
         v.add_child(gui.Label(""))
         v.add_child(gui.Label(""))
         v.add_child(self.btn_back)
-        # v.add_child(self.btn_next)
+        v.add_child(self.btn_next)
         v.add_child(self.btn_restart)
 
         print("loaded save panel")
@@ -45,16 +45,13 @@ class SaveStage(BaseStage):
             self.app.main_thread(lambda: self.app._clear_scene())
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry("down_pcd", self.app.down_pcd, self.app.default_point_material))
             self.app.scene.force_redraw()
-            # self.app.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SAVE], True))
         self.enable_widgets()
 
     def worker(self):
         if not self.app.headless:
             if self.app.down_pcd is None:
-                # self.app.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SAVE], True))
                 print("[WARN] No pointcloud to save")
                 return
-            # self.app.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SAVE], False))
         try:
             folder_path = Path.cwd() / "reference_pcd"
             folder_path.mkdir(parents=True, exist_ok=True)
@@ -64,8 +61,6 @@ class SaveStage(BaseStage):
         except Exception as e:
             print(f"[ERROR] Failed to save PLY: {e}")
             return
-        # finally:
-        #     self.app.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SAVE], True))
 
     def reset(self):
         pass

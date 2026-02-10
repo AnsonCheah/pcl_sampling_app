@@ -36,7 +36,7 @@ class CropStage(BaseStage):
         self.btn_reset = self.register_widget(gui.Button("Reset Crop"), lambda: len(self.app.cropped_pcd.points)<len(self.app.raw_pcd.points))
         self.btn_reset.set_on_clicked(self.reset)
 
-        self.btn_next = self.register_widget(gui.Button("Next: Downsample"))
+        self.btn_next = self.register_widget(gui.Button("Next: Downsample"), lambda: self.app.cropped_pcd is not None)
         self.btn_next.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value + 1)))
         self.btn_back = self.register_widget(gui.Button("Back: Raycast"))
         self.btn_back.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value - 1)))
@@ -91,12 +91,6 @@ class CropStage(BaseStage):
             print("[INFO] Box selection disabled.")
             self.tool_mode = ToolMode.NONE
             self._clear_selection_rectangle()
-
-    def _inside_rect(self, x, y):
-        """Check if a point is inside the selection rectangle"""
-        xmin, xmax = sorted([self.drag_start[0], self.drag_end[0]])
-        ymin, ymax = sorted([self.drag_start[1], self.drag_end[1]])
-        return xmin <= x <= xmax and ymin <= y <= ymax
     
     def project_world_to_screen(self, points):
         """Project 3D world points to 2D screen coordinates"""

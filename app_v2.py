@@ -8,6 +8,7 @@ from stages.raycast_stage import RaycastStage
 from stages.crop_stage import CropStage
 from stages.downsample_stage import DownsampleStage
 from stages.save_stage import SaveStage
+from stages.synthetic_stage import SyntheticStage
 import threading
 from pathlib import Path
 from utilities import pointcloud_to_ply, open_source_folder_dialog
@@ -77,7 +78,7 @@ class MeshSamplingApp:
                 Stage.CROP: CropStage(self),
                 Stage.DOWNSAMPLE: DownsampleStage(self),
                 Stage.SAVE: SaveStage(self),
-                # Stage.SYNTHETIC: SyntheticStage(self),
+                Stage.SYNTHETIC: SyntheticStage(self),
             }
             for stage_class in self.stages.values():
                 stage_class.panel.visible = False
@@ -174,9 +175,6 @@ class MeshSamplingApp:
     def main_thread(self, fn):
         gui.Application.instance.post_to_main_thread(self.window, fn)
 
-    def enable_button(self, button, enabled:bool):
-        button.enabled = enabled
-        
     # ===============================
     # Keybindings
     # ===============================
@@ -215,6 +213,7 @@ class MeshSamplingApp:
         self.stages[Stage.DOWNSAMPLE].worker()
         self.stages[Stage.DOWNSAMPLE].recenter_mesh_pcd()
         self.set_stage(Stage.SAVE)
+        self.hide_progress()
 
     def start_batch_sampling(self):
         self.src_dir = open_source_folder_dialog()
