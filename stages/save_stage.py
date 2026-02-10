@@ -12,24 +12,16 @@ class SaveStage(BaseStage):
     def build_panel(self):
         v = gui.Vert(4)
 
-        self.btn_save = gui.Button("Export Point Cloud")
+        self.btn_save = self.register_widget(gui.Button("Export Point Cloud"))
         self.btn_save.set_on_clicked(self.start)
 
         # self.btn_next = gui.Button("Next: Synthetic Target")
         # self.btn_next.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value + 1)))
-        self.btn_back = gui.Button("Back: Downsample")
+        self.btn_back = self.register_widget(gui.Button("Back: Downsample"))
         self.btn_back.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value - 1)))
 
-        self.btn_restart = gui.Button("Restart")
+        self.btn_restart = self.register_widget(gui.Button("Restart"))
         self.btn_restart.set_on_clicked(lambda: self.app._restart())
-        # self.worker_buttons[Stage.SAVE] = self.btn_save
-
-        for w in [
-            self.btn_save,
-            self.btn_back,
-            self.btn_restart,
-        ]:
-            self.register_widget(w)
 
         v.add_child(gui.Label("Export PCL"))
         v.add_child(gui.Label(""))
@@ -46,7 +38,7 @@ class SaveStage(BaseStage):
         print("loaded save panel")
         return v
         
-    def init(self):
+    def _refresh_ui(self):
         if self.app.headless:
             return
         if self.app.down_pcd != None:
@@ -54,6 +46,7 @@ class SaveStage(BaseStage):
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry("down_pcd", self.app.down_pcd, self.app.default_point_material))
             self.app.scene.force_redraw()
             # self.app.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.SAVE], True))
+        self.enable_widgets()
 
     def worker(self):
         if not self.app.headless:

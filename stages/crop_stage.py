@@ -20,7 +20,6 @@ class CropStage(BaseStage):
                 
         self.lines = [[0, 1],[1, 2],[2, 3],[3, 0]]
         self.line_set = o3d.geometry.LineSet()
-
         self.rect_material = rendering.MaterialRecord()
         self.rect_material.shader = "unlitLine"
         self.rect_material.line_width = 3.0
@@ -29,27 +28,18 @@ class CropStage(BaseStage):
     def build_panel(self):
         v = gui.Vert(4)
         
-        self.btn_box_select = gui.Button("Box Select")
+        self.btn_box_select = self.register_widget(gui.Button("Box Select"))
         self.btn_box_select.toggleable = True
         self.btn_box_select.set_on_clicked(self._enable_box_selection)
-        self.delete_btn = gui.Button("Delete Selected Points")
+        self.delete_btn = self.register_widget(gui.Button("Delete Selected Points"), lambda: len(self.selected_indices)>0)
         self.delete_btn.set_on_clicked(self.start)
-        self.btn_reset = gui.Button("Reset Crop")
+        self.btn_reset = self.register_widget(gui.Button("Reset Crop"), lambda: len(self.app.cropped_pcd.points)<len(self.app.raw_pcd.points))
         self.btn_reset.set_on_clicked(self.reset)
 
-        self.btn_next = gui.Button("Next: Downsample")
+        self.btn_next = self.register_widget(gui.Button("Next: Downsample"))
         self.btn_next.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value + 1)))
-        self.btn_back = gui.Button("Back: Raycast")
+        self.btn_back = self.register_widget(gui.Button("Back: Raycast"))
         self.btn_back.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value - 1)))
-
-        for w in [
-            self.btn_box_select,
-            self.delete_btn,
-            self.btn_reset,
-            self.btn_next,
-            self.btn_back,
-        ]:
-            self.register_widget(w)
 
         v.add_child(gui.Label("Crop Point Cloud"))
         v.add_child(gui.Label(""))
@@ -65,49 +55,33 @@ class CropStage(BaseStage):
 
         return v
 
-    def init(self):
-        self.selected_indices = []
+    def _refresh_ui(self):
         if self.app.headless:
             return
         self._clear_selection_rectangle()
         self.app.main_thread(lambda: self.app._clear_scene())
-        self.app.main_thread(lambda: self.app.scene.scene.add_geometry("crop_pcd", self.app.cropped_pcd, self.app.default_point_material))
+        if self.selected_pcd is None:
+            self.app.main_thread(lambda: self.app.scene.scene.add_geometry("crop_pcd", self.app.cropped_pcd, self.app.default_point_material))
+        else:
+            self.app.main_thread(lambda: self.app.scene.scene.add_geometry("selected", self.selected_pcd, self.app.overlay_material))
+            self.app.main_thread(lambda: self.app.scene.scene.add_geometry("non selected", self.non_selected_pcd, self.app.default_point_material))
         self.app.scene.force_redraw()
-        print(f"[CROP] done init")
+        self.enable_widgets()
 
     def reset(self):
         self.app.down_pcd = None
         self.app.cropped_pcd = copy.deepcopy(self.app.raw_pcd)
-        self._clear_selection_rectangle()
-        self.init()
-
-    def _select_points_screen_space(self):
-        valid_idx, screen_pts = self.project_world_to_screen(np.asarray(self.app.cropped_pcd.points))
-        selected = []
-        for i, (x, y) in zip(valid_idx, screen_pts):
-            selected.append(i) if self._inside_rect(x, y) else None
-        print(f"[INFO] Selected {len(selected)} points")
-        self.selected_indices = selected
-
-        selection_mask = np.ones(len(self.app.cropped_pcd.points), dtype=bool)
-        selection_mask[selected] = False
-        self.selected_pcd = mask_point_cloud(self.app.cropped_pcd, ~selection_mask)
-        self.non_selected_pcd = mask_point_cloud(self.app.cropped_pcd, selection_mask)
-
-        self.app.main_thread(lambda: self.app._clear_scene())
-        self.app.main_thread(lambda: self.app.scene.scene.add_geometry("selected", self.selected_pcd, self.app.overlay_material))
-        self.app.main_thread(lambda: self.app.scene.scene.add_geometry("non selected", self.non_selected_pcd, self.app.default_point_material))
-        self.app.scene.force_redraw()
+        self._refresh_ui()
 
     def worker(self):
-        """
-        Deletes selected points from pointcloud
-        """
+        """Deletes selected points from pointcloud"""
         mask = np.ones(len(self.app.cropped_pcd.points), dtype=bool)
         mask[self.selected_indices] = False
         self.app.cropped_pcd = mask_point_cloud(self.app.cropped_pcd, mask)
+        self.selected_indices = []
+        self.selected_pcd = None
+        self.non_selected_pcd = None
         print(f"[INFO] Deleted selected {len(self.selected_indices)} points. Remaining points: {len(self.app.cropped_pcd.points)}")
-        self._clear_selection_rectangle()
 
     def _enable_box_selection(self):
         if self.btn_box_select.is_on:
@@ -307,19 +281,12 @@ class CropStage(BaseStage):
         
         print(f"[INFO] Selected {len(selected)} points")
         self.selected_indices = selected
-
-        # Create masks (vectorized)
         selection_mask = np.ones(len(self.app.cropped_pcd.points), dtype=bool)
         selection_mask[selected] = False
         
-        selected_pcd = mask_point_cloud(self.app.cropped_pcd, ~selection_mask)
-        non_selected_pcd = mask_point_cloud(self.app.cropped_pcd, selection_mask)
-
-        # Update UI 
-        self.app.main_thread(lambda: self.app._clear_scene())
-        self.app.main_thread(lambda: self.app.scene.scene.add_geometry("selected", selected_pcd, self.app.overlay_material))
-        self.app.main_thread(lambda: self.app.scene.scene.add_geometry("non selected", non_selected_pcd, self.app.default_point_material))
-        self.app.scene.force_redraw()
+        self.selected_pcd = mask_point_cloud(self.app.cropped_pcd, ~selection_mask)
+        self.non_selected_pcd = mask_point_cloud(self.app.cropped_pcd, selection_mask)
+        self._refresh_ui()
 
     def _draw_selection_rectangle(self):
         """Draw a live rectangle overlay during box selection"""
@@ -352,7 +319,6 @@ class CropStage(BaseStage):
     
     def _on_mouse_event(self, event):
         if self.tool_mode != ToolMode.BOX_SELECT:
-            print(f"self tool mode: {self.tool_mode}")
             return o3d.visualization.gui.Widget.EventCallbackResult.IGNORED
         
         if event.type == o3d.visualization.gui.MouseEvent.Type.BUTTON_DOWN:

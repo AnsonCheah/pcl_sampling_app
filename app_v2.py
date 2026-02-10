@@ -8,6 +8,9 @@ from stages.raycast_stage import RaycastStage
 from stages.crop_stage import CropStage
 from stages.downsample_stage import DownsampleStage
 from stages.save_stage import SaveStage
+import threading
+from pathlib import Path
+from utilities import pointcloud_to_ply, open_source_folder_dialog
 
 class MeshSamplingApp:
 
@@ -100,8 +103,13 @@ class MeshSamplingApp:
         self.stage = stage
         for s in self.stages.values():
             s.panel.visible = (s is self.stages[stage])
+            for w in s.widgets:
+                if hasattr(w.widget, "toggleable") and w.widget.toggleable:
+                    w.widget.is_on = False
+        
         self.window.set_needs_layout()
-        self.stages[stage].init()
+        self.stages[stage]._refresh_ui()
+        self.stages[stage].enable_widgets()
         self._update_title()
 
     def _on_layout(self, layout_context):
@@ -194,11 +202,64 @@ class MeshSamplingApp:
             self.stages[self.stage]._on_mouse_event(event)
         return o3d.visualization.gui.Widget.EventCallbackResult.IGNORED
 
+    # ===============================
+    # Express Handler
+    # ===============================
+    def start_express_sampling(self):
+        self._express_sampling_thread = threading.Thread(target=self._express_sampling_worker)
+        self._express_sampling_thread.start()
+
+    def _express_sampling_worker(self):
+        self.stages[Stage.RAYCAST].worker()
+        self.down_pcd=self.raw_pcd
+        self.stages[Stage.DOWNSAMPLE].worker()
+        self.stages[Stage.DOWNSAMPLE].recenter_mesh_pcd()
+        self.set_stage(Stage.SAVE)
+
+    def start_batch_sampling(self):
+        self.src_dir = open_source_folder_dialog()
+        if self.src_dir is None:
+            print("No source path selected")
+            return
+        
+        self._batch_sampling_thread = threading.Thread(target=self._batch_sampling_worker)
+        self._batch_sampling_thread.start()
+
+    def _batch_sampling_worker(self):
+        dst_dir = Path.cwd() / "reference_pcd"
+        if dst_dir is None:
+            print("No destination path selected")
+            return
+
+        stl_files = list(self.src_dir.glob("*.stl"))
+        print(f"[INFO] Found {len(stl_files)} STL files")
+        
+        for stl_path in stl_files:
+            try:
+                print(f"[INFO] Processing {stl_path.name}")
+                self.stages[Stage.IMPORT_MESH].file_path = stl_path
+                self.stages[Stage.IMPORT_MESH].worker()
+                self._express_sampling_worker()
+                pointcloud_to_ply(self.down_pcd, str(dst_dir / (stl_path.stem + ".ply")))
+
+                if self.headless:
+                    continue
+                self.main_thread(lambda: self._clear_scene())
+                self.main_thread(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
+                self.scene.force_redraw()
+                self._reframe()
+            except Exception as e:
+                print(f"[ERROR] Failed to process {stl_path.name}: {e}")
+                continue
+
 if __name__ == "__main__":
-    try: 
-        gui.Application.instance.initialize()
-        app = MeshSamplingApp()
-        gui.Application.instance.run()
-    except Exception as e:
-        print(f"[FATAL] Unhandled exception: {e}")
-        exit()
+    gui.Application.instance.initialize()
+    app = MeshSamplingApp()
+    gui.Application.instance.run()
+    # try: 
+    #     gui.Application.instance.initialize()
+    #     app = MeshSamplingApp()
+    #     gui.Application.instance.run()
+    # except Exception as e:
+    #     print(f"[FATAL] Unhandled exception: {e}")
+    #     exit()

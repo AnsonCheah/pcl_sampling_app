@@ -16,30 +16,19 @@ class DownsampleStage(BaseStage):
     def build_panel(self):
         v = gui.Vert(4)
         
-        self.adaptive_checkbox = gui.Checkbox("Adaptive sampling")
+        self.adaptive_checkbox = self.register_widget(gui.Checkbox("Adaptive sampling"))
         self.adaptive_checkbox.checked = self.use_adaptive
-        self.btn_downsample = gui.Button("Downsample")
+        self.btn_downsample = self.register_widget(gui.Button("Downsample"))
         self.btn_downsample.set_on_clicked(self.start)
-        self.btn_recenter = gui.Button("Recenter Point Cloud")
+        self.btn_recenter = self.register_widget(gui.Button("Recenter Point Cloud"), lambda: self.app.down_pcd is not None)
         self.btn_recenter.set_on_clicked(self.recenter_mesh_pcd)
 
-        self.btn_reset = gui.Button("Restart Downsample")
+        self.btn_reset = self.register_widget(gui.Button("Restart Downsample"), lambda: self.app.down_pcd is not None)
         self.btn_reset.set_on_clicked(self.reset)
-        self.btn_next = gui.Button("Next: Save")
+        self.btn_next = self.register_widget(gui.Button("Next: Save"), lambda: self.app.down_pcd is not None)
         self.btn_next.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value + 1)))
-        # self.worker_buttons[Stage.DOWNSAMPLE] = self.btn_downsample
-        # self.next_stage_buttons[Stage.DOWNSAMPLE] = self.btn_next
-        self.btn_back = gui.Button("Back: Crop")
+        self.btn_back = self.register_widget(gui.Button("Back: Crop"))
         self.btn_back.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value - 1)))
-
-        for w in [
-            self.adaptive_checkbox,
-            self.btn_downsample,
-            self.btn_reset,
-            self.btn_next,
-            self.btn_back,
-        ]:
-            self.register_widget(w)
 
         v.add_child(gui.Label("Downsampling"))
         v.add_child(gui.Label(""))
@@ -55,7 +44,7 @@ class DownsampleStage(BaseStage):
 
         return v
         
-    def init(self): 
+    def _refresh_ui(self): 
         if self.app.headless:
             return       
 
@@ -66,18 +55,15 @@ class DownsampleStage(BaseStage):
             self.app.main_thread(lambda: self.app._clear_scene())
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry("cropped_pcd", self.app.cropped_pcd, self.app.default_point_material))
         self.app.scene.force_redraw()
-        # self.app.main_thread(lambda: self.app.enable_button(self.worker_buttons[Stage.DOWNSAMPLE], True))
-        # self.app.main_thread(lambda: self.app.enable_button(self.next_stage_buttons[Stage.DOWNSAMPLE], (self.app.down_pcd != None)))
-        # self.app.main_thread(lambda: self.app.enable_button(self.btn_recenter, True))
+        self.enable_widgets()
 
     def reset(self):
         self.app.down_pcd = None 
-        self.init()
+        self._refresh_ui()
 
     def worker(self):
         if not self.app.headless:
             self.use_adaptive = self.adaptive_checkbox.checked
-            # self.app.main_thread(lambda: self.app.enable_button(self.worker_buttons[Stage.DOWNSAMPLE], False))
             self.app.show_progress("Downsampling point cloud...")
         if self.app.cropped_pcd is None:
             print("cropped pcd is none")
@@ -87,7 +73,7 @@ class DownsampleStage(BaseStage):
         self.voxel_size = np.round(np.clip((bbox.volume() / 3), 0.001, 0.005), 4)
         self.adaptive_voxel_downsample() if self.use_adaptive else self.uniform_voxel_downsample()
         print(f"[INFO] Downsampled {self.voxel_size * 1000}mm from {len(self.app.cropped_pcd.points)} to {len(self.app.down_pcd.points)} points")
-        self.init()
+        self._refresh_ui()
 
     def uniform_voxel_downsample(self):
         self.app.down_pcd = normalize_normals(self.app.cropped_pcd.voxel_down_sample(self.voxel_size))
@@ -130,13 +116,11 @@ class DownsampleStage(BaseStage):
     def recenter_mesh_pcd(self):
         if self.app.cropped_pcd == None:
             return
-        # if not self.app.headless:
-            # self.app.main_thread(lambda: self.app.enable_button(self.btn_recenter, False))
         T = pcd_geocenter(self.app.cropped_pcd)
         if self.app.down_pcd != None:
             self.app.down_pcd.transform(T)
         self.app.target_mesh.transform(T)
         self.app.raw_pcd.transform(T)
         self.app.cropped_pcd.transform(T)
-        self.init()
+        self._refresh_ui()
         print("recentered pointcloud")

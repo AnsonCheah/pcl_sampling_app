@@ -249,7 +249,7 @@ class MeshSamplingApp:
         path = filedialog.askdirectory(initialdir=Path.cwd(), title="Select source folder (STL files)")
         return Path(path) if path else None
 
-    def _open_dest_folder_dialog(self):
+    def open_dest_folder_dialog(self):
         Tk().withdraw()
         path = filedialog.askdirectory(initialdir=Path.cwd(), title="Select destination folder (PLY output)")
         return Path(path) if path else None

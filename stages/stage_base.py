@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from stages.widget_base import WidgetBinding
 import threading
 
 class BaseStage(ABC):
@@ -22,7 +23,7 @@ class BaseStage(ABC):
         pass
 
     @abstractmethod
-    def init(self):
+    def _refresh_ui(self):
         """Called when entering stage or refreshing scene"""
         pass
 
@@ -69,24 +70,40 @@ class BaseStage(ABC):
         pass
 
     def _on_worker_done(self):
-        self.enable_widgets()
         self.app.hide_progress()
-        self.init()
+        self._refresh_ui()
+        self.enable_widgets()
 
     # -------------------------
     # Widget control
     # -------------------------
 
-    def register_widget(self, widget):
-        self.widgets.append(widget)
+    def register_widget(self, widget, enabled_if=lambda: True):
+        """
+        Register a widget and optionally its enable condition.
+        """
+        self.widgets.append(WidgetBinding(widget, enabled_if))
+        return widget
+
+    def enable_widgets(self):
+        """
+        Re-evaluate all widget enable conditions.
+        Must be called from main thread.
+        """
+        for binding in self.widgets:
+            try:
+                binding.widget.enabled = bool(binding.enabled_if())
+            except Exception as e:
+                print(f"[UI] Condition failed: {e}")
+                binding.widget.enabled = False
 
     def disable_widgets(self):
         for w in self.widgets:
             w.enabled = False
 
-    def enable_widgets(self, widget=[]):
-        for w in self.widgets:
-            w.enabled = True
+    # def enable_widgets(self, widget=[]):
+    #     for w in self.widgets:
+    #         w.enabled = True
     
     def _on_key(self,event):
         pass

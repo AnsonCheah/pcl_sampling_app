@@ -15,38 +15,29 @@ class ImportMeshStage(BaseStage):
         v = gui.Vert(4)
         title = gui.Label("Import Mesh")
         
-        self.btn_load = gui.Button("Load STL")
+        self.btn_load = self.register_widget(gui.Button("Load STL"))
         self.btn_load.set_on_clicked(lambda: self.start(run_on_main=True))
-
-        self.btn_reset = gui.Button("Clear Mesh")
+        self.btn_reset = self.register_widget(gui.Button("Clear Mesh"), enabled_if=lambda: self.app.target_mesh is not None)
         self.btn_reset.set_on_clicked(self.reset)
 
         # self.btn_express = gui.Button("Express Sampling")
-        # self.btn_express.set_on_clicked(self.app.start_express_sampling)
+        self.btn_express = self.register_widget(gui.Button("Express Sampling"), enabled_if=lambda: self.app.target_mesh is not None)
+        self.btn_express.set_on_clicked(self.app.start_express_sampling)
 
         # self.btn_batch = gui.Button("Batch Sampling")
-        # self.btn_batch.set_on_clicked(self.app.start_batch_sampling)
+        self.btn_batch = self.register_widget(gui.Button("Batch Sampling"))
+        self.btn_batch.set_on_clicked(self.app.start_batch_sampling)
 
-        self.btn_next = gui.Button("Next: Raycast")
+        self.btn_next = self.register_widget(gui.Button("Next: Raycast"), enabled_if=lambda: self.app.target_mesh is not None)
         self.btn_next.set_on_clicked(lambda: self.app.set_stage(Stage.RAYCAST))
-
-        # Register widgets for auto enable/disable
-        for w in [
-            self.btn_load,
-            self.btn_reset,
-            # self.btn_express,
-            # self.btn_batch,
-            self.btn_next,
-        ]:
-            self.register_widget(w)
 
         v.add_child(title)
         v.add_child(gui.Label(""))
         v.add_child(self.btn_load)
         v.add_child(self.btn_reset)
         v.add_child(gui.Label(""))
-        # v.add_child(self.btn_express)
-        # v.add_child(self.btn_batch)
+        v.add_child(self.btn_express)
+        v.add_child(self.btn_batch)
         # v.add_child(gui.Label(""))
         # v.add_child(gui.Label(""))
         v.add_child(self.btn_next)
@@ -54,7 +45,7 @@ class ImportMeshStage(BaseStage):
         print(f"[Import Mesh] panel loaded")
         return v
 
-    def init(self):
+    def _refresh_ui(self):
         """Refresh scene and button states"""
         if self.app.headless:
             print("headless, skipped")
@@ -65,12 +56,7 @@ class ImportMeshStage(BaseStage):
         if self.app.target_mesh is not None:
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry("mesh", self.app.target_mesh, self.app.default_material))
             self.app.main_thread(self.app._reframe)
-
-        # Button states
-        # has_mesh = self.app.target_mesh is not None
-        # self.btn_next.enabled = has_mesh
-        # self.btn_express.enabled = has_mesh
-        # self.btn_batch.enabled = has_mesh
+        self.enable_widgets()
 
     def reset(self):
         """Clear mesh-related data"""
@@ -80,7 +66,7 @@ class ImportMeshStage(BaseStage):
         self.app.down_pcd = None
         self.app.bbox_corners = None
 
-        self.init()
+        self._refresh_ui()
 
     # ===============================
     # Worker

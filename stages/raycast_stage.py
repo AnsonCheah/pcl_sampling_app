@@ -21,35 +21,25 @@ class RaycastStage(BaseStage):
 
         v.add_child(gui.Label("Raycasting"))
 
-        self.camera_distance_slider = gui.Slider(gui.Slider.DOUBLE)
+        self.camera_distance_slider = self.register_widget(gui.Slider(gui.Slider.DOUBLE))
         self.camera_distance_slider.set_limits(0.5, 3.0)
         self.camera_distance_slider.double_value = 1.5
 
-        self.num_views_slider = gui.Slider(gui.Slider.INT)
+        self.num_views_slider = self.register_widget(gui.Slider(gui.Slider.INT))
         self.num_views_slider.set_limits(4, 100)
         self.num_views_slider.int_value = 20
 
-        self.btn_raycast = gui.Button("Raycast")
+        self.btn_raycast = self.register_widget(gui.Button("Raycast"))
         self.btn_raycast.set_on_clicked(self.start)
 
-        self.btn_reset = gui.Button("Clear Raycast")
+        self.btn_reset = self.register_widget(gui.Button("Clear Raycast"), lambda: self.app.raw_pcd is not None)
         self.btn_reset.set_on_clicked(self.reset)
 
-        self.btn_next = gui.Button("Next: Crop")
+        self.btn_next = self.register_widget(gui.Button("Next: Crop"), lambda: self.app.raw_pcd is not None)
         self.btn_next.set_on_clicked(lambda: self.app.set_stage(Stage.CROP))
 
-        self.btn_back = gui.Button("Back: Import Mesh")
+        self.btn_back = self.register_widget(gui.Button("Back: Import Mesh"))
         self.btn_back.set_on_clicked(lambda: self.app.set_stage(Stage.IMPORT_MESH))
-
-        for w in [
-            self.camera_distance_slider,
-            self.num_views_slider,
-            self.btn_raycast,
-            self.btn_reset,
-            self.btn_next,
-            self.btn_back,
-        ]:
-            self.register_widget(w)
 
         v.add_child(gui.Label("Camera Distance"))
         v.add_child(self.camera_distance_slider)
@@ -60,11 +50,10 @@ class RaycastStage(BaseStage):
         v.add_child(self.btn_back)
         v.add_child(self.btn_next)
         print(f"[Raycast] panel loaded")
-        # print(f"[Raycast] Childs: {[type(c) for c in v.get_children()]}")
         return v
 
     # ---------- Stage lifecycle ----------
-    def init(self):
+    def _refresh_ui(self):
         if self.app.headless:
             return
         self.app.main_thread(lambda: self.app._clear_scene())
@@ -75,12 +64,13 @@ class RaycastStage(BaseStage):
             print(f"[Raycast] adding mesh")
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry("mesh", self.app.target_mesh, self.app.default_material))
         self.app.scene.force_redraw()
+        self.enable_widgets()
 
     def reset(self):
         self.app.raw_pcd = None
         self.app.cropped_pcd = None
         self.app.down_pcd = None
-        self.init()
+        self._refresh_ui()
 
     # ---------- Worker ----------
     def worker(self):
@@ -89,8 +79,6 @@ class RaycastStage(BaseStage):
             return
         if not self.app.headless:
             self.app.main_thread(lambda: self.disable_widgets())
-            # self.main_thread(lambda: self.enable_button(self.worker_buttons[Stage.RAYCAST], False))
-            # self.main_thread(lambda: self.enable_button(self.next_stage_buttons[Stage.RAYCAST], False))
             self.camera_distance = self.camera_distance_slider.double_value
             self.num_views = self.num_views_slider.int_value
             self.app.show_progress("Raycasting mesh...")
