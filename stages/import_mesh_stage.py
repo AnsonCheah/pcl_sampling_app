@@ -20,11 +20,9 @@ class ImportMeshStage(BaseStage):
         self.btn_reset = self.register_widget(gui.Button("Clear Mesh"), enabled_if=lambda: self.app.target_mesh is not None)
         self.btn_reset.set_on_clicked(self.reset)
 
-        # self.btn_express = gui.Button("Express Sampling")
         self.btn_express = self.register_widget(gui.Button("Express Sampling"), enabled_if=lambda: self.app.target_mesh is not None)
         self.btn_express.set_on_clicked(self.app.start_express_sampling)
 
-        # self.btn_batch = gui.Button("Batch Sampling")
         self.btn_batch = self.register_widget(gui.Button("Batch Sampling"))
         self.btn_batch.set_on_clicked(self.app.start_batch_sampling)
 
@@ -92,9 +90,6 @@ class ImportMeshStage(BaseStage):
         self.app.cropped_pcd = None
         self.app.down_pcd = None
 
-        # -------------------------
-        # Unit conversion
-        # -------------------------
         bbox = mesh.get_axis_aligned_bounding_box()
         extent_max = bbox.get_extent().max()
 
@@ -102,18 +97,14 @@ class ImportMeshStage(BaseStage):
             print(f"[INFO] Converting units mm → m: {self.file_path.name}")
             mesh.scale(0.001, center=(0, 0, 0))
 
-        # -------------------------
-        # Normalize mesh
-        # -------------------------
+
         mesh.compute_vertex_normals()
         mesh.translate(-mesh.get_center())
 
         self.app.target_mesh = mesh
         self.app.mesh_basename = self.file_path.stem
 
-        # -------------------------
-        # Bounding box + sampling params
-        # -------------------------
+
         bbox = mesh.get_axis_aligned_bounding_box()
         self.app.bbox_corners = np.asarray(bbox.get_box_points())
         extent_min = bbox.get_extent().min()

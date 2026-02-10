@@ -6,7 +6,6 @@ from stages.stage_base import BaseStage
 from pathlib import Path
 from utilities import normalize_normals, fibonacci_sphere, random_camera, pointcloud_to_ply
 from synthetic_pcl_utils import *
-import threading
 
 class SyntheticStage(BaseStage):
     def __init__(self, app):
