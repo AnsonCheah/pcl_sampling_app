@@ -17,31 +17,6 @@ class MeshSamplingApp:
 
     def __init__(self, headless=False):
         self.headless = headless
-
-        # Shared state
-        self.target_mesh = None
-        self.raw_pcd = None
-        self.down_pcd = None
-        self.stage = Stage.IMPORT_MESH
-        self.visible_target_pcd = None
-        self.occluders_pcd = None
-
-        # === State parameters ===
-        self.mesh_basename = None
-        self.synthetic_occlusion = True
-        self.fov_deg = 25
-        self.res_width = 1920
-        self.res_height = 1200
-        self.min_occlusion_ratio = 0.1
-        self.max_occlusion_ratio = 0.3
-        self.synthetic_targets = []
-        self.depth_sigma = 0.0005
-        self.angular_sigma = 0.00005
-
-        # -------------------------
-        # Stages
-        # -------------------------
-
         if not self.headless:
             # === Scene widget ===
             self.window_width = 1440
@@ -98,6 +73,18 @@ class MeshSamplingApp:
             self.progress_panel.frame = gui.Rect(x, y, self.pb_panel_size[0], self.pb_panel_size[1])
             self.window.add_child(self.progress_panel)
 
+        self._restart()
+
+    def _restart(self):
+        self.target_mesh = None
+        self.raw_pcd = None
+        self.down_pcd = None
+        self.visible_target_pcd = None
+        self.occluders_pcd = None
+        self.mesh_basename = None
+        self.synthetic_targets = []
+        self.stage = Stage.IMPORT_MESH
+        self.stages[Stage.SYNTHETIC].combobox_targets.clear_items()
         self.set_stage(Stage.IMPORT_MESH)
 
     def set_stage(self, stage: Stage):
@@ -118,8 +105,6 @@ class MeshSamplingApp:
         panel_width = 300
         self.scene.frame = gui.Rect(r.x, r.y, r.width - panel_width, r.height)
         self.panel.frame = gui.Rect(r.get_right() - panel_width, r.y, panel_width, r.height)
-        r = self.window.content_rect
-        self.scene.frame = r
 
     # ===============================
     # UI helpers
@@ -161,9 +146,15 @@ class MeshSamplingApp:
             self.progress_panel.visible = True
         gui.Application.instance.post_to_main_thread(self.window, _show)
 
-    def update_progress(self, value):
+    # def update_text_progress(self, text="Processing..."):
+    #     def _update():
+    #         self.progress_label.text = text
+    #     gui.Application.instance.post_to_main_thread(self.window, _update)
+
+    def update_progress(self, value, text="Processing..."):
         value = max(0.0, min(1.0, value))
         def _update():
+            self.progress_label.text = text
             self.progress_bar.value = value
         gui.Application.instance.post_to_main_thread(self.window, _update)
 
@@ -198,7 +189,7 @@ class MeshSamplingApp:
     def _on_mouse_event(self, event):
         if self.stage in self.stages:
             self.stages[self.stage]._on_mouse_event(event)
-        return o3d.visualization.gui.Widget.EventCallbackResult.IGNORED
+        return gui.Widget.EventCallbackResult.IGNORED
 
     # ===============================
     # Express Handler

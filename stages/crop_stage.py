@@ -313,23 +313,23 @@ class CropStage(BaseStage):
     
     def _on_mouse_event(self, event):
         if self.tool_mode != ToolMode.BOX_SELECT:
-            return o3d.visualization.gui.Widget.EventCallbackResult.IGNORED
+            return gui.Widget.EventCallbackResult.IGNORED
         
-        if event.type == o3d.visualization.gui.MouseEvent.Type.BUTTON_DOWN:
+        if event.type == gui.MouseEvent.Type.BUTTON_DOWN:
             if event.buttons == 1:
                 self.is_dragging = True
                 self.drag_start = (event.x, event.y)
                 self.drag_end = self.drag_start
-                return o3d.visualization.gui.Widget.EventCallbackResult.HANDLED
+                return gui.Widget.EventCallbackResult.HANDLED
 
-        elif event.type == o3d.visualization.gui.MouseEvent.Type.DRAG:
+        elif event.type == gui.MouseEvent.Type.DRAG:
             if self.is_dragging:
                 self.drag_end = (event.x, event.y)
                 self._draw_selection_rectangle()
-                self.app.scene.set_view_controls(o3d.visualization.gui.SceneWidget.Controls.PICK_POINTS)
-                return o3d.visualization.gui.Widget.EventCallbackResult.HANDLED
+                self.app.scene.set_view_controls(gui.SceneWidget.Controls.PICK_POINTS)
+                return gui.Widget.EventCallbackResult.HANDLED
 
-        elif event.type == o3d.visualization.gui.MouseEvent.Type.BUTTON_UP:
+        elif event.type == gui.MouseEvent.Type.BUTTON_UP:
             if self.is_dragging and event.buttons == 1:
                 self.is_dragging = False
                 self.drag_end = (event.x, event.y)
@@ -337,6 +337,6 @@ class CropStage(BaseStage):
                 self._select_points_screen_space()
                 self.drag_start = None
                 self.drag_end = None
-                self.app.scene.set_view_controls(o3d.visualization.gui.SceneWidget.Controls.ROTATE_CAMERA)
-                return o3d.visualization.gui.Widget.EventCallbackResult.HANDLED
-        return o3d.visualization.gui.Widget.EventCallbackResult.IGNORED
+                self.app.scene.set_view_controls(gui.SceneWidget.Controls.ROTATE_CAMERA)
+                return gui.Widget.EventCallbackResult.HANDLED
+        return gui.Widget.EventCallbackResult.IGNORED

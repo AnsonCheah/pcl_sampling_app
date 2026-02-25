@@ -58,6 +58,9 @@ class BaseStage(ABC):
             self.worker_thread = threading.Thread(target=self._run_worker, daemon=True)
             self.worker_thread.start()
 
+    def _on_worker_start(self):
+        pass
+
     def _run_worker(self):
         try:
             # self.app.main_thread(self._on_worker_start)
@@ -65,9 +68,6 @@ class BaseStage(ABC):
             self.worker()
         finally:
             self.app.main_thread(self._on_worker_done)
-
-    def _on_worker_start(self):
-        pass
 
     def _on_worker_done(self):
         self.app.hide_progress()
@@ -99,12 +99,8 @@ class BaseStage(ABC):
 
     def disable_widgets(self):
         for w in self.widgets:
-            w.enabled = False
+            w.widget.enabled = False
 
-    # def enable_widgets(self, widget=[]):
-    #     for w in self.widgets:
-    #         w.enabled = True
-    
     def _on_key(self,event):
         pass
 

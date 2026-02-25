@@ -17,7 +17,7 @@ class SyntheticStage(BaseStage):
         self.res_height = 1200
         self.min_occlusion_ratio = 0.1
         self.max_occlusion_ratio = 0.3
-        self.synthetic_targets = []
+        self.app.synthetic_targets = []
         self.depth_sigma = 0.0005
         self.angular_sigma = 0.00005
 
@@ -29,11 +29,11 @@ class SyntheticStage(BaseStage):
         self.num_targets_slider.int_value = 6
         self.btn_generate = self.register_widget(gui.Button("Generate Synthetic Targets"))
         self.btn_generate.set_on_clicked(self.start)
-        self.btn_reset = self.register_widget(gui.Button("Clear Synthetic Targets"), lambda: len(self.synthetic_targets)>0)
+        self.btn_reset = self.register_widget(gui.Button("Clear Synthetic Targets"), lambda: len(self.app.synthetic_targets)>0)
         self.btn_reset.set_on_clicked(self.reset)
-        self.combobox_targets = self.register_widget(gui.Combobox(), lambda: len(self.synthetic_targets)>0)
+        self.combobox_targets = self.register_widget(gui.Combobox(), lambda: len(self.app.synthetic_targets)>0)
         self.combobox_targets.set_on_selection_changed(self.preview_synthetic_target)
-        self.btn_export = self.register_widget(gui.Button("Export Synthetic Targets"), lambda: len(self.synthetic_targets)>0)
+        self.btn_export = self.register_widget(gui.Button("Export Synthetic Targets"), lambda: len(self.app.synthetic_targets)>0)
         self.btn_export.set_on_clicked(self.save_synthetic_targets)
 
         self.btn_back = self.register_widget(gui.Button("Back: SAVE"))
@@ -63,19 +63,22 @@ class SyntheticStage(BaseStage):
         if self.app.headless:
             return
         self.app.main_thread(lambda: self.app._clear_scene())
-        if self.synthetic_targets != []:
-            self.app.main_thread(lambda: self.app.scene.scene.add_geometry("synthetic_target", self.synthetic_targets[0], self.app.default_point_material))
+        if self.app.synthetic_targets != []:
+            self.app.main_thread(lambda: self.app.scene.scene.add_geometry("synthetic_target", self.app.synthetic_targets[0], self.app.default_point_material))
         elif self.app.target_mesh != None:
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry("mesh", self.app.target_mesh, self.app.default_material))
         self.app.scene.force_redraw()
         self.enable_widgets()
     
     def reset(self):
-        self.synthetic_targets = []
+        self.app.synthetic_targets = []
         self.combobox_targets.clear_items()
         self._refresh_ui()
 
     def worker(self):
+        if not self.app.headless:
+            self.app.show_progress("Generating synthetic pointcloud...")
+
         self.num_targets =  self.num_targets_slider.int_value
         self.view_sphere = fibonacci_sphere(self.num_targets)
         for i in range(self.num_targets):
@@ -223,24 +226,24 @@ class SyntheticStage(BaseStage):
             orient_normals_using_cameras(pcd, cam_pos)
             normalize_normals(pcd)
             validate_normals(pcd)
-            self.synthetic_targets.append(pcd)
+            self.app.synthetic_targets.append(pcd)
 
             if not self.app.headless:
-                self.combobox_targets.add_item(f"synthetic_sample_{len(self.synthetic_targets)}")
-                self.app.update_progress((i + 1) / self.num_targets)
+                self.combobox_targets.add_item(f"synthetic_sample_{len(self.app.synthetic_targets)}")
+                self.app.update_progress(((i+1) / self.num_targets), f"Generating synthetic pointcloud...({i+1}/{self.num_targets})")
 
     def save_synthetic_targets(self):
         base_path = Path.cwd() / "synthetic_target" / self.app.mesh_basename
         for start, prefix in enumerate(["train", "test"]):
             folder_path = base_path / prefix
             folder_path.mkdir(parents=True, exist_ok=True)
-            for i, pcd in enumerate(self.synthetic_targets[start::2]):
+            for i, pcd in enumerate(self.app.synthetic_targets[start::2]):
                 pointcloud_to_ply(pcd, folder_path / f"{prefix}_sample_{i}.ply")
 
     def preview_synthetic_target(self, selected_text: str, selected_index: int) -> None:
         if self.app.headless:
             return
-        if self.synthetic_targets[selected_index] != None:
+        if self.app.synthetic_targets[selected_index] != None:
             self.app.main_thread(lambda: self.app._clear_scene())
-            self.app.main_thread(lambda: self.app.scene.scene.add_geometry("synthetic_target", self.synthetic_targets[selected_index], self.app.default_point_material))
+            self.app.main_thread(lambda: self.app.scene.scene.add_geometry("synthetic_target", self.app.synthetic_targets[selected_index], self.app.default_point_material))
         self.app.scene.force_redraw()

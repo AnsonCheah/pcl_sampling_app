@@ -413,8 +413,16 @@ def projector_from_camera(cam_pos, look_at, baseline=0.25, vertical_offset=0.0, 
     return projector_pos
 
 if __name__=="__main__":
-    pcd = import_ply("reference_pcd/25333MB000.ply")
-    pcd.paint_uniform_color([0.0,1.0,0.0])
-    print(pcd_geocenter(pcd))
-    pcd1 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(fibonacci_sphere(1000)))
-    o3d.visualization.draw_geometries([pcd, pcd1], width=1080, height=720, zoom=1.0)
+    mesh = o3d.io.read_triangle_mesh("mesh_raw/382_96611GI000.stl")
+
+    bbox = mesh.get_axis_aligned_bounding_box()
+    extent_max = bbox.get_extent().max()
+    if 5.0 < extent_max < 5000.0:
+        print(f"[INFO] Converting units mm → m")
+        mesh.scale(0.001, center=(0, 0, 0))
+    mesh.compute_vertex_normals()
+    mesh.translate(-mesh.get_center())
+
+    mesh.paint_uniform_color([0.0,1.0,0.0])
+    pcd1 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(fibonacci_sphere(100)*0.5))
+    o3d.visualization.draw_geometries([mesh, pcd1], width=1080, height=720, zoom=1.0)
