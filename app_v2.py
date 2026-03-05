@@ -83,6 +83,8 @@ class MeshSamplingApp:
         self.occluders_pcd = None
         self.mesh_basename = None
         self.synthetic_targets = []
+        self.feature_pcd = None
+        self.flat_pcd = None
         self.stage = Stage.IMPORT_MESH
         self.stages[Stage.SYNTHETIC].combobox_targets.clear_items()
         self.set_stage(Stage.IMPORT_MESH)

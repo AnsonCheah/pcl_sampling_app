@@ -5,9 +5,25 @@ from scipy.spatial.transform import Rotation as R
 import matplotlib.pyplot as plt
 from tkinter import Tk, filedialog
 from pathlib import Path
+import trimesh
 
 def random_rotation_matrix():
     return R.random().as_matrix()
+
+def random_quaternion(scalar_first=False):
+    return R.random().as_quat(scalar_first=scalar_first)
+
+def o3d_to_trimesh(o3d_mesh):
+    vertices = np.asarray(o3d_mesh.vertices)
+    faces = np.asarray(o3d_mesh.triangles)
+    return trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+
+def trimesh_to_o3d(tri_mesh:trimesh.Trimesh):
+    o3d_mesh = o3d.geometry.TriangleMesh()
+    o3d_mesh.vertices = o3d.utility.Vector3dVector(tri_mesh.vertices)
+    o3d_mesh.triangles = o3d.utility.Vector3iVector(tri_mesh.faces)
+    o3d_mesh.compute_vertex_normals()
+    return o3d_mesh
 
 def pcd_geocenter(pcd):
     """
@@ -344,25 +360,67 @@ def open_source_folder_dialog():
     path = filedialog.askdirectory(initialdir=Path.cwd(), title="Select source folder (STL files)")
     return Path(path) if path else None
 
+def prepare_mesh(mesh: o3d.geometry.TriangleMesh) -> o3d.t.geometry.TriangleMesh:
+    """Sanitize mesh before boolean ops."""
+    # Remove duplicate vertices/triangles that cause non-manifold edges
+    mesh = mesh.remove_duplicated_vertices()
+    mesh = mesh.remove_duplicated_triangles()
+    mesh = mesh.remove_degenerate_triangles()
+    mesh = mesh.remove_non_manifold_edges()
 
-def meshes_intersect(mesh1, mesh2):
+    # Boolean ops require watertight (closed) manifold meshes
+    if not mesh.is_watertight():
+        print(f"[WARN] Mesh is not watertight — boolean_intersection may be unreliable")
+
+    t_mesh = o3d.t.geometry.TriangleMesh.from_legacy(mesh)
+    return t_mesh
+
+
+def meshes_intersect(mesh1, mesh2, sdf_samples: int = 2000) -> bool:
+    """
+    Check intersection using three escalating methods:
+      1. AABB early rejection (fast)
+      2. boolean_intersection (exact, catches surface-level contact)
+      3. Bidirectional SDF fallback (catches near-misses boolean_intersection may skip)
+    """
+    # --- 1. AABB early rejection ---
     aabb1 = mesh1.get_axis_aligned_bounding_box()
     aabb2 = mesh2.get_axis_aligned_bounding_box()
+    min1, max1 = np.array(aabb1.get_min_bound()), np.array(aabb1.get_max_bound())
+    min2, max2 = np.array(aabb2.get_min_bound()), np.array(aabb2.get_max_bound())
 
-    min1 = aabb1.get_min_bound()
-    max1 = aabb1.get_max_bound()
-    min2 = aabb2.get_min_bound()
-    max2 = aabb2.get_max_bound()
-    if not np.all(max1 >= min2) and np.all(max2 >= min1):
+    if not (np.all(max1 >= min2) and np.all(max2 >= min1)):  # fixed logic
+        print("AABB passed")
         return False
 
-    scene = o3d.t.geometry.RaycastingScene()
-    m1 = o3d.t.geometry.TriangleMesh.from_legacy(mesh1)
-    scene.add_triangles(m1)
-    pts = np.asarray(mesh2.sample_points_uniformly(500).points)
-    query = o3d.core.Tensor(pts, dtype=o3d.core.Dtype.Float32)
-    sdf = scene.compute_signed_distance(query).numpy()
-    return np.any(sdf < 0)
+    # --- 2. boolean_intersection (exact geometry) ---
+    try:
+        print("AABB intersected")
+        t_mesh1 = prepare_mesh(mesh1)
+        t_mesh2 = prepare_mesh(mesh2)
+        intersection = t_mesh1.boolean_intersection(t_mesh2, tolerance=1e-10)
+        if len(intersection.triangle.indices) > 0:
+            print("Mesh intersection detected")
+            return True
+    except Exception as e:
+        # boolean ops can fail on degenerate/non-manifold meshes — fall through
+        print(f"Exception encountered during intersection check: {e}")
+        pass
+
+    # --- 3. Bidirectional SDF fallback ---
+    # Check points of mesh2 inside mesh1 AND mesh1 inside mesh2.
+    # One-directional SDF misses cases where one mesh fully contains the other
+    # or where the overlap region has no sampled points.
+    def any_points_inside(surface_mesh, query_mesh, n_samples: int) -> bool:
+        scene = o3d.t.geometry.RaycastingScene()
+        scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(surface_mesh))
+        pts = np.asarray(query_mesh.sample_points_uniformly(n_samples).points, dtype=np.float32)
+        sdf = scene.compute_signed_distance(o3d.core.Tensor(pts, dtype=o3d.core.Dtype.Float32)).numpy()
+        return bool(np.any(sdf < 0))
+    
+    print(f"Using SDF as fallback")
+    return any_points_inside(mesh1, mesh2, sdf_samples) or \
+           any_points_inside(mesh2, mesh1, sdf_samples)
 
 def random_camera(viewpoint, distance, jitter=0.05):
     cam_pos = viewpoint * distance
@@ -413,7 +471,7 @@ def projector_from_camera(cam_pos, look_at, baseline=0.25, vertical_offset=0.0, 
     return projector_pos
 
 if __name__=="__main__":
-    mesh = o3d.io.read_triangle_mesh("mesh_raw/382_96611GI000.stl")
+    mesh = o3d.io.read_triangle_mesh("mesh_raw/37150MB000.STL")
 
     bbox = mesh.get_axis_aligned_bounding_box()
     extent_max = bbox.get_extent().max()
@@ -423,6 +481,8 @@ if __name__=="__main__":
     mesh.compute_vertex_normals()
     mesh.translate(-mesh.get_center())
 
-    mesh.paint_uniform_color([0.0,1.0,0.0])
-    pcd1 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(fibonacci_sphere(100)*0.5))
+    # mesh.paint_uniform_color([0.0,1.0,0.0])
+    mesh.paint_uniform_color([0.5,0.5,0.5])
+    pcd1 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(fibonacci_sphere(200)*0.5))
+    print(mesh)
     o3d.visualization.draw_geometries([mesh, pcd1], width=1080, height=720, zoom=1.0)

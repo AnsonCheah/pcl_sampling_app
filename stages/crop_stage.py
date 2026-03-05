@@ -17,7 +17,7 @@ class CropStage(BaseStage):
         self.drag_end = None
         self.selected_pcd = None
         self.non_selected_pcd = None
-                
+        self.selected_indices = []
         self.lines = [[0, 1],[1, 2],[2, 3],[3, 0]]
         self.line_set = o3d.geometry.LineSet()
         self.rect_material = rendering.MaterialRecord()

@@ -87,6 +87,8 @@ class DownsampleStage(BaseStage):
         pcd_flat = mask_point_cloud(self.app.cropped_pcd, ~feature_mask)
         pcd_feature = pcd_feature.voxel_down_sample(self.voxel_size)
         pcd_flat = pcd_flat.voxel_down_sample(self.voxel_size * self.coarse_factor)
+        self.app.feature_pcd = pcd_feature
+        self.app.pcd_flat = pcd_flat
         self.app.down_pcd = pcd_feature + pcd_flat
         normalize_normals(self.app.down_pcd)
 

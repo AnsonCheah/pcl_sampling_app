@@ -85,11 +85,6 @@ class ImportMeshStage(BaseStage):
             print("[WARN] Empty mesh")
             return
 
-        # Reset downstream data
-        self.app.raw_pcd = None
-        self.app.cropped_pcd = None
-        self.app.down_pcd = None
-
         bbox = mesh.get_axis_aligned_bounding_box()
         extent_max = bbox.get_extent().max()
 
@@ -97,13 +92,15 @@ class ImportMeshStage(BaseStage):
             print(f"[INFO] Converting units mm → m: {self.file_path.name}")
             mesh.scale(0.001, center=(0, 0, 0))
 
-
         mesh.compute_vertex_normals()
         mesh.translate(-mesh.get_center())
 
+        # Reset downstream data
         self.app.target_mesh = mesh
         self.app.mesh_basename = self.file_path.stem
-
+        self.app.raw_pcd = None
+        self.app.cropped_pcd = None
+        self.app.down_pcd = None
 
         bbox = mesh.get_axis_aligned_bounding_box()
         self.app.bbox_corners = np.asarray(bbox.get_box_points())
