@@ -14,6 +14,8 @@ class DownsampleStage(BaseStage):
         super().__init__(app)
 
     def build_panel(self):
+        if self.app.headless:
+            return
         v = gui.Vert(4)
         
         self.adaptive_checkbox = self.register_widget(gui.Checkbox("Adaptive sampling"))
@@ -72,6 +74,7 @@ class DownsampleStage(BaseStage):
         bbox = self.app.cropped_pcd.get_minimal_oriented_bounding_box()
         self.voxel_size = np.round(np.clip((bbox.volume() / 3), 0.001, 0.005), 4)
         self.adaptive_voxel_downsample() if self.use_adaptive else self.uniform_voxel_downsample()
+        self.app.geocenter = np.round(pcd_geocenter(self.app.down_pcd), decimals=5)
         print(f"[INFO] Downsampled {self.voxel_size * 1000}mm from {len(self.app.cropped_pcd.points)} to {len(self.app.down_pcd.points)} points")
         self._refresh_ui()
 
@@ -118,11 +121,12 @@ class DownsampleStage(BaseStage):
     def recenter_mesh_pcd(self):
         if self.app.cropped_pcd == None:
             return
-        T = pcd_geocenter(self.app.cropped_pcd)
+        T = pcd_geocenter(self.app.down_pcd)
         if self.app.down_pcd != None:
             self.app.down_pcd.transform(T)
-        self.app.target_mesh.transform(T)
         self.app.raw_pcd.transform(T)
         self.app.cropped_pcd.transform(T)
+        self.app.target_mesh.transform(T)
+        self.app.geocenter = np.round(pcd_geocenter(self.app.down_pcd), decimals=5)
+        print("recentered mesh and pointcloud")
         self._refresh_ui()
-        print("recentered pointcloud")

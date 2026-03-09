@@ -17,6 +17,15 @@ class MeshSamplingApp:
 
     def __init__(self, headless=False):
         self.headless = headless
+        
+        self.stages = {
+            Stage.IMPORT_MESH: ImportMeshStage(self),
+            Stage.RAYCAST: RaycastStage(self),
+            Stage.CROP: CropStage(self),
+            Stage.DOWNSAMPLE: DownsampleStage(self),
+            Stage.SAVE: SaveStage(self),
+            Stage.SYNTHETIC: SyntheticStage(self),
+        }
         if not self.headless:
             # === Scene widget ===
             self.window_width = 1440
@@ -47,14 +56,6 @@ class MeshSamplingApp:
             self.panel = gui.Vert(0.25 * em, gui.Margins(em, em, em, em))
             self.window.add_child(self.panel)
 
-            self.stages = {
-                Stage.IMPORT_MESH: ImportMeshStage(self),
-                Stage.RAYCAST: RaycastStage(self),
-                Stage.CROP: CropStage(self),
-                Stage.DOWNSAMPLE: DownsampleStage(self),
-                Stage.SAVE: SaveStage(self),
-                Stage.SYNTHETIC: SyntheticStage(self),
-            }
             for stage_class in self.stages.values():
                 stage_class.panel.visible = False
                 self.panel.add_child(stage_class.panel)
@@ -86,21 +87,22 @@ class MeshSamplingApp:
         self.feature_pcd = None
         self.flat_pcd = None
         self.stage = Stage.IMPORT_MESH
-        self.stages[Stage.SYNTHETIC].combobox_targets.clear_items()
+        if not self.headless:
+            self.stages[Stage.SYNTHETIC].combobox_targets.clear_items()
         self.set_stage(Stage.IMPORT_MESH)
 
     def set_stage(self, stage: Stage):
         self.stage = stage
-        for s in self.stages.values():
-            s.panel.visible = (s is self.stages[stage])
-            for w in s.widgets:
-                if hasattr(w.widget, "toggleable") and w.widget.toggleable:
-                    w.widget.is_on = False
-        
-        self.window.set_needs_layout()
-        self.stages[stage]._refresh_ui()
-        self.stages[stage].enable_widgets()
-        self._update_title()
+        if not self.headless:
+            for s in self.stages.values():
+                s.panel.visible = (s is self.stages[stage])
+                for w in s.widgets:
+                    if hasattr(w.widget, "toggleable") and w.widget.toggleable:
+                        w.widget.is_on = False
+                self.window.set_needs_layout()
+                self.stages[stage]._refresh_ui()
+                self.stages[stage].enable_widgets()
+                self._update_title()
 
     def _on_layout(self, layout_context):
         r = self.window.content_rect
@@ -142,18 +144,17 @@ class MeshSamplingApp:
         print("reframed")
 
     def show_progress(self, text="Processing..."):
+        if self.headless:
+            return
         def _show():
             self.progress_label.text = text
             self.progress_bar.value = 0.0
             self.progress_panel.visible = True
         gui.Application.instance.post_to_main_thread(self.window, _show)
 
-    # def update_text_progress(self, text="Processing..."):
-    #     def _update():
-    #         self.progress_label.text = text
-    #     gui.Application.instance.post_to_main_thread(self.window, _update)
-
     def update_progress(self, value, text="Processing..."):
+        if self.headless:
+            return
         value = max(0.0, min(1.0, value))
         def _update():
             self.progress_label.text = text
@@ -161,11 +162,15 @@ class MeshSamplingApp:
         gui.Application.instance.post_to_main_thread(self.window, _update)
 
     def hide_progress(self):
+        if self.headless:
+            return
         def _hide():
             self.progress_panel.visible = False
         gui.Application.instance.post_to_main_thread(self.window, _hide)
         
     def main_thread(self, fn):
+        if self.headless:
+            return
         gui.Application.instance.post_to_main_thread(self.window, fn)
 
     # ===============================

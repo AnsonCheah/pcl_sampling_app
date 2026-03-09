@@ -12,6 +12,8 @@ class ImportMeshStage(BaseStage):
         super().__init__(app)
 
     def build_panel(self):
+        if self.app.headless:
+            return
         v = gui.Vert(4)
         title = gui.Label("Import Mesh")
         
@@ -63,7 +65,7 @@ class ImportMeshStage(BaseStage):
         self.app.cropped_pcd = None
         self.app.down_pcd = None
         self.app.bbox_corners = None
-
+        
         self._refresh_ui()
 
     # ===============================
@@ -75,15 +77,16 @@ class ImportMeshStage(BaseStage):
             self.enable_widgets()
             return
 
-    def worker(self):
+    def worker(self, mesh=None):
         """Load and preprocess mesh"""
         if not self.file_path:
             return
-
-        mesh = o3d.io.read_triangle_mesh(str(self.file_path))
+        if not mesh:
+            mesh = o3d.io.read_triangle_mesh(str(self.file_path))
         if mesh.is_empty():
             print("[WARN] Empty mesh")
             return
+        
 
         bbox = mesh.get_axis_aligned_bounding_box()
         extent_max = bbox.get_extent().max()

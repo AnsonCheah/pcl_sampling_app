@@ -26,6 +26,8 @@ class CropStage(BaseStage):
         self.rect_material.base_color = [1.0, 1.0, 0.0, 1.0]
         
     def build_panel(self):
+        if self.app.headless:
+            return
         v = gui.Vert(4)
         
         self.btn_box_select = self.register_widget(gui.Button("Box Select"))

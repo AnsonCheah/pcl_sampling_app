@@ -6,6 +6,7 @@ from stages.stage_base import BaseStage
 from pathlib import Path
 from utilities import normalize_normals, fibonacci_sphere, random_camera, pointcloud_to_ply
 from synthetic_pcl_utils import *
+import trimesh.collision
 
 class SyntheticStage(BaseStage):
     def __init__(self, app):
@@ -22,6 +23,8 @@ class SyntheticStage(BaseStage):
         self.angular_sigma = 0.00005
 
     def build_panel(self):
+        if self.app.headless:
+            return
         v = gui.Vert(4)
 
         self.num_targets_slider = self.register_widget(gui.Slider(gui.Slider.INT))
@@ -82,11 +85,14 @@ class SyntheticStage(BaseStage):
         self.num_targets =  self.num_targets_slider.int_value
         self.view_sphere = fibonacci_sphere(self.num_targets)
         for i in range(self.num_targets):
+            collision_manager = trimesh.collision.CollisionManager()
+
             cam_pos, look_at, up = random_camera(self.view_sphere[i], 1.5)
             proj_pos = projector_from_camera(cam_pos, look_at, baseline=0.27)
             target_center = self.app.target_mesh.get_center()
             view_dir = (target_center - cam_pos)
             view_dir = view_dir / np.linalg.norm(view_dir)
+            collision_manager.add_object()
             scene_meshes = [self.app.target_mesh]
 
             # orthonormal basis around view dir

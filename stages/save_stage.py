@@ -2,7 +2,8 @@ import open3d.visualization.gui as gui
 from enums import Stage
 from pathlib import Path
 from stages.stage_base import BaseStage
-from utilities import pointcloud_to_ply
+from utilities import pointcloud_to_ply, pcd_geocenter
+from scipy.spatial.transform import Rotation as R
 
 class SaveStage(BaseStage):
     def __init__(self, app):
@@ -10,6 +11,8 @@ class SaveStage(BaseStage):
         super().__init__(app)
 
     def build_panel(self):
+        if self.app.headless:
+            return
         v = gui.Vert(4)
 
         self.btn_save = self.register_widget(gui.Button("Export Point Cloud"))
@@ -56,7 +59,17 @@ class SaveStage(BaseStage):
             folder_path = Path.cwd() / "reference_pcd"
             folder_path.mkdir(parents=True, exist_ok=True)
             pcd_path = folder_path / (self.app.mesh_basename + ".ply")
-            pointcloud_to_ply(self.app.down_pcd, str(pcd_path))
+            center_quat = R.from_matrix(self.app.geocenter[:3,:3]).as_quat()
+            comments = [
+                f"geocenter x {self.app.geocenter[3, 0]}",
+                f"geocenter y {self.app.geocenter[3, 1]}",
+                f"geocenter z {self.app.geocenter[3, 2]}",
+                f"geocenter qx {center_quat[0]}",
+                f"geocenter qy {center_quat[1]}",
+                f"geocenter qz {center_quat[2]}",
+                f"geocenter qw {center_quat[3]}"
+                ]
+            pointcloud_to_ply(self.app.down_pcd, str(pcd_path), comments=comments)
             print(f"[INFO] Point cloud saved to {pcd_path}")
         except Exception as e:
             print(f"[ERROR] Failed to save PLY: {e}")

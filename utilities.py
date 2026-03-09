@@ -53,7 +53,7 @@ def pcd_geocenter(pcd):
     if np.linalg.det(rotation_matrix) < 0:
         rotation_matrix[:, 2] *= -1
     
-    rotation_matrix = np.round(rotation_matrix, decimals=3)
+    rotation_matrix = np.round(rotation_matrix, decimals=6)
     tf = np.eye(4)
     tf[:3, 3] = center
     tf[:3, :3] = rotation_matrix
@@ -262,7 +262,7 @@ def import_ply(file_path):
     print(f"Loaded {file_path} with {len(pcd.points)}")
     return pcd
 
-def pointcloud_to_ply(pcd, ply_path):
+def pointcloud_to_ply(pcd, ply_path, comments=[]):
     points = np.asarray(pcd.points, dtype=np.float32)
     normals = np.asarray(pcd.normals, dtype=np.float32)
 
@@ -271,49 +271,52 @@ def pointcloud_to_ply(pcd, ply_path):
     if normals.shape[0] != points.shape[0]:
         raise ValueError("Normals missing or size mismatch")
 
-    # validate_normals(pcd)
-
     curvature = np.zeros((points.shape[0], 1), dtype=np.float32)
     vertex_data = np.hstack([points, normals, curvature])
 
     with open(ply_path, "wb") as f:
-        header = f"""ply
-format binary_little_endian 1.0
-comment PCL generated
-element vertex {len(vertex_data)}
-property float x
-property float y
-property float z
-property float nx
-property float ny
-property float nz
-property float curvature
-element face 0
-element camera 1
-property float view_px
-property float view_py
-property float view_pz
-property float x_axisx
-property float x_axisy
-property float x_axisz
-property float y_axisx
-property float y_axisy
-property float y_axisz
-property float z_axisx
-property float z_axisy
-property float z_axisz
-property float focal
-property float scalex
-property float scaley
-property float centerx
-property float centery
-property int viewportx
-property int viewporty
-property float k1
-property float k2
-end_header
-"""
-        f.write(header.encode("ascii"))
+        header_lines = [
+            "ply",
+            "format binary_little_endian 1.0",
+            "comment PCL generated",
+            f"element vertex {len(vertex_data)}",
+            "property float x",
+            "property float y",
+            "property float z",
+            "property float nx",
+            "property float ny",
+            "property float nz",
+            "property float curvature",
+            "element face 0",
+            "element camera 1",
+            "property float view_px",
+            "property float view_py",
+            "property float view_pz",
+            "property float x_axisx",
+            "property float x_axisy",
+            "property float x_axisz",
+            "property float y_axisx",
+            "property float y_axisy",
+            "property float y_axisz",
+            "property float z_axisx",
+            "property float z_axisy",
+            "property float z_axisz",
+            "property float focal",
+            "property float scalex",
+            "property float scaley",
+            "property float centerx",
+            "property float centery",
+            "property int viewportx",
+            "property int viewporty",
+            "property float k1",
+            "property float k2"
+        ]
+        for line in header_lines:
+            f.write((line + "\n").encode("ascii"))
+
+        for comment in comments:
+            f.write((str(comment) + "\n").encode("ascii"))
+        f.write(("end_header" + "\n").encode("ascii"))
 
         # --- Vertex block ---
         for row in vertex_data:
@@ -374,7 +377,6 @@ def prepare_mesh(mesh: o3d.geometry.TriangleMesh) -> o3d.t.geometry.TriangleMesh
 
     t_mesh = o3d.t.geometry.TriangleMesh.from_legacy(mesh)
     return t_mesh
-
 
 def meshes_intersect(mesh1, mesh2, sdf_samples: int = 2000) -> bool:
     """

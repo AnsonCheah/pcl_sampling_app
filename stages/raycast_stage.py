@@ -17,6 +17,8 @@ class RaycastStage(BaseStage):
         self.ray_spacing = 0.001
 
     def build_panel(self):
+        if self.app.headless:
+            return
         v = gui.Vert(4)
 
         v.add_child(gui.Label("Raycasting"))

@@ -47,8 +47,9 @@ class BaseStage(ABC):
         If run_on_main=True, _run_worker is executed on the GUI main thread.
         Otherwise, it runs in a background worker thread.
         """
-        self.disable_widgets()
-        self.app.show_progress()
+        if not self.app.headless:
+            self.disable_widgets()
+            self.app.show_progress()
 
         if run_on_main:
             # GUI-safe execution (dialogs, Open3D gui, Tk, etc.)
@@ -70,6 +71,8 @@ class BaseStage(ABC):
             self.app.main_thread(self._on_worker_done)
 
     def _on_worker_done(self):
+        if self.app.headless:
+            return
         self.app.hide_progress()
         self._refresh_ui()
         self.enable_widgets()
@@ -82,6 +85,8 @@ class BaseStage(ABC):
         """
         Register a widget and optionally its enable condition.
         """
+        if self.app.headless:
+            return
         self.widgets.append(WidgetBinding(widget, enabled_if))
         return widget
 
@@ -90,6 +95,8 @@ class BaseStage(ABC):
         Re-evaluate all widget enable conditions.
         Must be called from main thread.
         """
+        if self.app.headless:
+            return
         for binding in self.widgets:
             try:
                 binding.widget.enabled = bool(binding.enabled_if())
@@ -98,6 +105,8 @@ class BaseStage(ABC):
                 binding.widget.enabled = False
 
     def disable_widgets(self):
+        if self.app.headless:
+            return
         for w in self.widgets:
             w.widget.enabled = False
 

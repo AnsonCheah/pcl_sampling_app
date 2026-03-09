@@ -210,11 +210,10 @@ class MujocoBinScene:
                 y = np.random.uniform(-self.hy + radius*2, self.hy - radius*2)
                 z = max(radius, 0.5) + layer * (2.5 * radius) + np.random.uniform(-radius, radius)
                 pos = np.asarray([x, y, z])
-                rmat = R.random().as_matrix()
-                quat = R.random().as_quat(scalar_first=True)
                 T = np.eye(4)
                 T[:3, 3] = pos
-                T[:3, :3] = rmat
+                T[:3, :3] = R.random().as_matrix()
+                quat = R.from_matrix(T[:3, :3]).as_quat(scalar_first=True)
 
                 is_collision, _, _ = collision_manager.in_collision_single(candidate_trimesh, transform=T, return_names=True, return_data=True)
                 if is_collision:
