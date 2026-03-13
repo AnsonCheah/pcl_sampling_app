@@ -1,0 +1,229 @@
+import numpy as np
+import open3d as o3d
+from scipy.spatial.transform import Rotation as R
+import trimesh
+import colorsys
+
+def init_open3d():
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(visible=False)
+    vis.destroy_window()
+
+def random_rotation_matrix():
+    return R.random().as_matrix()
+
+def random_quaternion(scalar_first=False):
+    return R.random().as_quat(scalar_first=scalar_first)
+
+def o3d_display(geometries:list, width:int=1280, height:int=720):
+    """
+    Display a list of Open3D geometries with a black background.
+
+    Args:
+        geometries (list): List of open3d.geometry objects.
+        width (int): Window width.
+        height (int): Window height.
+    """
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(width=width, height=height)
+    frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.05)
+    vis.add_geometry(frame)
+    for g in geometries:
+        vis.add_geometry(g)
+
+    render_opt = vis.get_render_option()
+    render_opt.background_color = [0, 0, 0]  # black background
+    render_opt.light_on = True
+    # Optional visual tweaks
+    render_opt.mesh_show_back_face = True
+    render_opt.point_size = 3.0
+
+    saturation, value = 0.4, 0.9
+    hues = np.linspace(0, 1, len(geometries), endpoint=False)
+    colors = [colorsys.hsv_to_rgb(h, saturation, value) for h in hues]
+    for g, c in zip(geometries, colors):
+        g.paint_uniform_color(c)
+
+    return vis
+
+
+def o3d_to_trimesh(o3d_mesh):
+    return trimesh.Trimesh(vertices=np.asarray(o3d_mesh.vertices), faces=np.asarray(o3d_mesh.triangles), process=False)
+
+def trimesh_to_o3d(tri_mesh:trimesh.Trimesh):
+    o3d_mesh = o3d.geometry.TriangleMesh(vertices=o3d.utility.Vector3dVector(tri_mesh.vertices), 
+                                         triangles=o3d.utility.Vector3iVector(tri_mesh.faces))
+    o3d_mesh.compute_vertex_normals()
+    return o3d_mesh
+
+def pcd_geocenter(pcd):
+    """
+    Returns transformation matrix with consistent orientation.
+    """
+    points = np.asarray(pcd.points)
+    center = points.mean(axis=0)
+    
+    centered_points = points - center
+    cov_matrix = np.cov(centered_points.T)
+    eigenvalues, eigenvectors = np.linalg.eig(cov_matrix)
+    
+    # Sort by eigenvalues (descending)
+    idx = eigenvalues.argsort()[::-1]
+    rotation_matrix = eigenvectors[:, idx]
+    if np.linalg.det(rotation_matrix) < 0:
+        rotation_matrix[:, 2] *= -1
+
+    for i in range(3):
+        axis = rotation_matrix[:, i]
+        # Find the component with largest absolute value
+        max_idx = np.argmax(np.abs(axis))
+        # If that component is negative, flip the entire axis
+        if axis[max_idx] < 0:
+            rotation_matrix[:, i] *= -1
+    
+    if np.linalg.det(rotation_matrix) < 0:
+        rotation_matrix[:, 2] *= -1
+    
+    rotation_matrix = np.round(rotation_matrix, decimals=6)
+    tf = np.eye(4)
+    tf[:3, 3] = center
+    tf[:3, :3] = rotation_matrix
+    tf = np.linalg.inv(tf)
+    
+    return tf
+
+def normalize_normals(pcd):
+    """
+    Normalize all normals in a point cloud to unit length.
+    Removes any points with zero-magnitude normals.
+    
+    Args:
+        pcd: Open3D PointCloud object
+    
+    Returns:
+        The same point cloud object (modified in-place)
+    
+    Raises:
+        ValueError: If point cloud has no normals
+    """
+    if not pcd.has_normals():
+        raise ValueError("Point cloud has no normals")
+    
+    normals = np.asarray(pcd.normals, dtype=np.float64)
+    points = np.asarray(pcd.points, dtype=np.float64)
+    
+    # Vectorized magnitude calculation
+    magnitudes = np.linalg.norm(normals, axis=1)
+    valid_mask = magnitudes > 1e-10
+    num_removed = np.sum(~valid_mask)
+    
+    if num_removed > 0:
+        print(f"Removing {num_removed} points with zero-magnitude normals")
+        points = points[valid_mask]
+        normals = normals[valid_mask]
+        magnitudes = magnitudes[valid_mask]
+    
+    # Vectorized normalization - no need for np.newaxis, broadcasting handles it
+    normalized = normals / magnitudes[:, None]
+    
+    pcd.points = o3d.utility.Vector3dVector(points)
+    pcd.normals = o3d.utility.Vector3dVector(normalized)
+    
+    return pcd
+
+def validate_normals(pcd, tolerance=1e-5):
+    """
+    Check if all normals in the point cloud are normalized (magnitude = 1.0).
+    Raises ValueError if any normal is not normalized beyond the tolerance.
+    
+    Args:
+        pcd: Open3D PointCloud object
+        tolerance: Allowed deviation from magnitude 1.0 (default: 1e-5)
+    
+    Raises:
+        ValueError: If normals are missing or not normalized
+    """
+    if not pcd.has_normals():
+        raise ValueError("Point cloud has no normals")
+    
+    normals = np.asarray(pcd.normals, dtype=np.float64)
+    if normals.shape[0] == 0:
+        raise ValueError("Normals array is empty")
+    
+    magnitudes = np.linalg.norm(normals, axis=1)
+    deviations = np.abs(magnitudes - 1.0)
+    
+    if np.any(deviations > tolerance):
+        invalid_count = np.sum(deviations > tolerance)
+        worst_idx = np.argmax(deviations)
+        raise ValueError(
+            f"Found {invalid_count} unnormalized normals. "
+            f"Max deviation: {deviations[worst_idx]:.2e} at index {worst_idx} "
+            f"(magnitude: {magnitudes[worst_idx]:.8f}). "
+            f"Min/Max magnitudes: {np.min(magnitudes):.8f}/{np.max(magnitudes):.8f}"
+        )
+    print(f"All {len(magnitudes)} normals passed validation.")
+
+def fibonacci_sphere(samples):
+    points = []
+    phi = np.pi * (3. - np.sqrt(5.))
+    for i in range(samples):
+        y = 1 - (i / float(samples - 1)) * 2
+        radius = np.sqrt(1 - y * y)
+        theta = phi * i
+        x = np.cos(theta) * radius
+        z = np.sin(theta) * radius
+        points.append([x, y, z])
+    return np.array(points)
+
+def mask_point_cloud(pcd, mask):
+    masked_pcd = o3d.geometry.PointCloud()
+    masked_pcd.points = o3d.utility.Vector3dVector(np.asarray(pcd.points)[mask])
+    masked_pcd.normals = o3d.utility.Vector3dVector(np.asarray(pcd.normals)[mask])
+    return masked_pcd
+
+def orient_normals_using_cameras(pcd, cam_positions):
+    pts = np.asarray(pcd.points)
+    nrm = np.asarray(pcd.normals)
+    
+    view_vecs = pts - cam_positions   # from camera → point
+    view_vecs /= np.linalg.norm(view_vecs, axis=1, keepdims=True)
+
+    dots = np.sum(nrm * view_vecs, axis=1)
+
+    # If dot > 0, normal points *away* from camera → flip it
+    flip = dots > 0
+    nrm[flip] *= -1.0
+    pcd.normals = o3d.utility.Vector3dVector(nrm)
+
+def camera_view_matrix(cam_pos, look_at, up=np.array([0.0, 0.0, 1.0])):
+    forward = look_at - cam_pos
+    forward /= np.linalg.norm(forward)
+
+    # If forward is parallel to up, choose a fallback up vector
+    right = np.cross(forward, [0,0,1])
+    if np.linalg.norm(right) < 1e-6:
+        right = np.cross(forward, [0,1,0])
+    right /= np.linalg.norm(right)
+    up = np.cross(right, forward)
+
+    T = np.eye(4)
+    T[:3, :3] = np.stack([right, up, forward], axis=1)
+    T[:3, 3] = cam_pos
+    return T
+
+if __name__=="__main__":
+    mesh = o3d.io.read_triangle_mesh("mesh_raw/37150MB000.STL")
+
+    bbox = mesh.get_axis_aligned_bounding_box()
+    extent_max = bbox.get_extent().max()
+    if 5.0 < extent_max < 5000.0:
+        print(f"[INFO] Converting units mm → m")
+        mesh.scale(0.001, center=(0, 0, 0))
+    mesh.compute_vertex_normals()
+    mesh.translate(-mesh.get_center())
+
+    mesh.paint_uniform_color([0.5,0.5,0.5])
+    pcd1 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(fibonacci_sphere(200)*0.5))
+    o3d.visualization.draw_geometries([mesh, pcd1], width=1080, height=720, zoom=1.0)
+

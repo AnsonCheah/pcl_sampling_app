@@ -5,7 +5,7 @@ import open3d.visualization.gui as gui
 import open3d.visualization.rendering as rendering
 from enums import Stage, ToolMode
 from stages.stage_base import BaseStage
-from utilities import mask_point_cloud
+from geom_utils import mask_point_cloud
 
 class CropStage(BaseStage):
     def __init__(self, app):
@@ -73,6 +73,8 @@ class CropStage(BaseStage):
     def reset(self):
         self.app.down_pcd = None
         self.app.cropped_pcd = copy.deepcopy(self.app.raw_pcd)
+        self.app.output_pcd_path = None
+
         self._refresh_ui()
 
     def worker(self):

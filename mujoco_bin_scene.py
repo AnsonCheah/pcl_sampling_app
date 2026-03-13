@@ -2,15 +2,12 @@ import mujoco
 import mujoco.viewer
 import time
 import numpy as np
-import random
 from dataclasses import dataclass
 import open3d as o3d
-from pathlib import Path
 from rich import print as rp
 from scipy.spatial.transform import Rotation as R
 import copy
-from utilities import o3d_to_trimesh, trimesh_to_o3d
-import trimesh
+from geom_utils import o3d_to_trimesh, trimesh_to_o3d, camera_view_matrix, o3d_display, init_open3d
 from trimesh.collision import CollisionManager
 
 @dataclass
@@ -19,7 +16,7 @@ class SceneObject:
     body_name: str
 
 class MujocoBinScene:
-    def __init__(self, part_mesh, part_convex_meshes, n_parts=1, settle_time=10.0, render=True):
+    def __init__(self, part_mesh, part_convex_meshes, n_parts=1, bin_dim=(0.76, 0.585, 0.25, 0.005), settle_time=10.0, render=True):
         self.timestep = 0.002
         self.lvel_threshold = 0.03
         self.avel_threshold = 0.5
@@ -35,7 +32,8 @@ class MujocoBinScene:
         self.model = None
         self.data = None
         self.render_flag = render
-        
+        self.viewer = None
+
         self.spec = mujoco.MjSpec()
         self.spec.option.timestep = self.timestep
         self.spec.option.gravity = [0,0,-9.81]
@@ -50,74 +48,144 @@ class MujocoBinScene:
         default.conaffinity = 1
 
         self.world = self.spec.worldbody
-        self.part_counter = 0
 
+        self.bin_dim = bin_dim
+        self.hx = self.bin_dim[0] / 2
+        self.hy = self.bin_dim[1] / 2
+        self.hh = self.bin_dim[2] / 2
         self._load_convex_assets()
-        self._build_bin()
-        poses = self.generate_collision_free_poses()
-        for pose in poses:
-            self.add_part(pose)
-        self.compile()
-        if self.render_flag:
+        self.bin_mesh = self._build_bin()
+        self.generate_scene()
+
+    def _load_convex_assets(self):
+        self.convex_mesh_names = []
+        for i, convex_mesh in enumerate(self.part_convex_meshes):
+            mesh_name = f"convex_mesh_{i}"
+            mesh = self.spec.add_mesh()
+            mesh.name = mesh_name
+            mesh.uservert = np.asarray(convex_mesh.vertices).flatten().tolist()
+            mesh.userface = np.asarray(convex_mesh.triangles).flatten().tolist()
+            self.convex_mesh_names.append(mesh_name)
+
+    def _build_bin(self):
+        boxes = [
+            ([self.hx, self.hy, self.bin_dim[3]], [0, 0, -self.bin_dim[3]]),               # floor
+            ([self.bin_dim[3], self.hy, self.hh], [self.hx - self.bin_dim[3], 0, self.hh - self.bin_dim[3]]),     # +x wall
+            ([self.bin_dim[3], self.hy, self.hh], [-self.hx + self.bin_dim[3], 0, self.hh - self.bin_dim[3]]),    # -x wall
+            ([self.hx, self.bin_dim[3], self.hh], [0, self.hy - self.bin_dim[3], self.hh - self.bin_dim[3]]),     # +y wall
+            ([self.hx, self.bin_dim[3], self.hh], [0, -self.hy + self.bin_dim[3], self.hh - self.bin_dim[3]]),    # -y wall
+        ]
+
+        combined = o3d.geometry.TriangleMesh()
+        for half_sizes, pos in boxes:
+            box = o3d.geometry.TriangleMesh.create_box(
+                width=half_sizes[0] * 2,
+                height=half_sizes[1] * 2,
+                depth=half_sizes[2] * 2,
+            )
+            box.translate(np.array(pos) - np.array(half_sizes))
+            combined += box
+
+        combined.merge_close_vertices(1e-6)
+        combined.compute_vertex_normals()
+        
+        bin_body = self.world.add_body()
+        bin_body.name = "bin"
+        bin_body.pos = [0,0,0]
+        for i in range(len(boxes)):
+            geom = bin_body.add_geom()
+            geom.type = mujoco.mjtGeom.mjGEOM_BOX
+            geom.size = boxes[i][0]
+            geom.pos = boxes[i][1]
+            geom.mass = 0.5
+            geom.rgba=[0.6,0.6,0.6,0.2]
+
+        return combined
+    
+    def generate_scene(self):
+        self.part_counter = 0
+        collision_manager = CollisionManager()
+        radius = self.part_mesh.bounding_sphere.primitive.radius
+        batch_size = min(10, int((2 * self.hx) // (2 * radius)) * int((2 * self.hy) // (2 * radius)))
+        valid_poses = np.zeros((self.n_parts, 7))
+        for i in range(self.n_parts):
+            success = False
+            candidate_trimesh = copy.deepcopy(self.part_mesh)
+            for _ in range(200):
+                layer = i // batch_size
+                x = np.random.uniform(-self.hx + radius*2, self.hx - radius*2)
+                y = np.random.uniform(-self.hy + radius*2, self.hy - radius*2)
+                z = max(radius, 0.5) + layer * (2.5 * radius) + np.random.uniform(-radius, radius)
+                pos = np.asarray([x, y, z])
+                T = np.eye(4)
+                T[:3, 3] = pos
+                T[:3, :3] = R.random().as_matrix()
+                quat = R.from_matrix(T[:3, :3]).as_quat(scalar_first=True)
+                is_collision, _, _ = collision_manager.in_collision_single(candidate_trimesh, transform=T, return_names=True, return_data=True)
+                if is_collision:
+                    continue
+                valid_poses[i, :3] = pos
+                valid_poses[i, 3:] = quat
+                collision_manager.add_object(f"part_{i}", candidate_trimesh, transform=T)
+                success = True
+                print(f"Generated part {i+1}/{self.n_parts}")
+                break
+            if not success:
+                print(f"[WARNING] Could not place part {i} without intersection")
+
+        print(f"[INFO] Successfully placed {len(valid_poses)} parts")
+
+        for pose in valid_poses:
+            body = self.world.add_body()
+            body.name = f"part_{self.part_counter}"
+            body.pos = pose[:3]
+            body.quat = pose[3:]
+            body.add_freejoint()
+
+            for mesh_name in self.convex_mesh_names:
+                geom = body.add_geom()
+                geom.type = mujoco.mjtGeom.mjGEOM_MESH
+                geom.meshname = mesh_name
+                geom.mass = 0.1
+
+            self.scene_objects.append(SceneObject(body.name,body.name))
+            self.part_counter += 1
+
+        self.model = self.spec.compile()
+        self.data = mujoco.MjData(self.model)
+
+        if self.render_flag and self.viewer is None:
             self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
             self.viewer.cam.distance = 1.0
             self.viewer.cam.azimuth = 90
             self.viewer.cam.elevation = -30
             self.viewer.cam.lookat[:] = [0, 0, 0]
 
-    def _build_bin(self):
-        self.hx = 0.76 / 2
-        self.hy = 0.585 / 2
-        hh = 0.3 / 2
-        wt = 0.01 / 2
-        ft = 0.01 / 2
+    def is_settled(self) -> bool:
+        cvel = self.data.cvel[1:]  # skip worldbody, shape: (nbody-1, 6)
+        ang_speeds = np.linalg.norm(cvel[:, :3], axis=1)
+        lin_speeds = np.linalg.norm(cvel[:, 3:], axis=1)
+        max_lin = lin_speeds.max() if len(lin_speeds) else 0.0
+        max_ang = ang_speeds.max() if len(ang_speeds) else 0.0
+        all_slow = (max_lin < self.lvel_threshold) and (max_ang < self.avel_threshold)
+        self._stable_count = self._stable_count + 1 if all_slow else 0
+        return self._stable_count >= self.stable_steps
 
-        bin_body = self.world.add_body()
-        bin_body.name = "bin"
-        bin_body.pos = [0,0,0]
-
-        def add_box(size, pos):
-            geom = bin_body.add_geom()
-            geom.type = mujoco.mjtGeom.mjGEOM_BOX
-            geom.size = size
-            geom.pos = pos
-            geom.mass = 0.5
-            geom.contype=1
-            geom.conaffinity=1
-            geom.rgba=[0.6,0.6,0.6,0.2]
-
-        add_box([self.hx,self.hy,ft],[0,0,-ft])
-        add_box([wt,self.hy,hh],[self.hx-wt,0,hh-ft])
-        add_box([wt,self.hy,hh],[-self.hx+wt,0,hh-ft])
-        add_box([self.hx,wt,hh],[0,self.hy-wt,hh-ft])
-        add_box([self.hx,wt,hh],[0,-self.hy+wt,hh-ft])
-
-    def _load_convex_assets(self):
-        self.convex_mesh_names = []
-
-        for i, convex_mesh in enumerate(self.part_convex_meshes):
-            mesh_name = f"convex_mesh_{i}"
-            mesh = self.spec.add_mesh()
-            mesh.name = mesh_name
-            mesh.uservert = convex_mesh.vertices.flatten().tolist()
-            mesh.userface = convex_mesh.faces.flatten().tolist()
-            self.convex_mesh_names.append(mesh_name)
-
-    def add_part(self, pose:np.ndarray):
-        body = self.world.add_body()
-        body.name = f"part_{self.part_counter}"
-        body.pos = pose[:3]
-        body.quat = pose[3:]
-        body.add_freejoint()
-
-        for mesh_name in self.convex_mesh_names:
-            geom = body.add_geom()
-            geom.type = mujoco.mjtGeom.mjGEOM_MESH
-            geom.meshname = mesh_name
-            geom.mass = 0.1
-
-        self.scene_objects.append(SceneObject(body.name,body.name))
-        self.part_counter += 1
+    def simulate(self, realtime=False):
+        steps = int(self.settle_time / self.model.opt.timestep)
+        for i in range(steps):
+            print(f"[t={self.data.time:.2f}s] step={i}/{steps}") if i%int(1.0 / self.model.opt.timestep)==0 else None
+            step_start = time.time()
+            mujoco.mj_step(self.model, self.data)
+            if self.viewer is not None: self.viewer.sync()
+            if self.is_settled():
+                print(f"[t={self.data.time:.2f}s] Settled at step {i}")
+                break
+            if realtime:
+                elapsed = time.time() - step_start
+                remaining = max(0, self.model.opt.timestep - elapsed)
+                time.sleep(remaining)
+        if self.viewer is not None: self.viewer.close()
 
     def mujoco_scene_to_open3d(self, scene_dict):
         """
@@ -128,7 +196,6 @@ class MujocoBinScene:
                     quaternion: wxyz
                 }
             }
-        Returns
         -------
         o3d_mesh_list : list of open3d.geometry.TriangleMesh
         """
@@ -148,7 +215,8 @@ class MujocoBinScene:
             mesh.compute_vertex_normals()
             mesh.transform(T)
             o3d_mesh_list.append(mesh)
-
+        
+        o3d_mesh_list.append(self.bin_mesh)
         return o3d_mesh_list
 
     def extract_scene_state(self):
@@ -163,106 +231,34 @@ class MujocoBinScene:
             }
         return scene_dict
 
-    def is_settled(self) -> bool:
-        cvel = self.data.cvel[1:]  # skip worldbody, shape: (nbody-1, 6)
-        ang_speeds = np.linalg.norm(cvel[:, :3], axis=1)
-        lin_speeds = np.linalg.norm(cvel[:, 3:], axis=1)
-        max_lin = lin_speeds.max() if len(lin_speeds) else 0.0
-        max_ang = ang_speeds.max() if len(ang_speeds) else 0.0
-        all_slow = (max_lin < self.lvel_threshold) and (max_ang < self.avel_threshold)
-        self._stable_count = self._stable_count + 1 if all_slow else 0
-        return self._stable_count >= self.stable_steps
-    
-    def compile(self):
-        self.model = self.spec.compile()
-        self.data = mujoco.MjData(self.model)
 
-    def simulate(self, realtime=False):
-        steps = int(self.settle_time / self.model.opt.timestep)
-        input("enter")
-        for i in range(steps):
-            print(f"[t={self.data.time:.2f}s] step={i}/{steps}") if i%int(1.0 / self.model.opt.timestep)==0 else None
-            step_start = time.time()
-            mujoco.mj_step(self.model, self.data)
-            self.viewer.sync()
-            if self.is_settled():
-                print(f"[t={self.data.time:.2f}s] Settled at step {i}")
-                break
-            if realtime:
-                elapsed = time.time() - step_start
-                remaining = max(0, self.model.opt.timestep - elapsed)
-                time.sleep(remaining)
-        self.viewer.close()
 
-    def generate_collision_free_poses(self):
-        collision_manager = CollisionManager()
-        original_mesh = self.part_mesh
-        radius = original_mesh.bounding_sphere.primitive.radius
-        batch_size = min(10, int((2 * self.hx) // (2 * radius)) * int((2 * self.hy) // (2 * radius)))
-        valid_poses = np.zeros((self.n_parts, 7))
-        for i in range(self.n_parts):
-            success = False
-            candidate_trimesh = copy.deepcopy(original_mesh)
-
-            for _ in range(200):
-                layer = i // batch_size
-                x = np.random.uniform(-self.hx + radius*2, self.hx - radius*2)
-                y = np.random.uniform(-self.hy + radius*2, self.hy - radius*2)
-                z = max(radius, 0.5) + layer * (2.5 * radius) + np.random.uniform(-radius, radius)
-                pos = np.asarray([x, y, z])
-                T = np.eye(4)
-                T[:3, 3] = pos
-                T[:3, :3] = R.random().as_matrix()
-                quat = R.from_matrix(T[:3, :3]).as_quat(scalar_first=True)
-
-                is_collision, _, _ = collision_manager.in_collision_single(candidate_trimesh, transform=T, return_names=True, return_data=True)
-                if is_collision:
-                    continue
-
-                valid_poses[i, :3] = pos
-                valid_poses[i, 3:] = quat
-                collision_manager.add_object(f"part_{i}", candidate_trimesh, transform=T)
-                success = True
-                print(f"Generated part {i+1}/{self.n_parts}")
-                break
-
-            if not success:
-                print(f"[WARNING] Could not place part {i} without intersection")
-
-        print(f"[INFO] Successfully placed {len(valid_poses)} parts")
-        return valid_poses
-
-def standardize_mesh(mesh_path:Path):
-    mesh = o3d.io.read_triangle_mesh(mesh_path)
-    mesh_basename = mesh_path.stem
-    bbox = mesh.get_axis_aligned_bounding_box()
-    extent_max = bbox.get_extent().max()
-    if 5.0 < extent_max < 5000.0:
-        print(f"[INFO] Converting units mm → m:")
-        mesh.scale(0.001, center=(0, 0, 0))
-    mesh.compute_vertex_normals()
-    mesh.translate(-mesh.get_center())
-    processed_mesh_path = Path(f"mj_stl/{mesh_basename}.stl")
-    o3d.io.write_triangle_mesh(processed_mesh_path, mesh, write_ascii=False)
-    return processed_mesh_path
-
-def init_open3d():
-    vis = o3d.visualization.Visualizer()
-    vis.create_window(visible=False)
-    vis.destroy_window()
 
 if __name__ == "__main__":
-    bin_mesh = standardize_mesh(Path("bin.stl"))
-    part_mesh_path = standardize_mesh(Path("25333MB000.stl"))
-    part_mesh = trimesh.load(str(part_mesh_path))
+    from app_v2 import MeshSamplingApp
+    from scene_render import (
+        scene_render,
+        compute_dropout_mask,
+        add_edge_artifacts,
+        add_multipath_outliers, add_pepper_noise, subset_render,
+        add_sensor_noise,
+        add_surface_noise,
+        add_image_space_effects,
+        add_scan_line_banding
+    )
+    from segment_instances import segment_point_cloud
+    from enums import Stage
 
-    decomposed_convex_list = trimesh.decomposition.convex_decomposition(part_mesh)
-    decomposed_mesh_list = [trimesh.Trimesh(vertices=h["vertices"], faces=h["faces"], process=False) for h in decomposed_convex_list]
-    print(f"trimesh decomposed to {len(decomposed_convex_list)} convex hulls")
+    app = MeshSamplingApp(headless=True)
+
+    app.stages[Stage.IMPORT_MESH]._run_worker()
+    app._express_sampling_worker()
+    part_mesh = o3d_to_trimesh(app.target_mesh)
 
     rendering_flag = True
+    verbose = True
     init_open3d()
-    scene = MujocoBinScene(part_mesh, decomposed_mesh_list, n_parts=200, render=rendering_flag)
+    scene = MujocoBinScene(part_mesh, app.convex_meshes, n_parts=3, render=rendering_flag)
     scene.simulate(realtime=rendering_flag)
     scene_state = scene.extract_scene_state()
 
@@ -275,4 +271,91 @@ if __name__ == "__main__":
     is_collision = collision_manager.in_collision_internal()
     print("Collision detected by trimesh!!") if is_collision else None
     o3d_scene = scene.mujoco_scene_to_open3d(scene_state)
-    o3d.visualization.draw_geometries(o3d_scene, width=1080, height=720)
+
+    cam_pos = np.asarray([0,0,1.5])
+    look_at = np.zeros(3)
+    T_cam = camera_view_matrix(cam_pos, look_at)
+
+    fov = 41.11
+    W, H = 1920, 1200
+
+    render = scene_render(o3d_scene, T_cam, look_at, fov, W, H, verbose=verbose)
+    pts = render["points"]
+    nrm = render["normals"]
+    geom_ids = render["geom_ids"]
+    pix_all   = render["pixel_idx"]
+    bin_pts = pts[geom_ids==0]
+    bin_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(bin_pts))
+    bin_pcd = bin_pcd.voxel_down_sample(0.001)
+
+    keep = compute_dropout_mask(render, roughness=0.4,
+                                albedo_per_geom_id={2: 0.04},  # black rubber part
+                                density_cos_ref=0.7,           # oblique density thinning
+                                verbose=verbose)
+    render = add_image_space_effects(render, keep,
+                                     smooth_sigma_px=0.5,
+                                     sigma_fringe_corr=0.0001, 
+                                     verbose=verbose)
+    pts, nrm = add_edge_artifacts(render, keep, verbose=verbose)
+    r = subset_render(render, keep, verbose=verbose)
+    mp, mn = add_multipath_outliers(r, verbose=verbose)
+    pp, pn = add_pepper_noise(r, verbose=verbose)
+    pts = np.vstack([pts, mp, pp])
+    nrm = np.vstack([nrm, mn, pn])
+
+    # Build per-point metadata for the full combined cloud.
+    n_kept    = keep.sum()
+    n_outlier = len(pts) - n_kept
+    pix_all   = np.concatenate([render["pixel_idx"][keep], np.full(n_outlier, -1, np.int64)])
+    cproj_all = np.concatenate([render["cos_proj"][keep], np.ones(n_outlier)])
+
+    pts = add_scan_line_banding(pts, nrm, pix_all, render["res"], render["sensor_origin"], verbose=verbose)
+    pts = add_sensor_noise(pts, nrm, render["sensor_origin"], pixel_idx=pix_all, res=render["res"], cos_proj=cproj_all, verbose=verbose)
+    pts = add_surface_noise(pts, nrm, verbose=verbose)
+
+
+    # ── Instance segmentation ──────────────────────────────────────────────────
+    # render still holds the full canonical geom_id image (built from the
+    # shadow-visible set before dropout), which is the correct substrate for
+    # mask generation.  pix_all maps every point — canonical and injected —
+    # to its image pixel (-1 for injected points, which receive label -1).
+    labels = segment_point_cloud(
+        render, pts, pix_all,
+        erosion_px=3.0,
+        dilation_px=1.5,
+        confusion_depth_sigma=0.015,   # ~15 mm — tune to your part height spread
+        confusion_boundary_px=4,
+        occlusion_loss_px=2,
+        boundary_noise_px=6.0,
+        seed=0,
+        verbose=verbose
+    )
+    print("segmented scene point virtually")
+    # labels : (N,) int32 — geom_id per point, -1 = unassigned
+    
+    # global bin_pcd 
+    pcds = [] # contains the valid object pcd 
+    rejected = [] # contains the rejected object pcd
+    bin_pcd = None
+    unique_id_list = np.unique(labels[labels >= 0])
+    for inst_id in unique_id_list:
+        inst_pts = pts[labels == inst_id]
+        inst_nrm = nrm[labels == inst_id]
+        inst_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(inst_pts))
+        inst_pcd_downsampled = inst_pcd.voxel_down_sample(0.001)
+        if inst_id == len(unique_id_list)-1: # box will always be at last
+            bin_pcd = copy.deepcopy(inst_pcd_downsampled)
+            bin_pcd.paint_uniform_color([1., 1., 1.])
+            continue
+        if len(inst_pcd_downsampled.points) in range(*app.point_count_range):
+            print(f"Instance {inst_id} point count within threshold {app.point_count_range}: {len(inst_pcd_downsampled.points)}")
+            pcds.append(inst_pcd_downsampled)
+            continue
+        print(f"Instance {inst_id} point count out of threshold {app.point_count_range}: {len(inst_pcd_downsampled.points)}")
+        rejected.append(inst_pcd_downsampled)
+    pcds.sort(key=lambda x: len(x.points), reverse=True)
+    
+    vis = o3d_display(pcds)
+    vis.add_geometry(bin_pcd)
+    vis.run()
+    vis.destroy_window()

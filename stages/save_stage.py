@@ -2,8 +2,9 @@ import open3d.visualization.gui as gui
 from enums import Stage
 from pathlib import Path
 from stages.stage_base import BaseStage
-from utilities import pointcloud_to_ply, pcd_geocenter
+from file_utils import pointcloud_to_ply
 from scipy.spatial.transform import Rotation as R
+# from open3d.io import write_triangle_mesh
 
 class SaveStage(BaseStage):
     def __init__(self, app):
@@ -56,21 +57,27 @@ class SaveStage(BaseStage):
                 print("[WARN] No pointcloud to save")
                 return
         try:
-            folder_path = Path.cwd() / "reference_pcd"
-            folder_path.mkdir(parents=True, exist_ok=True)
-            pcd_path = folder_path / (self.app.mesh_basename + ".ply")
+            pcd_folder_path = Path.cwd() / "reference_pcd"
+            pcd_folder_path.mkdir(parents=True, exist_ok=True)
+            pcd_path = pcd_folder_path / (self.app.mesh_basename + ".ply")
+            # mesh_folder_path = Path.cwd() / "processed_mesh"
+            # mesh_folder_path.mkdir(parents=True, exist_ok=True)
+            # mesh_path = mesh_folder_path / (self.app.mesh_basename + ".stl")
             center_quat = R.from_matrix(self.app.geocenter[:3,:3]).as_quat()
             comments = [
-                f"geocenter x {self.app.geocenter[3, 0]}",
-                f"geocenter y {self.app.geocenter[3, 1]}",
-                f"geocenter z {self.app.geocenter[3, 2]}",
-                f"geocenter qx {center_quat[0]}",
-                f"geocenter qy {center_quat[1]}",
-                f"geocenter qz {center_quat[2]}",
-                f"geocenter qw {center_quat[3]}"
+                f"geocenter_x {self.app.geocenter[3, 0]}",
+                f"geocenter_y {self.app.geocenter[3, 1]}",
+                f"geocenter_z {self.app.geocenter[3, 2]}",
+                f"geocenter_qx {center_quat[0]}",
+                f"geocenter_qy {center_quat[1]}",
+                f"geocenter_qz {center_quat[2]}",
+                f"geocenter_qw {center_quat[3]}"
                 ]
             pointcloud_to_ply(self.app.down_pcd, str(pcd_path), comments=comments)
+            # write_triangle_mesh(mesh_path, self.app.target_mesh, write_ascii=False, print_progress=True)
+            self.app.output_pcd_path = pcd_path
             print(f"[INFO] Point cloud saved to {pcd_path}")
+            # print(f"[INFO] Mesh saved to {mesh_path}")
         except Exception as e:
             print(f"[ERROR] Failed to save PLY: {e}")
             return

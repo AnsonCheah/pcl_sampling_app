@@ -5,6 +5,9 @@ from tkinter import Tk, filedialog
 from pathlib import Path
 from stages.stage_base import BaseStage
 from enums import Stage
+import trimesh
+import threading
+from geom_utils import o3d_to_trimesh
 
 class ImportMeshStage(BaseStage):
     def __init__(self, app):
@@ -64,8 +67,12 @@ class ImportMeshStage(BaseStage):
         self.app.raw_pcd = None
         self.app.cropped_pcd = None
         self.app.down_pcd = None
-        self.app.bbox_corners = None
-        
+        self.app.output_pcd_path = None
+        self.app.mesh_basename = None
+        if self.decompose_thread:
+            self.decompose_thread.join()
+            self.decompose_thread = None
+
         self._refresh_ui()
 
     # ===============================
@@ -86,34 +93,37 @@ class ImportMeshStage(BaseStage):
         if mesh.is_empty():
             print("[WARN] Empty mesh")
             return
-        
 
         bbox = mesh.get_axis_aligned_bounding_box()
         extent_max = bbox.get_extent().max()
-
         if 5.0 < extent_max < 5000.0:
             print(f"[INFO] Converting units mm → m: {self.file_path.name}")
             mesh.scale(0.001, center=(0, 0, 0))
 
         mesh.compute_vertex_normals()
         mesh.translate(-mesh.get_center())
-
-        # Reset downstream data
         self.app.target_mesh = mesh
         self.app.mesh_basename = self.file_path.stem
+        print(f"[MESH] Starting mesh decomposition")
+        self.start_decompose_mesh()
+        print(f"[MESH] Started mesh decomposition")
+
         self.app.raw_pcd = None
         self.app.cropped_pcd = None
         self.app.down_pcd = None
-
-        bbox = mesh.get_axis_aligned_bounding_box()
-        self.app.bbox_corners = np.asarray(bbox.get_box_points())
-        extent_min = bbox.get_extent().min()
-
-        self.app.ray_spacing = np.round(np.clip(extent_min / 100.0, 0.0005, 0.003), 4)
-        self.app.voxel_size = np.round(np.clip(extent_min / 50.0, 0.001, 0.005), 4)
-        print(f"[INFO] Ray spacing: {self.app.ray_spacing*1000:.2f} mm")
-        print(f"[INFO] Voxel size:  {self.app.voxel_size*1000:.2f} mm")
         print(f"mesh loaded")
+
+    def decompose_mesh(self):
+        part_mesh = o3d_to_trimesh(self.app.target_mesh)
+        decomposed_convex_list = trimesh.decomposition.convex_decomposition(part_mesh)
+        for h in decomposed_convex_list:
+            mesh = o3d.geometry.TriangleMesh(vertices=o3d.utility.Vector3dVector(h["vertices"]), triangles=o3d.utility.Vector3iVector(h["faces"])) 
+            self.app.convex_meshes.append(mesh)
+        print(f"[MESH STAGE] decomposed mesh")
+
+    def start_decompose_mesh(self):
+        self.decompose_thread = threading.Thread(target=self.decompose_mesh, daemon=True)
+        self.decompose_thread.start()
 
     def _open_stl_dialog(self):
         Tk().withdraw()

@@ -5,7 +5,8 @@ import open3d as o3d
 import open3d.visualization.gui as gui
 from enums import Stage
 from stages.stage_base import BaseStage
-from utilities import fibonacci_sphere, orient_normals_using_cameras, normalize_normals, validate_normals
+from geom_utils import fibonacci_sphere, orient_normals_using_cameras, normalize_normals, validate_normals, camera_view_matrix
+from scene_render import scene_render
 
 class RaycastStage(BaseStage):
     def __init__(self, app):
@@ -13,8 +14,14 @@ class RaycastStage(BaseStage):
         super().__init__(app)
         self.camera_distance = 1.5
         self.num_views = 20
-        self.ray_margin_mm = 10.0
         self.ray_spacing = 0.001
+        self.point_count_mean = 0
+        self.point_count_range = (0,0)
+        self.view_sphere = fibonacci_sphere(self.num_views)
+        self.fov_deg = 41.11
+        self.res_width = 1920
+        self.res_height = 1200
+        self.point_counts = None
 
     def build_panel(self):
         if self.app.headless:
@@ -72,6 +79,7 @@ class RaycastStage(BaseStage):
         self.app.raw_pcd = None
         self.app.cropped_pcd = None
         self.app.down_pcd = None
+        self.app.output_pcd_path = None
         self._refresh_ui()
 
     # ---------- Worker ----------
@@ -84,56 +92,25 @@ class RaycastStage(BaseStage):
             self.camera_distance = self.camera_distance_slider.double_value
             self.num_views = self.num_views_slider.int_value
             self.app.show_progress("Raycasting mesh...")
-
-        scene = o3d.t.geometry.RaycastingScene()
-        _ = scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(self.app.target_mesh))
-        view_dirs = fibonacci_sphere(self.num_views)
+        print(f"[RAYCAST] Worker started")
         all_points = []
         all_cam_pos = []
-        bbox = self.app.target_mesh.get_axis_aligned_bounding_box()
-        bbox_corners = np.asarray(bbox.get_box_points())
-        for view_index, view_dir in enumerate(view_dirs):
-            cam_pos = view_dir * (self.camera_distance)
-            forward = -cam_pos / np.linalg.norm(cam_pos)
-            right = np.cross([0, 0, 1], forward)
-            if np.linalg.norm(right) < 1e-6:
-                right = np.cross([0, 1, 0], forward)
-            right /= np.linalg.norm(right)
-            up = np.cross(forward, right)
-
-            # Project bbox corners onto camera plane with margin
-            rel = bbox_corners - cam_pos
-            x_proj = rel @ right
-            y_proj = rel @ up
-            margin = self.ray_margin_mm * 1e-3
-            xs = np.arange(x_proj.min() - margin, x_proj.max() + margin, self.ray_spacing)
-            ys = np.arange(y_proj.min() - margin, y_proj.max() + margin, self.ray_spacing)
-
-            if len(xs) == 0 or len(ys) == 0:
-                continue
-
-            uu, vv = np.meshgrid(xs, ys)
-            origins = (cam_pos + uu[..., None] * right + vv[..., None] * up)
-
-            dirs = forward[None, None, :].repeat(origins.shape[0], axis=0)
-            dirs = dirs.repeat(origins.shape[1], axis=1)
-
-            rays = np.concatenate([origins.reshape(-1, 3), dirs.reshape(-1, 3)],axis=1)
-            rays = o3d.core.Tensor(rays, dtype=o3d.core.Dtype.Float32)
-
-            hits = scene.cast_rays(rays)
-            hit_mask = hits["t_hit"].isfinite()
-
-            if not hit_mask.any():
-                continue
-
-            hit_points = (rays[hit_mask][:, :3] + rays[hit_mask][:, 3:] * hits["t_hit"][hit_mask].reshape((-1, 1))).numpy()
+        self.point_counts = np.zeros((self.num_views))
+        for view_index, view_dir in enumerate(self.view_sphere):
+            cam_pos = view_dir * self.camera_distance
+            look_at = np.zeros(3)
+            T_cam = camera_view_matrix(cam_pos, look_at)
+            initial_render = scene_render([self.app.target_mesh], T_cam, look_at, self.fov_deg, self.res_width, self.res_height)
+            hit_points = initial_render["points"]
             cam_pos_arr = np.repeat(cam_pos[None, :], len(hit_points), axis=0)
             all_points.append(hit_points)
             all_cam_pos.append(cam_pos_arr)
+            self.point_counts[view_index] = len(o3d.geometry.PointCloud(o3d.utility.Vector3dVector(hit_points)).voxel_down_sample(self.ray_spacing).points)
 
             if not self.app.headless:
                 self.app.update_progress((view_index + 1) / self.num_views)
+        self.app.point_count_mean = self.point_count_mean = int(np.mean(self.point_counts))
+        self.app.point_count_range = self.point_count_range = (int(min(self.point_counts * 0.8)), int(max(self.point_counts * 1.2)))
 
         if not all_points:
             logging.warning(f"No points generated from mesh")
@@ -144,7 +121,6 @@ class RaycastStage(BaseStage):
         cam_positions = np.vstack(all_cam_pos)
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(points)
-
         pcd.remove_non_finite_points()
         pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius = 0.005, max_nn = 60))
         orient_normals_using_cameras(pcd, cam_positions)
@@ -153,7 +129,7 @@ class RaycastStage(BaseStage):
         pcd = pcd.voxel_down_sample(initial_voxel)
         normalize_normals(pcd)
         validate_normals(pcd)
-        print(f"[INFO] Initial voxelized points: {len(pcd.points)}")
+        # print(f"[INFO] Initial voxelized points: {len(pcd.points)}")
         self.app.raw_pcd = pcd
         self.app.cropped_pcd = copy.deepcopy(self.app.raw_pcd)
 

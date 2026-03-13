@@ -1,5 +1,5 @@
 from enums import *
-import open3d as o3d
+# import open3d as o3d
 import open3d.visualization.gui as gui
 import open3d.visualization.rendering as rendering
 import numpy as np
@@ -11,7 +11,7 @@ from stages.save_stage import SaveStage
 from stages.synthetic_stage import SyntheticStage
 import threading
 from pathlib import Path
-from utilities import pointcloud_to_ply, open_source_folder_dialog
+from file_utils import pointcloud_to_ply, open_source_folder_dialog
 
 class MeshSamplingApp:
 
@@ -83,26 +83,32 @@ class MeshSamplingApp:
         self.visible_target_pcd = None
         self.occluders_pcd = None
         self.mesh_basename = None
+        self.convex_meshes = []
         self.synthetic_targets = []
         self.feature_pcd = None
         self.flat_pcd = None
+        self.output_pcd_path = None
+        self.geocenter = np.eye(4)
+        self.point_count_mean = None
+        self.point_count_range = None
         self.stage = Stage.IMPORT_MESH
-        if not self.headless:
+        if not self.headless and Stage.SYNTHETIC in self.stages:
             self.stages[Stage.SYNTHETIC].combobox_targets.clear_items()
         self.set_stage(Stage.IMPORT_MESH)
 
     def set_stage(self, stage: Stage):
         self.stage = stage
-        if not self.headless:
-            for s in self.stages.values():
-                s.panel.visible = (s is self.stages[stage])
-                for w in s.widgets:
-                    if hasattr(w.widget, "toggleable") and w.widget.toggleable:
-                        w.widget.is_on = False
-                self.window.set_needs_layout()
-                self.stages[stage]._refresh_ui()
-                self.stages[stage].enable_widgets()
-                self._update_title()
+        if self.headless:
+            return
+        for s in self.stages.values():
+            s.panel.visible = (s is self.stages[stage])
+            for w in s.widgets:
+                if hasattr(w.widget, "toggleable") and w.widget.toggleable:
+                    w.widget.is_on = False
+            self.window.set_needs_layout()
+            self.stages[stage]._refresh_ui()
+            self.stages[stage].enable_widgets()
+            self._update_title()
 
     def _on_layout(self, layout_context):
         r = self.window.content_rect

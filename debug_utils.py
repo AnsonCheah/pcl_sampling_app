@@ -36,7 +36,6 @@ def visualize_projector_rays(surface_pts, proj_pos, color=(0.2, 1.0, 0.2)):
     ls.colors = o3d.utility.Vector3dVector(colors)
     return ls
 
-
 def create_frustum_lines(pos, look_at, fov_deg, aspect=1.0, scale=0.2, color=(1,0,0)):
     forward = look_at - pos
     forward /= np.linalg.norm(forward)

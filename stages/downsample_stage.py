@@ -3,7 +3,8 @@ import open3d as o3d
 import open3d.visualization.gui as gui
 from enums import Stage
 from stages.stage_base import BaseStage
-from utilities import mask_point_cloud, find_cdf_knee, normalize_normals, pcd_geocenter
+from geom_utils import mask_point_cloud, normalize_normals, pcd_geocenter
+from math_utils import find_cdf_knee
 
 class DownsampleStage(BaseStage):
     def __init__(self, app):
@@ -61,6 +62,8 @@ class DownsampleStage(BaseStage):
 
     def reset(self):
         self.app.down_pcd = None 
+        self.app.output_pcd_path = None
+
         self._refresh_ui()
 
     def worker(self):
@@ -127,6 +130,8 @@ class DownsampleStage(BaseStage):
         self.app.raw_pcd.transform(T)
         self.app.cropped_pcd.transform(T)
         self.app.target_mesh.transform(T)
+        for mesh in self.app.convex_meshes:
+            mesh.transform(T)
         self.app.geocenter = np.round(pcd_geocenter(self.app.down_pcd), decimals=5)
         print("recentered mesh and pointcloud")
         self._refresh_ui()
