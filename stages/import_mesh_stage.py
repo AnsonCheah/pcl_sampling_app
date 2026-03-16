@@ -54,15 +54,23 @@ class ImportMeshStage(BaseStage):
             print("headless, skipped")
             return
 
+        # self.app.hide_geoms_in_scene()
+        # if self.app.has_geom("mesh"): 
+        #     print(f"scene has mesh geom")
+        #     self.app.show_geom_in_scene(["mesh"])
         self.app.main_thread(self.app._clear_scene)
-
+        
         if self.app.target_mesh is not None:
+            # print(f"adding mesh")
+            # self.app.add_geom_in_scene("mesh", self.app.target_mesh)
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry("mesh", self.app.target_mesh, self.app.default_material))
             self.app.main_thread(self.app._reframe)
+        self.app.scene.force_redraw()
         self.enable_widgets()
 
     def reset(self):
         """Clear mesh-related data"""
+        # self.app.main_thread(self.app._clear_scene)
         self.app.target_mesh = None
         self.app.raw_pcd = None
         self.app.cropped_pcd = None
@@ -107,6 +115,8 @@ class ImportMeshStage(BaseStage):
         print(f"[MESH] Starting mesh decomposition")
         self.start_decompose_mesh()
         print(f"[MESH] Started mesh decomposition")
+
+        # self.app.main_thread(self.app._clear_scene)
 
         self.app.raw_pcd = None
         self.app.cropped_pcd = None

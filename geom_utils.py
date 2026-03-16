@@ -3,6 +3,13 @@ import open3d as o3d
 from scipy.spatial.transform import Rotation as R
 import trimesh
 import colorsys
+from dataclasses import dataclass
+import open3d.visualization.rendering as rendering
+
+@dataclass
+class O3DSceneObject:
+    geom: o3d.geometry.Geometry3D
+    material: rendering.MaterialRecord()
 
 def init_open3d():
     vis = o3d.visualization.Visualizer()
