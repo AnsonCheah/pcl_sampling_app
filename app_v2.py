@@ -1,4 +1,5 @@
 from enums import *
+import open3d.core as o3c
 from open3d.geometry import Geometry3D
 import open3d.visualization.gui as gui
 import open3d.visualization.rendering as rendering
@@ -13,6 +14,8 @@ import threading
 from pathlib import Path
 from file_utils import pointcloud_to_ply, open_source_folder_dialog
 from geom_utils import O3DSceneObject
+# import cupy as cp
+# print(cp.cuda.runtime.getDeviceCount())
 
 class MeshSamplingApp:
 
@@ -70,7 +73,7 @@ class MeshSamplingApp:
             self.progress_bar.value = 0.0  # range [0, 1]
             self.progress_panel.add_child(self.progress_label)
             self.progress_panel.add_child(self.progress_bar)
-            self.pb_panel_size = (300, 50)
+            self.pb_panel_size = (400, 50)
             x=(self.window_width - self.pb_panel_size[0])>>1
             y=(self.window_height - self.pb_panel_size[1])>>1
             self.progress_panel.frame = gui.Rect(x, y, self.pb_panel_size[0], self.pb_panel_size[1])
@@ -86,7 +89,7 @@ class MeshSamplingApp:
         self.occluders_pcd = None
         self.mesh_basename = None
         self.convex_meshes = []
-        self.synthetic_targets = []
+        self.synthetic_targets = {}
         self.feature_pcd = None
         self.flat_pcd = None
         self.output_pcd_path = None

@@ -7,7 +7,7 @@ import open3d as o3d
 from rich import print as rp
 from scipy.spatial.transform import Rotation as R
 import copy
-from geom_utils import o3d_to_trimesh, trimesh_to_o3d, camera_view_matrix, o3d_display, init_open3d
+from geom_utils import o3d_to_trimesh, trimesh_to_o3d, camera_view_matrix, o3d_display, init_open3d, O3DSceneObject
 from trimesh.collision import CollisionManager
 
 @dataclass
@@ -187,7 +187,19 @@ class MujocoBinScene:
                 time.sleep(remaining)
         if self.viewer is not None: self.viewer.close()
 
-    def mujoco_scene_to_open3d(self, scene_dict):
+    def extract_scene_state(self):
+        scene_dict = {}
+        for obj in self.scene_objects:
+            body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, obj.body_name)
+            pos = self.data.xpos[body_id]
+            quat = self.data.xquat[body_id]  # w x y z
+            scene_dict[obj.body_name] = {
+                "position": pos,
+                "quaternion": quat,
+            }
+        return scene_dict
+
+    def mujoco_scene_to_o3d(self, scene_dict):
         """
         scene_dict : dict
             {
@@ -199,9 +211,8 @@ class MujocoBinScene:
         -------
         o3d_mesh_list : list of open3d.geometry.TriangleMesh
         """
-
-        o3d_mesh_list = []
-        for _, body_data in scene_dict.items():
+        o3d_mesh_dict = {}
+        for key, body_data in scene_dict.items():
             pos = body_data["position"]
             quat = body_data["quaternion"]
             T = np.eye(4)
@@ -213,26 +224,9 @@ class MujocoBinScene:
                 print(f"[WARNING] Part Mesh failed to convert to o3d")
                 continue
             mesh.compute_vertex_normals()
-            mesh.transform(T)
-            o3d_mesh_list.append(mesh)
-        
-        o3d_mesh_list.append(self.bin_mesh)
-        return o3d_mesh_list
-
-    def extract_scene_state(self):
-        scene_dict = {}
-        for obj in self.scene_objects:
-            body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, obj.body_name)
-            pos = self.data.xpos[body_id]
-            quat = self.data.xquat[body_id]  # w x y z
-            scene_dict[obj.body_name] = {
-                "position": pos,
-                "quaternion": quat
-            }
-        return scene_dict
-
-
-
+            o3d_mesh_dict[key] = O3DSceneObject(geom=mesh, tf=T)
+        o3d_mesh_dict["bin"] = O3DSceneObject(geom=self.bin_mesh, tf=np.eye(4))
+        return o3d_mesh_dict
 
 if __name__ == "__main__":
     from app_v2 import MeshSamplingApp
@@ -341,7 +335,7 @@ if __name__ == "__main__":
     for inst_id in unique_id_list:
         inst_pts = pts[labels == inst_id]
         inst_nrm = nrm[labels == inst_id]
-        inst_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(inst_pts))
+        inst_pcd = o3d.t.geometry.PointCloud(o3d.utility.Vector3dVector(inst_pts))
         inst_pcd_downsampled = inst_pcd.voxel_down_sample(0.001)
         if inst_id == len(unique_id_list)-1: # box will always be at last
             bin_pcd = copy.deepcopy(inst_pcd_downsampled)

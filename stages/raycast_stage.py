@@ -5,7 +5,7 @@ import open3d as o3d
 import open3d.visualization.gui as gui
 from enums import Stage
 from stages.stage_base import BaseStage
-from geom_utils import fibonacci_sphere, orient_normals_using_cameras, normalize_normals, validate_normals, camera_view_matrix
+from geom_utils import fibonacci_sphere, orient_normals_using_cameras, normalize_normals, validate_normals, camera_view_matrix, O3DSceneObject
 from scene_render import scene_render
 
 class RaycastStage(BaseStage):
@@ -96,11 +96,12 @@ class RaycastStage(BaseStage):
         all_points = []
         all_cam_pos = []
         self.point_counts = np.zeros((self.num_views))
+        raycast_dict = {"ref_mesh": O3DSceneObject(geom=self.app.target_mesh, tf=np.eye(4))}
         for view_index, view_dir in enumerate(self.view_sphere):
             cam_pos = view_dir * self.camera_distance
             look_at = np.zeros(3)
             T_cam = camera_view_matrix(cam_pos, look_at)
-            initial_render = scene_render([self.app.target_mesh], T_cam, look_at, self.fov_deg, self.res_width, self.res_height)
+            initial_render = scene_render(raycast_dict, T_cam, look_at, self.fov_deg, self.res_width, self.res_height)
             hit_points = initial_render["points"]
             cam_pos_arr = np.repeat(cam_pos[None, :], len(hit_points), axis=0)
             all_points.append(hit_points)

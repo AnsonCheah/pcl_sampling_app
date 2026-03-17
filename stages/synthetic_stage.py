@@ -6,8 +6,7 @@ from enums import Stage
 from stages.stage_base import BaseStage
 from pathlib import Path
 from file_utils import pointcloud_to_ply
-# from trimesh.collision import CollisionManager
-from geom_utils import o3d_to_trimesh, trimesh_to_o3d, camera_view_matrix, O3DSceneObject
+from geom_utils import o3d_to_trimesh, camera_view_matrix, O3DSceneObject
 from scene_render import (
     scene_render,
     compute_dropout_mask,
@@ -22,6 +21,7 @@ from segment_instances import segment_point_cloud
 import copy
 from mujoco_bin_scene import MujocoBinScene
 import colorsys
+from rich import print as rp
 
 class SyntheticStage(BaseStage):
     def __init__(self, app):
@@ -83,7 +83,7 @@ class SyntheticStage(BaseStage):
         self.enable_widgets()
 
     def reset(self):
-        self.app.synthetic_targets = []
+        self.app.synthetic_targets = {}
         self.scene_objects = {}
         self.combobox_targets.clear_items()
         self._refresh_ui()
@@ -107,7 +107,7 @@ class SyntheticStage(BaseStage):
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry(name, geom, material))
 
         TOTAL_STEPS = 10
-        self.app.synthetic_targets = []
+        self.app.synthetic_targets = {}
         self.app.main_thread(lambda: self.app._clear_scene())
 
         current_step = 0
@@ -118,7 +118,7 @@ class SyntheticStage(BaseStage):
         scene = MujocoBinScene(part_mesh, self.app.convex_meshes, n_parts=self.num_targets, render=rendering_flag)
         scene.simulate(realtime=rendering_flag)
         scene_state = scene.extract_scene_state()
-        o3d_scene = scene.mujoco_scene_to_open3d(scene_state)
+        o3d_scene = scene.mujoco_scene_to_o3d(scene_state)
 
         current_step += 1
         self.app.update_progress(current_step/TOTAL_STEPS, f"Generating synthetic scene...")
@@ -190,6 +190,8 @@ class SyntheticStage(BaseStage):
         self.app.update_progress(current_step/TOTAL_STEPS, f"Filtering targets by point counts...")
 
         unique_id_list = np.unique(labels[labels >= 0])
+        valid_count = 0
+        tf_by_id = {value.id: value.tf for value in o3d_scene.values()}
         for _, inst_id in enumerate(unique_id_list):
             inst_pts = pts[labels == inst_id]
             inst_nrm = nrm[labels == inst_id]
@@ -202,7 +204,9 @@ class SyntheticStage(BaseStage):
                 continue
             if min(self.app.point_count_range)<=len(inst_pcd_downsampled.points)<=max(self.app.point_count_range):
                 print(f"Instance {inst_id} point count within threshold {self.app.point_count_range}: {len(inst_pcd_downsampled.points)}")
-                self.app.synthetic_targets.append(inst_pcd_downsampled)
+                valid_count += 1
+                inst_name = f"synthetic_sample_{valid_count}"
+                self.app.synthetic_targets[inst_name] = O3DSceneObject(inst_pcd_downsampled, id=inst_id, tf=tf_by_id[inst_id])
                 continue
             print(f"Instance {inst_id} point count out of threshold {self.app.point_count_range}: {len(inst_pcd_downsampled.points)}")
 
@@ -210,11 +214,11 @@ class SyntheticStage(BaseStage):
         hues = np.linspace(0, 1, len(self.app.synthetic_targets), endpoint=False).tolist()
         colors = [list(colorsys.hsv_to_rgb(h, saturation, value)) for h in hues]
         self.hide_geoms_in_scene()
-        for index, pcd in enumerate(self.app.synthetic_targets):
-            add_to_render_scene(f"synthetic_sample_{index}", pcd, type="target", color=colors[index])
+        for index, (key, value) in enumerate(self.app.synthetic_targets.items()):
+            add_to_render_scene(key, value.geom, type="target", color=colors[index])
 
         self.combobox_scenes.add_item("segmented_bin_scene")
-        self.scene_objects["bin_pcd"] = O3DSceneObject(geom=bin_pcd, material=self.app.default_point_material)
+        self.scene_objects["bin_pcd"] = O3DSceneObject(geom=bin_pcd, id=0, material=self.app.default_point_material, tf=np.eye(4))
         self.app.synthetic_scenes.append("segmented_bin_scene")
         self.app.main_thread(lambda: self.app.scene.scene.add_geometry("bin_pcd", bin_pcd, self.app.default_point_material))
         current_step += 1
@@ -224,11 +228,14 @@ class SyntheticStage(BaseStage):
     def save_synthetic_targets(self):
         try:
             base_path = Path.cwd() / "synthetic_target" / self.app.mesh_basename
-            for start, prefix in enumerate(["train", "test"]):
+            for i, (key, value) in enumerate(self.app.synthetic_targets.items()):
+                count = i//2
+                prefix = "train" if i%2==0 else "test"
                 folder_path = base_path / prefix
                 folder_path.mkdir(parents=True, exist_ok=True)
-                for i, pcd in enumerate(self.app.synthetic_targets[start::2]):
-                    pointcloud_to_ply(pcd, folder_path / f"{prefix}_sample_{i}.ply")
+                scene_pcd = copy.deepcopy(value.geom)
+                scene_pcd.transform(np.linalg.inv(value.tf))
+                pointcloud_to_ply(scene_pcd, folder_path / f"{prefix}_sample_{count}.ply")
         except Exception as e:
             print(e)
 
@@ -249,10 +256,13 @@ class SyntheticStage(BaseStage):
             return
         self.app.main_thread(lambda: self.app._clear_scene())
         if selected_text == "segmented_bin_scene":
-            geom_list = ["bin_pcd"] + [f"synthetic_sample_{i}" for i,_ in enumerate(self.app.synthetic_targets)]
+            geom_list = ["bin_pcd"] + [key for key in self.app.synthetic_targets.keys()]
             def add_geoms():
                 for geom_name in geom_list:
-                    self.app.scene.scene.add_geometry(geom_name, self.scene_objects[geom_name].geom, self.scene_objects[geom_name].material)
+                    self.app.scene.scene.add_geometry(
+                        geom_name, 
+                        self.scene_objects[geom_name].geom, 
+                        self.scene_objects[geom_name].material)
             self.app.main_thread(add_geoms)
         else:
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry(
@@ -268,8 +278,9 @@ class SyntheticStage(BaseStage):
         self.app.main_thread(hide_geoms)
         
     def show_segmented_scene(self):
-        geom_list = ["bin_pcd"] + [f"synthetic_sample_{i}" for i,_ in enumerate(self.app.synthetic_targets)]
+        geom_list = ["bin_pcd"] + [key for key in self.app.synthetic_targets.keys()]
         def show_geoms():
             for name in geom_list:
                 self.app.scene.scene.show_geometry(name, show=True)
+            self.app.scene.scene.show_axes(enable=True)
         self.app.main_thread(show_geoms)

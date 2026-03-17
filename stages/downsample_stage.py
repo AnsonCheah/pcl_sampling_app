@@ -75,7 +75,7 @@ class DownsampleStage(BaseStage):
             return
         
         bbox = self.app.cropped_pcd.get_minimal_oriented_bounding_box()
-        self.voxel_size = np.round(np.clip((bbox.volume() / 3), 0.001, 0.005), 4)
+        self.voxel_size = np.round(np.clip((np.asarray(bbox.volume()) / 3), 0.001, 0.005), 4)
         self.adaptive_voxel_downsample() if self.use_adaptive else self.uniform_voxel_downsample()
         self.app.geocenter = np.round(pcd_geocenter(self.app.down_pcd), decimals=5)
         print(f"[INFO] Downsampled {self.voxel_size * 1000}mm from {len(self.app.cropped_pcd.points)} to {len(self.app.down_pcd.points)} points")
@@ -107,10 +107,10 @@ class DownsampleStage(BaseStage):
         
         for i in range(n_points):
             _, idx, _ = tree.search_knn_vector_3d(pts[i], self.curvature_k_neighbors)
-            nbrs = pts[idx]
+            nbrs = np.asarray(pts[idx])
             centered = nbrs - nbrs.mean(axis=0)
             C = (centered.T @ centered) / (len(nbrs) - 1)
-            eigvals = np.linalg.eigvalsh(C)
+            eigvals = np.linalg.eigvalsh(np.asarray(C))
             eigval_sum = eigvals.sum()
             curv[i] = eigvals[0] / eigval_sum if eigval_sum > 1e-12 else 0.0
             if not self.app.headless and (i + 1) % batch_size == 0:

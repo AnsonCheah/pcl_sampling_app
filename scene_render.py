@@ -85,22 +85,18 @@ render dict fields
 import numpy as np
 from scipy.spatial import cKDTree
 from scipy.ndimage import gaussian_filter, maximum_filter
+from geom_utils import estimate_normals
 import time
 import open3d as o3d
 import sys
 from rich import print as rp
+# import cupy as cp
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  SECTION 1 — Canonical renderer
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _estimate_normals(points, view_pos, radius=0.005, max_nn=50):
-    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points))
-    pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=max_nn))
-    pcd.orient_normals_towards_camera_location(view_pos)
-    return np.asarray(pcd.normals)
-
-
-def scene_render(meshes, T_cam, look_at, fov, res_width, res_height,
+def scene_render(meshes:dict, T_cam, look_at, fov, res_width, res_height,
                  baseline=0.27, normal_radius=0.005, normal_max_nn=50,
                  verbose=False):
     """
@@ -116,19 +112,25 @@ def scene_render(meshes, T_cam, look_at, fov, res_width, res_height,
     """
     start = time.time()
     scene = o3d.t.geometry.RaycastingScene()
-    for m in meshes: scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(m))
+    for _, mesh_data in meshes.items(): 
+        mesh = mesh_data.geom
+        mesh.transform(mesh_data.tf)
+        mesh_data.id = scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh))
 
     rays    = scene.create_rays_pinhole(
         fov_deg=fov, center=look_at, eye=T_cam[:3, 3],
         up=T_cam[:3, 1], width_px=res_width, height_px=res_height,
     )
-    rays_np         = rays.numpy().reshape(-1, 6)
+    # rays_np         = rays.numpy().reshape(-1, 6)
+    rays_np         = np.asarray(rays.numpy()).reshape(-1, 6)
     ray_origins_img = rays_np[:, :3]
     ray_dirs_img    = rays_np[:, 3:]
 
     ans          = scene.cast_rays(rays)
-    t_hit_all    = ans["t_hit"].numpy().reshape(-1)
-    geom_ids_all = ans["geometry_ids"].numpy().reshape(-1)
+    t_hit_all    = np.asarray(ans["t_hit"].numpy()).reshape( -1)
+    # t_hit_all    = ans["t_hit"].numpy().reshape(-1)
+    # geom_ids_all = ans["geometry_ids"].numpy().reshape(-1)
+    geom_ids_all = np.asarray(ans["geometry_ids"].numpy()).reshape(-1)
 
     hit_mask = np.isfinite(t_hit_all)
     if not np.any(hit_mask):
@@ -144,19 +146,18 @@ def scene_render(meshes, T_cam, look_at, fov, res_width, res_height,
     origins  = ray_origins_img[hit_mask]
     dirs     = ray_dirs_img[hit_mask]
     points   = origins + t_hit[:, None] * dirs
-    normals  = _estimate_normals(points, T_cam[:3, 3], normal_radius, normal_max_nn)
+    normals  = estimate_normals(points, T_cam[:3, 3], normal_radius, normal_max_nn)
 
     proj_origin = T_cam[:3, 3] + baseline * T_cam[:3, 0]
-    proj_vecs   = points - proj_origin
+    proj_vecs   = np.asarray(points) - np.asarray(proj_origin)
     proj_dist   = np.linalg.norm(proj_vecs, axis=1)
     proj_dirs   = proj_vecs / (proj_dist[:, None] + 1e-12)
 
     proj_rays = o3d.core.Tensor(
-        np.hstack([np.broadcast_to(proj_origin[None], (len(points), 3)),
-                   proj_dirs]).astype(np.float32),
-        dtype=o3d.core.Dtype.Float32,
-    )
-    proj_t = scene.cast_rays(proj_rays)["t_hit"].numpy()
+        np.hstack([np.broadcast_to((proj_origin[None]), (len(points), 3)), proj_dirs]).astype(np.float32),
+                                    dtype=o3d.core.Dtype.Float32)
+    # proj_t = scene.cast_rays(proj_rays)["t_hit"].numpy()
+    proj_t = np.asarray(scene.cast_rays(proj_rays)["t_hit"].numpy())
 
     # Relative tolerance: 0.05% of range, floor 1 mm.
     shadow_tol  = np.maximum(1e-3, proj_dist * 5e-4)
@@ -1021,6 +1022,6 @@ if __name__ == "__main__":
                            cos_proj=cproj_all)
     pts = add_surface_noise(pts, nrm)
 
-    cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
+    cloud = o3d.t.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
     o3d_display([cloud])
 

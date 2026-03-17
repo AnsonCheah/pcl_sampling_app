@@ -4,12 +4,17 @@ from scipy.spatial.transform import Rotation as R
 import trimesh
 import colorsys
 from dataclasses import dataclass
+from typing import Optional
 import open3d.visualization.rendering as rendering
+# import cupy as cp
 
 @dataclass
 class O3DSceneObject:
+    # name: str
     geom: o3d.geometry.Geometry3D
-    material: rendering.MaterialRecord()
+    material: Optional[rendering.MaterialRecord] = None
+    id: Optional[int] = None
+    tf: Optional[np.ndarray] = None
 
 def init_open3d():
     vis = o3d.visualization.Visualizer()
@@ -98,6 +103,12 @@ def pcd_geocenter(pcd):
     tf = np.linalg.inv(tf)
     
     return tf
+
+def estimate_normals(points:np.ndarray, view_pos:np.ndarray, radius=0.005, max_nn=50):
+    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points))
+    pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=max_nn))
+    pcd.orient_normals_towards_camera_location(view_pos)
+    return np.asarray(pcd.normals)
 
 def normalize_normals(pcd):
     """
@@ -220,7 +231,13 @@ def camera_view_matrix(cam_pos, look_at, up=np.array([0.0, 0.0, 1.0])):
     return T
 
 if __name__=="__main__":
-    mesh = o3d.io.read_triangle_mesh("mesh_raw/37150MB000.STL")
+    import time
+    start = time.time()
+    mesh = o3d.t.io.read_triangle_mesh("mesh_raw/37150MB000.STL")
+    print(f"legacy read time: {time.time() - start}")
+    start = time.time()
+    mesh = o3d.t.io.read_triangle_mesh("mesh_raw/37150MB000.STL")
+    print(f"tensor read time: {time.time() - start}")
 
     bbox = mesh.get_axis_aligned_bounding_box()
     extent_max = bbox.get_extent().max()
@@ -230,7 +247,15 @@ if __name__=="__main__":
     mesh.compute_vertex_normals()
     mesh.translate(-mesh.get_center())
 
-    mesh.paint_uniform_color([0.5,0.5,0.5])
-    pcd1 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(fibonacci_sphere(200)*0.5))
-    o3d.visualization.draw_geometries([mesh, pcd1], width=1080, height=720, zoom=1.0)
+    # mesh.paint_uniform_color([0.5,0.5,0.5])
+    start = time.time()
+    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(fibonacci_sphere(200)*0.5))
+    pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=0.005, max_nn=50))
+    print(f"legacy estimate time: {time.time() - start}")
+    # start = time.time()
+    # pcd1 = o3d.geometry.PointCloud(o3c.Tensor(fibonacci_sphere(200)*0.5, o3c.float32, device))
+    # pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=0.005, max_nn=50))
+    # print(f"tensor estimate time: {time.time() - start}")
+    # o3d_display([pcd1])
+    # o3d.visualization.draw_geometries([mesh, pcd1], width=1080, height=720, zoom=1.0)
 

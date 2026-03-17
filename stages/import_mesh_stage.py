@@ -1,4 +1,5 @@
 import open3d as o3d
+import open3d.core as o3c
 import open3d.visualization.gui as gui
 import numpy as np
 from tkinter import Tk, filedialog
@@ -128,6 +129,8 @@ class ImportMeshStage(BaseStage):
         decomposed_convex_list = trimesh.decomposition.convex_decomposition(part_mesh)
         for h in decomposed_convex_list:
             mesh = o3d.geometry.TriangleMesh(vertices=o3d.utility.Vector3dVector(h["vertices"]), triangles=o3d.utility.Vector3iVector(h["faces"])) 
+            # mesh = o3d.t.geometry.TriangleMesh(vertices=o3c.Tensor(h["vertices"], o3c.float32, self.app.device), 
+            #                                    triangles=o3d.utility.Vector3iVector(h["faces"], o3c.int32, self.app.device)) 
             self.app.convex_meshes.append(mesh)
         print(f"[MESH STAGE] decomposed mesh")
 
