@@ -9,7 +9,7 @@ from math_utils import find_cdf_knee
 class DownsampleStage(BaseStage):
     def __init__(self, app):
         self.name = Stage.DOWNSAMPLE.name
-        self.use_adaptive = True
+        self.use_adaptive = False
         self.coarse_factor = 2.0
         self.curvature_k_neighbors = 5
         super().__init__(app)

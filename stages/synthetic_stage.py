@@ -1,12 +1,15 @@
 import numpy as np
+from scipy.spatial.transform import Rotation as R
 import open3d as o3d
 import open3d.visualization.gui as gui
 import open3d.visualization.rendering as rendering
+# from trimesh.boolean import union
+import trimesh
 from enums import Stage
 from stages.stage_base import BaseStage
 from pathlib import Path
 from file_utils import pointcloud_to_ply
-from geom_utils import o3d_to_trimesh, camera_view_matrix, O3DSceneObject
+from geom_utils import o3d_to_trimesh, trimesh_to_o3d, camera_view_matrix, compute_overlap, O3DSceneObject
 from scene_render import (
     scene_render,
     compute_dropout_mask,
@@ -22,17 +25,21 @@ import copy
 from mujoco_bin_scene import MujocoBinScene
 import colorsys
 from rich import print as rp
+np.set_printoptions(precision=6, suppress=True)
 
 class SyntheticStage(BaseStage):
     def __init__(self, app):
         self.name = Stage.SYNTHETIC.name
         super().__init__(app)
+        self.num_targets = 6
         self.fov_deg = 41.11
         self.res_width = 1920
         self.res_height = 1200
-        self.app.synthetic_targets = []
-        self.app.synthetic_scenes = []
-        self.scene_objects = {}
+        self.app.synthetic_targets = {}
+        self.app.synthetic_scenes = {}
+        self.rendering_flag = False
+        self.verbose = True
+        self.o3d_scene = {}
 
     def build_panel(self):
         if self.app.headless:
@@ -83,97 +90,108 @@ class SyntheticStage(BaseStage):
         self.enable_widgets()
 
     def reset(self):
-        self.app.synthetic_targets = {}
-        self.scene_objects = {}
         self.combobox_targets.clear_items()
+        self.combobox_scenes.clear_items()
+        self.app.synthetic_targets = {}
+        self.app.synthetic_scenes = {}
+        self.o3d_scene = {}
+        self.worker_step = 0
         self._refresh_ui()
 
     def worker(self):
+        # self.worker_step = 0
+        TOTAL_STEPS = 10
+        # self.app.synthetic_targets = {}
+        # self.o3d_scene = {}
+        self.reset()
+
         if not self.app.headless:
             self.app.show_progress("Simulating synthetic scene...")
+            self.app.main_thread(lambda: self.app._clear_scene())
+            self.num_targets = self.num_targets_slider.int_value 
 
-        def add_to_render_scene(name:str, geom, type:str, color=[1.0, 1.0, 1.0]):
-            material = rendering.MaterialRecord()
-            material.point_size = 1.5
-            material.base_color = color + [1.0]
-            if type=="scene": 
-                self.app.synthetic_scenes.append(geom)
-                self.combobox_scenes.add_item(name)
-                self.hide_geoms_in_scene()
-            if type=="target": 
-                self.combobox_targets.add_item(name)
-                pass
-            self.scene_objects[name] = O3DSceneObject(geom, material)
+        def add_to_render_scene(name:str, geom):
+            self.app.synthetic_scenes[name] = O3DSceneObject(geom)
+            if self.app.headless:
+                return
+            self.combobox_scenes.selected_text = name
+            self.combobox_scenes.add_item(name)
+            self.app.main_thread(lambda: self.app._clear_scene())
+            if type(geom) == o3d.geometry.PointCloud:
+                material = self.app.default_point_material
+            if type(geom) == o3d.geometry.TriangleMesh:
+                material = self.app.default_material  
+            self.app.synthetic_scenes[name].material = material
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry(name, geom, material))
 
-        TOTAL_STEPS = 10
-        self.app.synthetic_targets = {}
-        self.app.main_thread(lambda: self.app._clear_scene())
+        def _update_pb(message:str):
+            if not self.app.headless:
+                print(message)
+            self.worker_step += 1
+            self.app.update_progress(self.worker_step/TOTAL_STEPS, message)
 
-        current_step = 0
-        self.num_targets =  self.num_targets_slider.int_value
-        rendering_flag = False
-        verbose = True
         part_mesh = o3d_to_trimesh(self.app.target_mesh)
-        scene = MujocoBinScene(part_mesh, self.app.convex_meshes, n_parts=self.num_targets, render=rendering_flag)
-        scene.simulate(realtime=rendering_flag)
-        scene_state = scene.extract_scene_state()
-        o3d_scene = scene.mujoco_scene_to_o3d(scene_state)
+        self.mj_scene = MujocoBinScene(part_mesh, self.app.convex_meshes, n_parts=self.num_targets, render=self.rendering_flag)
+        self.mj_scene.simulate(realtime=self.rendering_flag)
+        scene_state = self.mj_scene.extract_scene_state()
+        self.o3d_scene = self.mj_scene.mujoco_scene_to_o3d(scene_state)
+        mesh_list = []
+        for obj in self.o3d_scene.values():
+            mesh = copy.deepcopy(obj.geom)
+            tri_mesh = o3d_to_trimesh(mesh.transform(obj.T_gt))
+            tri_mesh.process(validate=True)
+            mesh_list.append(tri_mesh)
+        final_mesh = trimesh_to_o3d(trimesh.boolean.union(mesh_list, engine="manifold", check_volume=False))
+        add_to_render_scene("mesh_scene", final_mesh)
+        
+        self.worker_step += 1
+        self.app.update_progress(self.worker_step/TOTAL_STEPS, f"Generating synthetic scene...")
 
-        current_step += 1
-        self.app.update_progress(current_step/TOTAL_STEPS, f"Generating synthetic scene...")
-
-        cam_pos = np.asarray([0,0,1.5])
-        look_at = np.zeros(3)
+        cam_pos = np.zeros(3)
+        look_at = np.asarray([0,0,1.5])
         T_cam = camera_view_matrix(cam_pos, look_at)
 
-        render = scene_render(o3d_scene, T_cam, look_at, self.fov_deg, self.res_width, self.res_height, verbose=verbose)
-        pts = render["points"]
-        add_to_render_scene("canonical_scene", o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts)), type="scene")
+        self.app._reframe()
 
-        current_step += 1
-        self.app.update_progress(current_step/TOTAL_STEPS, f"Synthesizing image space noise...")
+        render = scene_render(self.o3d_scene, T_cam, look_at, self.fov_deg, self.res_width, self.res_height, verbose=self.verbose)
+        pts = render["points"]
+        # print(np.unique(render["geom_ids"]))
+        add_to_render_scene("canonical_scene", o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts)))
+        _update_pb("Synthesizing image space noise...")
 
         keep = compute_dropout_mask(render, roughness=0.4, density_cos_ref=0.7)
-        render = add_image_space_effects(render, keep, smooth_sigma_px=0.5, sigma_fringe_corr=0.0001, verbose=verbose)
+        render = add_image_space_effects(render, keep, smooth_sigma_px=0.5, sigma_fringe_corr=0.0001, verbose=self.verbose)
 
-        add_to_render_scene("image_space_noise_scene", o3d.geometry.PointCloud(o3d.utility.Vector3dVector(render["points"])), type="scene")
-        current_step += 1
-        self.app.update_progress(current_step/TOTAL_STEPS, f"Synthesizing edge artifacts...")
+        add_to_render_scene("image_space_noise_scene", o3d.geometry.PointCloud(o3d.utility.Vector3dVector(render["points"])))
+        _update_pb("Synthesizing edge artifacts...")
         
-        pts, nrm = add_edge_artifacts(render, keep, verbose=verbose)
-        add_to_render_scene("edge_artifact_scene", o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts)), type="scene")
-        current_step += 1
-        self.app.update_progress(current_step/TOTAL_STEPS, f"Synthesizing outliers...")
+        pts, nrm = add_edge_artifacts(render, keep, verbose=self.verbose)
+        add_to_render_scene("edge_artifact_scene", o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts)))
+        _update_pb("Synthesizing outliers...")
 
         r = subset_render(render, keep)
-        mp, mn = add_multipath_outliers(r, verbose=verbose)
-        pp, pn = add_pepper_noise(r, verbose=verbose)
+        mp, mn = add_multipath_outliers(r, verbose=self.verbose)
+        pp, pn = add_pepper_noise(r, verbose=self.verbose)
         pts = np.vstack([pts, mp, pp])
         nrm = np.vstack([nrm, mn, pn])
-        add_to_render_scene("outliers_scene", o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts)), type="scene")
-        current_step += 1
-        self.app.update_progress(current_step/TOTAL_STEPS, f"Synthesizing banding artifacts...")
-        # Build per-point metadata for the full combined cloud.
+        add_to_render_scene("outliers_scene", o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts)))
+        _update_pb("Synthesizing banding artifacts...")
         n_kept    = keep.sum()
         n_outlier = len(pts) - n_kept
         pix_all   = np.concatenate([render["pixel_idx"][keep], np.full(n_outlier, -1, np.int64)])
         cproj_all = np.concatenate([render["cos_proj"][keep], np.ones(n_outlier)])
 
-        pts = add_scan_line_banding(pts, nrm, pix_all, render["res"], render["sensor_origin"], verbose=verbose)
-        add_to_render_scene("scan_banding_scene", o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts)), type="scene")
-        current_step += 1
-        self.app.update_progress(current_step/TOTAL_STEPS, f"Adding sensor noises...")
+        pts = add_scan_line_banding(pts, nrm, pix_all, render["res"], render["sensor_origin"], verbose=self.verbose)
+        add_to_render_scene("scan_banding_scene", o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts)))
+        _update_pb("Adding sensor noises...")
 
-        pts = add_sensor_noise(pts, nrm, render["sensor_origin"], pixel_idx=pix_all, res=render["res"], cos_proj=cproj_all, verbose=verbose)
-        add_to_render_scene("sensor_noise_scene", o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts)), type="scene")
-        current_step += 1
-        self.app.update_progress(current_step/TOTAL_STEPS, f"Adding surface noises...")
+        pts = add_sensor_noise(pts, nrm, render["sensor_origin"], pixel_idx=pix_all, res=render["res"], cos_proj=cproj_all, verbose=self.verbose)
+        add_to_render_scene("sensor_noise_scene", o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts)))
+        _update_pb("Adding surface noises...")
 
-        pts = add_surface_noise(pts, nrm, verbose=verbose)
-        add_to_render_scene("surface_noise_scene", o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts)), type="scene")
-        current_step += 1
-        self.app.update_progress(current_step/TOTAL_STEPS, f"Synthesizing segmentation erosion/dilation...")
+        pts = add_surface_noise(pts, nrm, verbose=self.verbose)
+        add_to_render_scene("surface_noise_scene", o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts)))
+        _update_pb("Synthesizing segmentation erosion/dilation...")
 
         labels = segment_point_cloud( # labels : (N,) int32 — geom_id per point, -1 = unassigned
             render, pts, pix_all,
@@ -184,103 +202,146 @@ class SyntheticStage(BaseStage):
             occlusion_loss_px=2,
             boundary_noise_px=6.0,
             seed=0,
-            verbose=verbose
+            verbose=self.verbose
         )
-        current_step += 1
-        self.app.update_progress(current_step/TOTAL_STEPS, f"Filtering targets by point counts...")
+        _update_pb("Filtering targets by point counts...")
 
         unique_id_list = np.unique(labels[labels >= 0])
+        # rp(f"length of unique id list: {len(unique_id_list)} \n {unique_id_list}")
         valid_count = 0
-        tf_by_id = {value.id: value.tf for value in o3d_scene.values()}
+        tf_by_id = {value.id: value.T_gt for value in self.o3d_scene.values()}
+
+        voxel_size =  0.001
+        ref_xyz = np.asarray(self.app.down_pcd.points)
+        min_overlap = 0.1
         for _, inst_id in enumerate(unique_id_list):
             inst_pts = pts[labels == inst_id]
             inst_nrm = nrm[labels == inst_id]
             inst_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(inst_pts))
             inst_pcd.normals = o3d.utility.Vector3dVector(inst_nrm)
-            inst_pcd_downsampled = inst_pcd.voxel_down_sample(0.001)
-            if inst_id == len(unique_id_list)-1: # box will always be at last
+            inst_pcd_downsampled = inst_pcd.voxel_down_sample(voxel_size)
+
+            if inst_id == max(unique_id_list): # box will always be at last
                 bin_pcd = copy.deepcopy(inst_pcd_downsampled)
-                bin_pcd.paint_uniform_color([1., 1., 1.])
+                self.app.synthetic_scenes["bin_pcd"] = bin_pcd
                 continue
-            if min(self.app.point_count_range)<=len(inst_pcd_downsampled.points)<=max(self.app.point_count_range):
-                print(f"Instance {inst_id} point count within threshold {self.app.point_count_range}: {len(inst_pcd_downsampled.points)}")
-                valid_count += 1
-                inst_name = f"synthetic_sample_{valid_count}"
-                self.app.synthetic_targets[inst_name] = O3DSceneObject(inst_pcd_downsampled, id=inst_id, tf=tf_by_id[inst_id])
+            
+            xyz_inst = np.asarray(inst_pcd_downsampled.points)
+            if not (min(self.app.point_count_range)<=len(xyz_inst)<=max(self.app.point_count_range)):
+                print(f"Instance {inst_id} point count out of threshold {self.app.point_count_range}: {len(xyz_inst)}")
                 continue
-            print(f"Instance {inst_id} point count out of threshold {self.app.point_count_range}: {len(inst_pcd_downsampled.points)}")
+            
+            inst_rmat = tf_by_id[inst_id][:3, :3]
+            inst_trans = tf_by_id[inst_id][:3, 3]
+            xyz_ref_in_scene = (inst_rmat @ ref_xyz.T + inst_trans[:, None]).T
+            overlap = compute_overlap(xyz_ref_in_scene, xyz_inst, threshold=voxel_size * 2.5)
+            print(f"Instance {inst_id} overlap is {overlap}")
+            if overlap < min_overlap:
+                print(f"  [skip] Instance {inst_id}: overlap={overlap:.2f} < {min_overlap}")
+                continue
 
-        saturation, value = 0.4, 0.9
-        hues = np.linspace(0, 1, len(self.app.synthetic_targets), endpoint=False).tolist()
-        colors = [list(colorsys.hsv_to_rgb(h, saturation, value)) for h in hues]
-        self.hide_geoms_in_scene()
-        for index, (key, value) in enumerate(self.app.synthetic_targets.items()):
-            add_to_render_scene(key, value.geom, type="target", color=colors[index])
+            print(f"Instance {inst_id} point count within threshold {self.app.point_count_range}: {len(xyz_inst)}")
+            valid_count += 1
+            inst_name = f"synthetic_sample_{valid_count}"
+            self.app.synthetic_targets[inst_name] = O3DSceneObject(
+                geom=inst_pcd_downsampled, 
+                ref_geom=o3d.geometry.PointCloud(o3d.utility.Vector3dVector(xyz_ref_in_scene)),
+                id=int(inst_id), 
+                T_gt=tf_by_id[inst_id],
+                xyz0=xyz_ref_in_scene,
+                xyz1=xyz_inst,
+                overlap=overlap
+            )
+            if not self.app.headless: self.combobox_targets.add_item(inst_name)
+            
+        if not self.app.headless:
+            bin_pcd.paint_uniform_color([1., 1., 1.])
+            saturation, value = 0.4, 0.9
+            hues = np.linspace(0, 1, len(self.app.synthetic_targets), endpoint=False).tolist()
+            colors = [list(colorsys.hsv_to_rgb(h, saturation, value)) for h in hues]
+            self.app.main_thread(lambda: self.app._clear_scene())
+            self.app.synthetic_scenes["bin_pcd"] = O3DSceneObject(geom=bin_pcd, material=self.app.default_point_material)
+            for index, (key, value) in enumerate(self.app.synthetic_targets.items()):
+                material = rendering.MaterialRecord()
+                material.point_size = 1.5
+                material.base_color = colors[index] + [1.0]
+                value.material = material
+                self.app.scene.scene.add_geometry(key, value.geom, value.material)
 
-        self.combobox_scenes.add_item("segmented_bin_scene")
-        self.scene_objects["bin_pcd"] = O3DSceneObject(geom=bin_pcd, id=0, material=self.app.default_point_material, tf=np.eye(4))
-        self.app.synthetic_scenes.append("segmented_bin_scene")
-        self.app.main_thread(lambda: self.app.scene.scene.add_geometry("bin_pcd", bin_pcd, self.app.default_point_material))
-        current_step += 1
-        self.app.update_progress(current_step/TOTAL_STEPS, f"Compiling results...")
-        self.show_segmented_scene()
+        self.app.synthetic_scenes["bin_pcd"] = O3DSceneObject(geom=bin_pcd, material=self.app.default_point_material)
+
+        if not self.app.headless:
+            self.combobox_scenes.selected_text = "segmented_bin_scene"
+            self.combobox_scenes.add_item("segmented_bin_scene")
+            self.app.main_thread(lambda: self.app.scene.scene.add_geometry("bin_pcd", bin_pcd, self.app.default_point_material))
+            self.worker_step += 1
+            self.app.update_progress(self.worker_step/TOTAL_STEPS, f"Compiling results...")
+            self.show_segmented_scene()
 
     def save_synthetic_targets(self):
         try:
-            base_path = Path.cwd() / "synthetic_target" / self.app.mesh_basename
-            for i, (key, value) in enumerate(self.app.synthetic_targets.items()):
-                count = i//2
-                prefix = "train" if i%2==0 else "test"
-                folder_path = base_path / prefix
-                folder_path.mkdir(parents=True, exist_ok=True)
+            scene_num = 0
+            out_dir = Path.cwd() / "synthetic_target" / self.app.mesh_basename
+            while Path.exists(out_dir / f"scene_{scene_num:05}"):
+                scene_num += 1 
+            out_dir = out_dir / f"scene_{scene_num:05}"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            self.app.stages[Stage.SAVE].worker(path=(out_dir))
+            for i, value in enumerate(self.app.synthetic_targets.values()):
+                tf = value.T_gt # this is in 4x4 matrix
+                gt_comments = []
                 scene_pcd = copy.deepcopy(value.geom)
-                scene_pcd.transform(np.linalg.inv(value.tf))
-                pointcloud_to_ply(scene_pcd, folder_path / f"{prefix}_sample_{count}.ply")
+                for (dim, val) in zip(["gt_x", "gt_y", "gt_z"], tf[:3, 3]):
+                    gt_comments.append(f"{dim} {val}")
+                for (dim, val) in zip(["gt_qx", "gt_qy", "gt_qz", "gt_w"], R.from_matrix(tf[:3, :3]).as_quat()):
+                    gt_comments.append(f"{dim} {val}")
+                inst_stem = f"sample_{i}"
+                pointcloud_to_ply(scene_pcd, out_dir / f"{inst_stem}.ply", gt_comments)
+                np.savez(
+                    out_dir / f"{inst_stem}.npz",
+                    xyz0    = value.xyz0,                     # reference in part frame
+                    xyz1    = value.xyz1,                    # noisy instance in scene frame
+                    T_gt    = value.T_gt,                        # part_frame → scene_frame
+                    overlap = np.float32(value.overlap),
+                    source  = str(out_dir).encode(),
+                )
         except Exception as e:
             print(e)
 
     def preview_synthetic_target(self, selected_text: str, selected_index: int) -> None:
-        if self.app.headless:
-            return
+        if self.app.headless: return
+            
         self.app.main_thread(lambda: self.app._clear_scene())
-        if not isinstance(self.scene_objects[selected_text], O3DSceneObject):
-            return
         self.app.main_thread(lambda: self.app.scene.scene.add_geometry(
             selected_text, 
-            self.scene_objects[selected_text].geom, 
-            self.scene_objects[selected_text].material))
+            self.app.synthetic_targets[selected_text].geom, 
+            self.app.synthetic_targets[selected_text].material))
         self.app.scene.force_redraw()
 
     def preview_synthetic_scenes(self, selected_text: str, selected_index: int) -> None:
-        if self.app.headless:
-            return
+        if self.app.headless: return
         self.app.main_thread(lambda: self.app._clear_scene())
-        if selected_text == "segmented_bin_scene":
-            geom_list = ["bin_pcd"] + [key for key in self.app.synthetic_targets.keys()]
-            def add_geoms():
-                for geom_name in geom_list:
-                    self.app.scene.scene.add_geometry(
-                        geom_name, 
-                        self.scene_objects[geom_name].geom, 
-                        self.scene_objects[geom_name].material)
-            self.app.main_thread(add_geoms)
+        if selected_text == "segmented_bin_scene": self.show_segmented_scene()
         else:
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry(
                 selected_text, 
-                self.scene_objects[selected_text].geom, 
-                self.scene_objects[selected_text].material))
+                self.app.synthetic_scenes[selected_text].geom, 
+                self.app.synthetic_scenes[selected_text].material))
         self.app.scene.force_redraw()
 
-    def hide_geoms_in_scene(self, geoms=None):
-        def hide_geoms():
-            for key in self.scene_objects.keys():
-                self.app.scene.scene.show_geometry(name=key, show=False)
-        self.app.main_thread(hide_geoms)
-        
     def show_segmented_scene(self):
-        geom_list = ["bin_pcd"] + [key for key in self.app.synthetic_targets.keys()]
-        def show_geoms():
-            for name in geom_list:
-                self.app.scene.scene.show_geometry(name, show=True)
-            self.app.scene.scene.show_axes(enable=True)
-        self.app.main_thread(show_geoms)
+        if self.app.headless: return
+        self.app.main_thread(lambda: self.app._clear_scene())
+        def add_geoms():
+            for target_name in self.app.synthetic_targets.keys():
+                self.app.scene.scene.add_geometry(
+                    target_name, 
+                    self.app.synthetic_targets[target_name].geom, 
+                    self.app.synthetic_targets[target_name].material
+                )
+            self.app.scene.scene.add_geometry(
+                "bin_pcd", 
+                self.app.synthetic_scenes["bin_pcd"].geom, 
+                self.app.synthetic_scenes["bin_pcd"].material
+            )
+        self.app.main_thread(add_geoms)

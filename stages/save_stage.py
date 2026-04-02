@@ -51,18 +51,22 @@ class SaveStage(BaseStage):
             self.app.scene.force_redraw()
         self.enable_widgets()
 
-    def worker(self):
+    def worker(self, path=None):
         if not self.app.headless:
             if self.app.down_pcd is None:
                 print("[WARN] No pointcloud to save")
                 return
         try:
-            pcd_folder_path = Path.cwd() / "reference_pcd"
-            pcd_folder_path.mkdir(parents=True, exist_ok=True)
-            pcd_path = pcd_folder_path / (self.app.mesh_basename + ".ply")
-            # mesh_folder_path = Path.cwd() / "processed_mesh"
-            # mesh_folder_path.mkdir(parents=True, exist_ok=True)
-            # mesh_path = mesh_folder_path / (self.app.mesh_basename + ".stl")
+            if self.app.stage == Stage.SAVE:
+                pcd_folder_path = Path.cwd() / "reference_pcd"
+                pcd_folder_path.mkdir(parents=True, exist_ok=True)
+                pcd_path = pcd_folder_path / (self.app.mesh_basename + ".ply")
+                self.app.output_pcd_path = pcd_path
+            elif self.app.stage == Stage.SYNTHETIC:
+                if path==None: 
+                    print(f"[SAVE] worker: path is not provided in synthetic stage.")
+                pcd_path = path / "reference_cloud.ply"
+
             center_quat = R.from_matrix(self.app.geocenter[:3,:3]).as_quat()
             comments = [
                 f"geocenter_x {self.app.geocenter[3, 0]}",
@@ -74,9 +78,11 @@ class SaveStage(BaseStage):
                 f"geocenter_qw {center_quat[3]}"
                 ]
             pointcloud_to_ply(self.app.down_pcd, str(pcd_path), comments=comments)
-            # write_triangle_mesh(mesh_path, self.app.target_mesh, write_ascii=False, print_progress=True)
-            self.app.output_pcd_path = pcd_path
             print(f"[INFO] Point cloud saved to {pcd_path}")
+            # mesh_folder_path = Path.cwd() / "processed_mesh"
+            # mesh_folder_path.mkdir(parents=True, exist_ok=True)
+            # mesh_path = mesh_folder_path / (self.app.mesh_basename + ".stl")
+            # write_triangle_mesh(mesh_path, self.app.target_mesh, write_ascii=False, print_progress=True)
             # print(f"[INFO] Mesh saved to {mesh_path}")
         except Exception as e:
             print(f"[ERROR] Failed to save PLY: {e}")

@@ -114,7 +114,7 @@ def scene_render(meshes:dict, T_cam, look_at, fov, res_width, res_height,
     scene = o3d.t.geometry.RaycastingScene()
     for _, mesh_data in meshes.items(): 
         mesh = mesh_data.geom
-        mesh.transform(mesh_data.tf)
+        mesh.transform(mesh_data.T_gt)
         mesh_data.id = scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh))
 
     rays    = scene.create_rays_pinhole(

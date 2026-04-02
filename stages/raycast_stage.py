@@ -96,7 +96,7 @@ class RaycastStage(BaseStage):
         all_points = []
         all_cam_pos = []
         self.point_counts = np.zeros((self.num_views))
-        raycast_dict = {"ref_mesh": O3DSceneObject(geom=self.app.target_mesh, tf=np.eye(4))}
+        raycast_dict = {"ref_mesh": O3DSceneObject(geom=self.app.target_mesh, T_gt=np.eye(4))}
         for view_index, view_dir in enumerate(self.view_sphere):
             cam_pos = view_dir * self.camera_distance
             look_at = np.zeros(3)

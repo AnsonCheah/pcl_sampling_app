@@ -10,11 +10,14 @@ import open3d.visualization.rendering as rendering
 
 @dataclass
 class O3DSceneObject:
-    # name: str
     geom: o3d.geometry.Geometry3D
+    ref_geom: Optional[o3d.geometry.Geometry3D]= None
     material: Optional[rendering.MaterialRecord] = None
     id: Optional[int] = None
-    tf: Optional[np.ndarray] = None
+    T_gt: Optional[np.ndarray] = None
+    xyz0: Optional[np.ndarray] = None
+    xyz1: Optional[np.ndarray] = None
+    overlap: Optional[float] = None
 
 def init_open3d():
     vis = o3d.visualization.Visualizer()
@@ -27,7 +30,7 @@ def random_rotation_matrix():
 def random_quaternion(scalar_first=False):
     return R.random().as_quat(scalar_first=scalar_first)
 
-def o3d_display(geometries:list, width:int=1280, height:int=720):
+def o3d_display(geometries:list, width:int=1280, height:int=720, dynamic_color:bool=False):
     """
     Display a list of Open3D geometries with a black background.
 
@@ -50,11 +53,12 @@ def o3d_display(geometries:list, width:int=1280, height:int=720):
     render_opt.mesh_show_back_face = True
     render_opt.point_size = 3.0
 
-    saturation, value = 0.4, 0.9
-    hues = np.linspace(0, 1, len(geometries), endpoint=False)
-    colors = [colorsys.hsv_to_rgb(h, saturation, value) for h in hues]
-    for g, c in zip(geometries, colors):
-        g.paint_uniform_color(c)
+    if dynamic_color:
+        saturation, value = 0.4, 0.9
+        hues = np.linspace(0, 1, len(geometries), endpoint=False)
+        colors = [colorsys.hsv_to_rgb(h, saturation, value) for h in hues]
+        for g, c in zip(geometries, colors):
+            g.paint_uniform_color(c)
 
     return vis
 
@@ -219,16 +223,29 @@ def camera_view_matrix(cam_pos, look_at, up=np.array([0.0, 0.0, 1.0])):
     forward /= np.linalg.norm(forward)
 
     # If forward is parallel to up, choose a fallback up vector
-    right = np.cross(forward, [0,0,1])
+    right = np.cross(up, forward)
     if np.linalg.norm(right) < 1e-6:
-        right = np.cross(forward, [0,1,0])
+        right = np.cross([0,1,0], forward)
     right /= np.linalg.norm(right)
-    up = np.cross(right, forward)
+    up = np.cross(forward, right)
 
     T = np.eye(4)
     T[:3, :3] = np.stack([right, up, forward], axis=1)
     T[:3, 3] = cam_pos
     return T
+
+def compute_overlap(xyz0: np.ndarray,
+                    xyz1: np.ndarray,
+                    threshold: float) -> float:
+    """
+    Fraction of xyz0 points (already transformed into xyz1 frame)
+    that have a neighbour in xyz1 within threshold.
+    """
+    pcd1 = o3d.geometry.PointCloud()
+    pcd1.points = o3d.utility.Vector3dVector(xyz1)
+    tree = o3d.geometry.KDTreeFlann(pcd1)
+    hits = sum(1 for p in xyz0 if tree.search_radius_vector_3d(p, threshold)[0] > 0)
+    return hits / max(len(xyz0), 1)
 
 if __name__=="__main__":
     import time

@@ -13,7 +13,7 @@ from stages.synthetic_stage import SyntheticStage
 import threading
 from pathlib import Path
 from file_utils import pointcloud_to_ply, open_source_folder_dialog
-from geom_utils import O3DSceneObject
+from geom_utils import O3DSceneObject, camera_view_matrix
 # import cupy as cp
 # print(cp.cuda.runtime.getDeviceCount())
 
@@ -90,6 +90,7 @@ class MeshSamplingApp:
         self.mesh_basename = None
         self.convex_meshes = []
         self.synthetic_targets = {}
+        self.synthetic_scenes = {}
         self.feature_pcd = None
         self.flat_pcd = None
         self.output_pcd_path = None
@@ -127,7 +128,7 @@ class MeshSamplingApp:
     def _update_title(self):
         self.window.title = f"Mesh Sampling Wizard | Stage: {self.stage.name}"
 
-    def _reframe(self, fov_deg=25.0, margin=1.0):
+    def _reframe(self, fov_deg=41.1, margin=1.0):
         """
         Dynamically frame object based on its bounding box size.
         """
@@ -136,18 +137,24 @@ class MeshSamplingApp:
         if self.target_mesh is None:
             return
         else:
-            bbox = self.target_mesh.get_axis_aligned_bounding_box()
-            center = bbox.get_center()
-            extent = bbox.get_extent()
-            radius = 0.2 * np.linalg.norm(extent)
-            if radius < 1e-6:
-                return
+            if self.stage == Stage.SYNTHETIC:
+                mj_scene = self.stages[Stage.SYNTHETIC].mj_scene
+                look_at, cam_pos, up = mj_scene._get_camera_lookat()
+                bbox = mj_scene.bin_mesh.get_axis_aligned_bounding_box()
+            else:
+                bbox = self.target_mesh.get_axis_aligned_bounding_box()
+                look_at = bbox.get_center()
+                distance = 1.0 * np.linalg.norm(bbox.get_extent())
+                if distance < 1e-6:
+                    return
+                # distance = (radius / np.tan(np.deg2rad(fov_deg) / 2.0)) * margin
+                cam_pos = look_at + np.array([distance, distance, distance])
+                T_cam = camera_view_matrix(cam_pos, look_at)
+                up = T_cam[:3, 1]
 
-            distance = (radius / np.tan(np.deg2rad(fov_deg) / 2.0)) * margin
-            eye = center + np.array([distance, distance, 0])
-            up = np.array([0, 1, 1])
-
-        self.scene.scene.camera.look_at(center, eye, up)
+        self.scene.center_of_rotation = look_at
+        self.scene.setup_camera(fov_deg, bbox, look_at)
+        self.scene.scene.camera.look_at(look_at, cam_pos, up)
         self.scene.force_redraw()
         print("reframed")
 
@@ -186,7 +193,6 @@ class MeshSamplingApp:
         material.base_color = color + [alpha]
         material.shader = "defaultLit"
         self.scene_geoms[name] = O3DSceneObject(geom, material)
-        print(self.scene_geoms)
         self.main_thread(lambda: self.scene.scene.add_geometry(name, geom, material))
 
     def remove_geom_in_scene(self, name:str):
