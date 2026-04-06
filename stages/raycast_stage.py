@@ -5,8 +5,8 @@ import open3d as o3d
 import open3d.visualization.gui as gui
 from enums import Stage
 from stages.stage_base import BaseStage
-from geom_utils import fibonacci_sphere, orient_normals_using_cameras, normalize_normals, validate_normals, camera_view_matrix, O3DSceneObject
-from scene_render import scene_render
+from geometry.geom_utils import fibonacci_sphere, orient_normals_using_cameras, normalize_normals, validate_normals, camera_view_matrix, O3DSceneObject
+from sensor.scene_render import scene_render
 
 class RaycastStage(BaseStage):
     def __init__(self, app):

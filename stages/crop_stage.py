@@ -5,7 +5,7 @@ import open3d.visualization.gui as gui
 import open3d.visualization.rendering as rendering
 from enums import Stage, ToolMode
 from stages.stage_base import BaseStage
-from geom_utils import mask_point_cloud
+from geometry.geom_utils import mask_point_cloud
 
 class CropStage(BaseStage):
     def __init__(self, app):

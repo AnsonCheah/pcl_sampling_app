@@ -8,7 +8,7 @@ from stages.stage_base import BaseStage
 from enums import Stage
 import trimesh
 import threading
-from geom_utils import o3d_to_trimesh
+from geometry.geom_utils import o3d_to_trimesh
 
 class ImportMeshStage(BaseStage):
     def __init__(self, app):

@@ -7,7 +7,7 @@ import open3d as o3d
 from rich import print as rp
 from scipy.spatial.transform import Rotation as R
 import copy
-from geom_utils import o3d_to_trimesh, trimesh_to_o3d, camera_view_matrix, o3d_display, init_open3d, O3DSceneObject
+from geometry.geom_utils import o3d_to_trimesh, trimesh_to_o3d, camera_view_matrix, o3d_display, init_open3d, O3DSceneObject
 from trimesh.collision import CollisionManager
 
 @dataclass
@@ -137,8 +137,8 @@ class MujocoBinScene:
             candidate_trimesh = copy.deepcopy(self.part_mesh)
             for _ in range(200):
                 layer = i // batch_size
-                x = np.random.uniform(-self.hx + radius*2, self.hx - radius*2)
-                y = np.random.uniform(-self.hy + radius*2, self.hy - radius*2)
+                x = np.random.uniform(-self.hx + radius*3, self.hx - radius*3)
+                y = np.random.uniform(-self.hy + radius*3, self.hy - radius*3)
                 z = max(radius, 0.5) + layer * (2.5 * radius) + np.random.uniform(-radius, radius)
                 pos = np.asarray([x, y, z])
                 T = np.eye(4)
@@ -213,6 +213,57 @@ class MujocoBinScene:
                 remaining = max(0, self.model.opt.timestep - elapsed)
                 time.sleep(remaining)
         if self.viewer is not None: self.viewer.close()
+
+    def verify_parts_in_bin(self) -> dict:
+        """
+        After simulation, report how many parts remain inside the bin footprint.
+
+        A part is considered escaped if its centre of mass is more than one
+        bounding-sphere radius beyond the bin x/y wall extent, or more than
+        one full bin-height below the bin opening (i.e. clearly in free space,
+        not just stacked above the rim).
+
+        Returns
+        -------
+        dict with keys:
+            in_bin     : list of body names whose centres are inside the bin
+            out_of_bin : list of body names whose centres are outside the bin
+            n_in       : count inside
+            n_out      : count outside
+        """
+        r_part  = self.part_mesh.bounding_sphere.primitive.radius
+        bin_tx  = self.bin_transform[0, 3]
+        bin_ty  = self.bin_transform[1, 3]
+        bin_tz  = self.bin_transform[2, 3]
+
+        # x/y: allow one part-radius beyond the physical wall before calling it escaped
+        x_limit = self.hx + r_part
+        y_limit = self.hy + r_part
+        # z: parts stacked above the bin rim are fine (they extend toward camera at z=0).
+        # Only flag a part if it is more than one bin-height beyond the opening —
+        # i.e. clearly in free space, not just cresting the rim.
+        z_escape = bin_tz - 2 * self.hh   # bin_tz(1.5) - hh(0.125)*2 = 1.25
+
+        in_bin, out_of_bin = [], []
+
+        for obj in self.scene_objects:
+            body_id = mujoco.mj_name2id(
+                self.model, mujoco.mjtObj.mjOBJ_BODY, obj.body_name
+            )
+            pos = self.data.xpos[body_id]
+            escaped = (
+                abs(pos[0] - bin_tx) > x_limit or
+                abs(pos[1] - bin_ty) > y_limit or
+                pos[2] < z_escape
+            )
+            (out_of_bin if escaped else in_bin).append(obj.body_name)
+
+        n_in  = len(in_bin)
+        n_out = len(out_of_bin)
+        rp(f"[BIN CHECK] {n_in}/{n_in + n_out} parts inside bin, {n_out} escaped")
+        if n_out > 0:
+            rp(f"  Escaped: {out_of_bin[:10]}{'  …' if n_out > 10 else ''}")
+        return {"in_bin": in_bin, "out_of_bin": out_of_bin, "n_in": n_in, "n_out": n_out}
 
     def extract_scene_state(self):
         scene_dict = {}
