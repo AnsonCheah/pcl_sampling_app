@@ -10,6 +10,12 @@ __pycache__/
 # C extensions
 *.so
 
+# Custom directories
+MM_Optimizer/Auto_CADMATCH_Tuner/
+MM_Optimizer/CAD_MATCH_OPTIMISATION/
+MM_Optimizer/Auto_CADMATCH_Tuner/
+
+
 # input output formats
 *.stl
 *.ply

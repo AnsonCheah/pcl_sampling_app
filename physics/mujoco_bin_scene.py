@@ -1,3 +1,7 @@
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import mujoco
 import mujoco.viewer
 import time
@@ -341,7 +345,7 @@ class MujocoBinScene:
 
 if __name__ == "__main__":
     from app_v2 import MeshSamplingApp
-    from scene_render import (
+    from sensor.scene_render import (
         scene_render,
         compute_dropout_mask,
         add_edge_artifacts,
@@ -351,7 +355,7 @@ if __name__ == "__main__":
         add_image_space_effects,
         add_scan_line_banding
     )
-    from segment_instances import segment_point_cloud
+    from sensor.segment_instances import segment_point_cloud
     from enums import Stage
     import copy
 
