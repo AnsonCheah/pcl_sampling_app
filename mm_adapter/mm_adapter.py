@@ -260,23 +260,16 @@ class MechVisionClient(object):
         if result.get("noCloudInRoi"):
             raise VisionRunError("No point cloud in ROI")
 
-        fine_poses = result.get("coarse_poses", [])
-        if not fine_poses:
-            raise VisionRunError("Coarse Match module returned no poses")
-        
-        fine_poses = result.get("fine_poses", [])
-        if not fine_poses:
-            raise VisionRunError("Fine Match module returned no poses")
-
+        # Empty poses = valid "no detection" result — let caller decide how to score it.
         coarse_time_raw = result.get("coarse_time_s", [t_wall])
         fine_time_raw   = result.get("fine_time_s",   [0.0])
 
         return {
-            "coarse_poses":      result.get("coarse_poses", []),
-            "coarse_scores":     result.get("coarse_scores", []),
+            "coarse_poses":      result.get("coarse_poses",      []),
+            "coarse_scores":     result.get("coarse_scores",     []),
             "coarse_time_s":     coarse_time_raw[0] if coarse_time_raw else t_wall,
-            "fine_poses":        fine_poses,
-            "fine_confidences":  result.get("fine_confidences", []),
+            "fine_poses":        result.get("fine_poses",        []),
+            "fine_confidences":  result.get("fine_confidences",  []),
             "fine_time_s":       fine_time_raw[0]   if fine_time_raw   else 0.0,
         }
 
@@ -315,7 +308,12 @@ if __name__ == "__main__":
     model_file_name    = (f"{MM_REF_PATH}_surface/{REF_NAME}_surface.ply", "string", "")
     geo_center_file    = (f"{MM_REF_PATH}_surface/geo_center.json", "string", "")
 
-    scene  = EasyCreateStringList(strings=(f"{SYN_SCENE_PATH}/{REF_NAME}/scene_00000/", "string", ""))
+    scene  = EasyCreateStringList(strings=(f"{SYN_SCENE_PATH}/{REF_NAME}/scene_00001/", "string", ""))
+    pre_seg_py = CalcResultsbyPython(
+        name="Pre_Segmentation",
+        scriptFilePath=(f"C:/Users/Hmgics/Desktop/pcl_sampling_app/MM_Optimizer/optimizer_utils.py", "string", ""),
+        funcName=(f"read_synthetic", "string", ""),
+        )
     coarse = CoarseMatchingV2(
         name = "Coarse_Match_Synthetics",
         modelSelection=model_selection,
@@ -331,6 +329,7 @@ if __name__ == "__main__":
 
     params_dict = {
         scene.name: scene.to_step_params(),
+        pre_seg_py.name: pre_seg_py.to_step_params(),
         coarse.name: coarse.to_step_params(),
         fine.name:   fine.to_step_params(),
     }

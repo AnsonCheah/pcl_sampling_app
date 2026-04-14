@@ -21,10 +21,24 @@ class _StepParams:
 class EasyCreateStringList(_StepParams):
     """Parameters for the Easy Create String List vision step.
     Used to inject the scene PLY file path into the Calc Result by Python step.
+    Ref: https://docs.mech-mind.net/en/suite-software-manual/1.8.2/vision-steps/easy-create-string-list.html
+
     """
     name:       str   = "Scene_Path"
     strings:    Param = ("", "string", "")   # absolute path to merged scene PLY lists
 
+@dataclass
+class CalcResultsbyPython(_StepParams):
+    """Parameters for the Easy Create String List vision step.
+    Used to inject the scene PLY file path into the Calc Result by Python step.
+    Ref: https://docs.mech-mind.net/en/suite-software-manual/1.8.2/vision-steps/calc-results-by-python.html
+
+    """
+    name:           str   # required to define, no default
+    # inputs:         Param = ("", "string", "")  # match to python script input format, trigger user if require modification
+    # outputs:        Param = ("", "string", "")  # match to python script return format, trigger user if require modification
+    scriptFilePath: Param = ("", "string", "")  # script file path
+    funcName:       Param = ("", "string", "")  # function name within script
 
 @dataclass
 class CoarseMatchingV2(_StepParams):

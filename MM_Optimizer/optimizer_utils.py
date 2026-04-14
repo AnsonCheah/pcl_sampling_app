@@ -1,20 +1,171 @@
 import open3d as o3d
 import numpy as np
 import os
+import shutil
 import time
 import re
 
 np.set_printoptions(precision=3, suppress=True)
 
+
+def list_synthetic_scenes(part_dir):
+    """Return one group of PLY paths per scene_MMMMM directory (M-scene convention).
+
+    Each inner list contains all sample_*.ply files for one bin capture
+    (one M-scene).  These are fed as a list of N individual clouds to
+    MechVision's read_synthetic, which returns N point clouds — one per
+    instance in the bin.
+
+    Parameters
+    ----------
+    part_dir : str
+        Part-level directory containing scene_MMMMM sub-directories, or a
+        single scene directory if no sub-directories exist.
+
+    Returns
+    -------
+    scenes : List[List[str]]
+        One inner list per scene_MMMMM directory, ordered by scene index.
+        Each inner list is sorted by sample (instance) index.
+    """
+    subdirs = sorted(
+        d for d in os.listdir(part_dir)
+        if re.match(r'^scene_\d+$', d) and os.path.isdir(os.path.join(part_dir, d))
+    )
+    if not subdirs:
+        # Already a single scene directory — wrap as one M-scene
+        plys = sorted(
+            [os.path.join(part_dir, f) for f in os.listdir(part_dir)
+             if f.startswith('sample_') and f.endswith('.ply')],
+            key=lambda p: int(re.search(r'\d+', os.path.basename(p)).group())
+        )
+        return [plys] if plys else []
+
+    groups = []
+    for subdir in subdirs:
+        scene_path = os.path.join(part_dir, subdir)
+        plys = sorted(
+            [os.path.join(scene_path, f) for f in os.listdir(scene_path)
+             if f.startswith('sample_') and f.endswith('.ply')],
+            key=lambda p: int(re.search(r'\d+', os.path.basename(p)).group())
+        )
+        if plys:
+            groups.append(plys)
+    return groups
+
+
+def list_synthetic_plys(path):
+    """Return sorted list of sample_N.ply paths.
+
+    *path* may be:
+    - A single scene directory (e.g. ``…/scene_00000``) — collects from that
+      directory only.
+    - A part directory (e.g. ``…/25333MB000``) — aggregates sample_*.ply from
+      all ``scene_NNNNN`` subdirectories, giving a larger evaluation pool.
+
+    Paths are returned in ascending scene-folder order, then ascending sample
+    index within each folder.
+    """
+    # Check if path itself contains scene_NNNNN subdirectories
+    subdirs = sorted(
+        d for d in os.listdir(path)
+        if re.match(r'^scene_\d+$', d) and os.path.isdir(os.path.join(path, d))
+    )
+
+    if subdirs:
+        # Part-level directory: aggregate across all scene subdirs
+        all_plys = []
+        for scene_subdir in subdirs:
+            scene_path = os.path.join(path, scene_subdir)
+            plys = sorted(
+                [os.path.join(scene_path, f) for f in os.listdir(scene_path)
+                 if f.startswith('sample_') and f.endswith('.ply')],
+                key=lambda p: int(re.search(r'\d+', os.path.basename(p)).group())
+            )
+            all_plys.extend(plys)
+        return all_plys
+    else:
+        # Single scene directory
+        return sorted(
+            [os.path.join(path, f) for f in os.listdir(path)
+             if f.startswith('sample_') and f.endswith('.ply')],
+            key=lambda p: int(re.search(r'\d+', os.path.basename(p)).group())
+        )
+
+
+def compose_scene(sample_ply_paths, work_dir):
+    """Merge one or more sample PLY files into a single scene.ply in work_dir.
+
+    Parameters
+    ----------
+    sample_ply_paths : list[str]
+        Paths to sample_N.ply files (one per instance).
+    work_dir : str
+        Directory where scene.ply will be written.  Created if absent.
+
+    Returns
+    -------
+    scene_ply_path : str
+        Full path to the written scene.ply — pass this to EasyCreateStringList.strings.
+    gt_poses : list[np.ndarray]
+        GT pose [x, y, z, qw, qx, qy, qz] for each instance.
+    """
+    os.makedirs(work_dir, exist_ok=True)
+    merged = o3d.geometry.PointCloud()
+    gt_poses = []
+    for ply_path in sample_ply_paths:
+        pcd = o3d.io.read_point_cloud(ply_path)
+        merged += pcd
+        gt_poses.append(read_gt_pose_from_ply(ply_path, scalar_first=True))
+    scene_ply_path = os.path.join(work_dir, "scene.ply")
+    o3d.io.write_point_cloud(scene_ply_path, merged)
+    return scene_ply_path, gt_poses
+
+
+def read_single_ply(path):
+    """Load a single PLY file for the Pre_Segmentation step.
+
+    Called by MechVision's Calc Results by Python (Pre_Segmentation).
+    Mirrors read_synthetic's return format so the same output port works.
+
+    Parameters
+    ----------
+    path : list[str]
+        path[0] = absolute path to the scene .ply file to load.
+
+    Returns
+    -------
+    clouds : list of np.ndarray, shape [(N, 7)]
+        Single-element list containing [x, y, z, nx, ny, nz, 0] array.
+        List wrapper matches read_synthetic's port type.
+    """
+    ply_file = path[0]
+    pcd = o3d.io.read_point_cloud(ply_file)
+    if not pcd.has_normals():
+        pcd.estimate_normals(
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.01, max_nn=30)
+        )
+    pts     = np.array(pcd.points,  dtype=np.float32)
+    normals = np.array(pcd.normals, dtype=np.float32)
+    cloud   = np.concatenate(
+        [pts, normals, np.zeros((pts.shape[0], 1), dtype=np.float32)], axis=1
+    )
+    return [cloud]  # list of one, matching read_synthetic port type
+
+
+def cleanup_work_dir(work_dir):
+    """Remove a temp scene directory created by compose_scene."""
+    if os.path.isdir(work_dir):
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
 def read_synthetic(path):
     scene_dir = path[0]
-    print(scene_dir)
     pcd_paths = sorted(
         [os.path.join(scene_dir, f) for f in os.listdir(scene_dir)
          if f.startswith('sample_') and f.endswith('.ply')],
         key=lambda p: int(re.search(r'\d+', os.path.basename(p)).group())
     )
-    print(pcd_paths)
     clouds, gt_poses = [], []
     for fpath in pcd_paths:
         pcd = o3d.io.read_point_cloud(fpath)
@@ -23,7 +174,6 @@ def read_synthetic(path):
         clouds.append(np.concatenate([pts, normals, np.zeros((pts.shape[0], 1), dtype=np.float32)], axis=1))
         gt_poses.append(read_gt_pose_from_ply(fpath))
 
-    print(clouds)
     return clouds
 
 def reshape_coarse_pose_list(coarse_pose_list, ground_truth, tik):

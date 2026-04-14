@@ -99,10 +99,7 @@ class SyntheticStage(BaseStage):
         self._refresh_ui()
 
     def worker(self):
-        # self.worker_step = 0
         TOTAL_STEPS = 10
-        # self.app.synthetic_targets = {}
-        # self.o3d_scene = {}
         self.reset()
 
         if not self.app.headless:
@@ -238,12 +235,12 @@ class SyntheticStage(BaseStage):
             inst_trans = tf_by_id[inst_id][:3, 3]
             xyz_ref_in_scene = (inst_rmat @ ref_xyz.T + inst_trans[:, None]).T
             overlap = compute_overlap(xyz_ref_in_scene, xyz_inst, threshold=voxel_size * 2.5)
-            print(f"Instance {inst_id} overlap is {overlap}")
+            # print(f"Instance {inst_id} overlap is {overlap}")
             if overlap < min_overlap:
                 print(f"  [skip] Instance {inst_id}: overlap={overlap:.2f} < {min_overlap}")
                 continue
 
-            print(f"Instance {inst_id} point count within threshold {self.app.point_count_range}: {len(xyz_inst)}")
+            # print(f"Instance {inst_id} point count within threshold {self.app.point_count_range}: {len(xyz_inst)}")
             valid_count += 1
             inst_name = f"synthetic_sample_{valid_count}"
             self.app.synthetic_targets[inst_name] = O3DSceneObject(
@@ -284,7 +281,7 @@ class SyntheticStage(BaseStage):
     def save_synthetic_targets(self):
         try:
             scene_num = 0
-            out_dir = Path.cwd() / "synthetic_target" / self.app.mesh_basename
+            out_dir = Path.cwd() / "output" / "synthetic_target" / self.app.mesh_basename
             while Path.exists(out_dir / f"scene_{scene_num:05}"):
                 scene_num += 1 
             out_dir = out_dir / f"scene_{scene_num:05}"

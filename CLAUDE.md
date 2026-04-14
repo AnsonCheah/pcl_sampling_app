@@ -10,6 +10,12 @@ Synthetic point cloud data generation for industrial bin-picking:
 ## Architecture Principle
 Parametric model first, learned model targets the residual. The CVAE+Flow is not a replacement for the parametric noise model — it learns what the parametric model cannot explain. Building learned-first produces redundant representations and masks systematic biases.
 
+## Conda Env Locations
+Use pcd-sampling for all scripts in the workspace.
+
+base                   C:\Users\Hmgics\AppData\Local\anaconda3
+pcd-sampling           C:\Users\Hmgics\AppData\Local\anaconda3\envs\pcd-sampling
+
 ## Package Dependency Graph
 ```
 geometry/          ← no local imports (base layer)
