@@ -25,9 +25,10 @@ MM_Optimizer/results/
 *.stp
 *.png
 *.npz
-*.vis
+
 *.code-workspace
-*.claude/
+.claude/
+.vscode/
 
 # Distribution / packaging
 .Python
