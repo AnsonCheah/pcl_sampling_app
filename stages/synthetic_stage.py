@@ -8,9 +8,9 @@ import trimesh
 from enums import Stage
 from stages.stage_base import BaseStage
 from pathlib import Path
-from file_utils import pointcloud_to_ply
-from geom_utils import o3d_to_trimesh, trimesh_to_o3d, camera_view_matrix, compute_overlap, O3DSceneObject
-from scene_render import (
+from geometry.file_utils import pointcloud_to_ply
+from geometry.geom_utils import o3d_to_trimesh, trimesh_to_o3d, camera_view_matrix, compute_overlap, O3DSceneObject
+from sensor.scene_render import (
     scene_render,
     compute_dropout_mask,
     add_edge_artifacts,
@@ -20,9 +20,9 @@ from scene_render import (
     add_image_space_effects,
     add_scan_line_banding
 )
-from segment_instances import segment_point_cloud
+from sensor.segment_instances import segment_point_cloud
 import copy
-from mujoco_bin_scene import MujocoBinScene
+from physics.mujoco_bin_scene import MujocoBinScene
 import colorsys
 from rich import print as rp
 np.set_printoptions(precision=6, suppress=True)
@@ -99,10 +99,7 @@ class SyntheticStage(BaseStage):
         self._refresh_ui()
 
     def worker(self):
-        # self.worker_step = 0
         TOTAL_STEPS = 10
-        # self.app.synthetic_targets = {}
-        # self.o3d_scene = {}
         self.reset()
 
         if not self.app.headless:
@@ -133,6 +130,7 @@ class SyntheticStage(BaseStage):
         part_mesh = o3d_to_trimesh(self.app.target_mesh)
         self.mj_scene = MujocoBinScene(part_mesh, self.app.convex_meshes, n_parts=self.num_targets, render=self.rendering_flag)
         self.mj_scene.simulate(realtime=self.rendering_flag)
+        self.mj_scene.verify_parts_in_bin()
         scene_state = self.mj_scene.extract_scene_state()
         self.o3d_scene = self.mj_scene.mujoco_scene_to_o3d(scene_state)
         mesh_list = []
@@ -155,7 +153,7 @@ class SyntheticStage(BaseStage):
 
         render = scene_render(self.o3d_scene, T_cam, look_at, self.fov_deg, self.res_width, self.res_height, verbose=self.verbose)
         pts = render["points"]
-        # print(np.unique(render["geom_ids"]))
+        rp(np.unique(render["geom_ids"]))
         add_to_render_scene("canonical_scene", o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts)))
         _update_pb("Synthesizing image space noise...")
 
@@ -207,13 +205,15 @@ class SyntheticStage(BaseStage):
         _update_pb("Filtering targets by point counts...")
 
         unique_id_list = np.unique(labels[labels >= 0])
-        # rp(f"length of unique id list: {len(unique_id_list)} \n {unique_id_list}")
+        rp(f"length of unique id list: {len(unique_id_list)} \n {unique_id_list}")
         valid_count = 0
         tf_by_id = {value.id: value.T_gt for value in self.o3d_scene.values()}
+        bin_geom_id = self.o3d_scene["bin"].id  # set by scene_render; robust to any part count
 
         voxel_size =  0.001
         ref_xyz = np.asarray(self.app.down_pcd.points)
         min_overlap = 0.1
+        bin_pcd = None
         for _, inst_id in enumerate(unique_id_list):
             inst_pts = pts[labels == inst_id]
             inst_nrm = nrm[labels == inst_id]
@@ -221,7 +221,7 @@ class SyntheticStage(BaseStage):
             inst_pcd.normals = o3d.utility.Vector3dVector(inst_nrm)
             inst_pcd_downsampled = inst_pcd.voxel_down_sample(voxel_size)
 
-            if inst_id == max(unique_id_list): # box will always be at last
+            if inst_id == bin_geom_id:
                 bin_pcd = copy.deepcopy(inst_pcd_downsampled)
                 self.app.synthetic_scenes["bin_pcd"] = bin_pcd
                 continue
@@ -235,12 +235,12 @@ class SyntheticStage(BaseStage):
             inst_trans = tf_by_id[inst_id][:3, 3]
             xyz_ref_in_scene = (inst_rmat @ ref_xyz.T + inst_trans[:, None]).T
             overlap = compute_overlap(xyz_ref_in_scene, xyz_inst, threshold=voxel_size * 2.5)
-            print(f"Instance {inst_id} overlap is {overlap}")
+            # print(f"Instance {inst_id} overlap is {overlap}")
             if overlap < min_overlap:
                 print(f"  [skip] Instance {inst_id}: overlap={overlap:.2f} < {min_overlap}")
                 continue
 
-            print(f"Instance {inst_id} point count within threshold {self.app.point_count_range}: {len(xyz_inst)}")
+            # print(f"Instance {inst_id} point count within threshold {self.app.point_count_range}: {len(xyz_inst)}")
             valid_count += 1
             inst_name = f"synthetic_sample_{valid_count}"
             self.app.synthetic_targets[inst_name] = O3DSceneObject(
@@ -281,7 +281,7 @@ class SyntheticStage(BaseStage):
     def save_synthetic_targets(self):
         try:
             scene_num = 0
-            out_dir = Path.cwd() / "synthetic_target" / self.app.mesh_basename
+            out_dir = Path.cwd() / "output" / "synthetic_target" / self.app.mesh_basename
             while Path.exists(out_dir / f"scene_{scene_num:05}"):
                 scene_num += 1 
             out_dir = out_dir / f"scene_{scene_num:05}"

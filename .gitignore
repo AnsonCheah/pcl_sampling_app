@@ -10,6 +10,13 @@ __pycache__/
 # C extensions
 *.so
 
+# Custom directories
+MM_Optimizer/Auto_CADMATCH_Tuner/
+MM_Optimizer/CAD_MATCH_OPTIMISATION/
+MM_Optimizer/Auto_CADMATCH_Tuner/
+MM_Optimizer/CAD_Match/resource/
+MM_Optimizer/results/
+
 # input output formats
 *.stl
 *.ply
@@ -18,6 +25,10 @@ __pycache__/
 *.stp
 *.png
 *.npz
+
+*.code-workspace
+.claude/
+.vscode/
 
 # Distribution / packaging
 .Python

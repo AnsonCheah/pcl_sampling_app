@@ -3,8 +3,8 @@ import open3d as o3d
 import open3d.visualization.gui as gui
 from enums import Stage
 from stages.stage_base import BaseStage
-from geom_utils import mask_point_cloud, normalize_normals, pcd_geocenter
-from math_utils import find_cdf_knee
+from geometry.geom_utils import mask_point_cloud, normalize_normals, pcd_geocenter
+from geometry.math_utils import find_cdf_knee
 
 class DownsampleStage(BaseStage):
     def __init__(self, app):

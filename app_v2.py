@@ -1,5 +1,5 @@
 from enums import *
-import open3d.core as o3c
+# import open3d.core as o3c
 from open3d.geometry import Geometry3D
 import open3d.visualization.gui as gui
 import open3d.visualization.rendering as rendering
@@ -12,8 +12,8 @@ from stages.save_stage import SaveStage
 from stages.synthetic_stage import SyntheticStage
 import threading
 from pathlib import Path
-from file_utils import pointcloud_to_ply, open_source_folder_dialog
-from geom_utils import O3DSceneObject, camera_view_matrix
+from geometry.file_utils import pointcloud_to_ply, open_source_folder_dialog
+from geometry.geom_utils import O3DSceneObject, camera_view_matrix
 # import cupy as cp
 # print(cp.cuda.runtime.getDeviceCount())
 

@@ -1,0 +1,40 @@
+{
+    "comm_setting": {
+        "communication_type": 1,
+        "interface": {
+            "base_address": 4000,
+            "byte_order": "CDAB",
+            "capture_complete_timeout": 5,
+            "custom_euler": "sxyz",
+            "db_values": [
+                1
+            ],
+            "endian": "<",
+            "frame_format": "3E",
+            "host_ip": "0.0.0.0",
+            "host_ports": [
+                50000
+            ],
+            "interface_format": "ASCII",
+            "interface_name": "TCP Server",
+            "is_right_handed": true,
+            "max_pose_count_per_send": 20,
+            "project_dir": "coarse_optimizer",
+            "slave_id": 1,
+            "slot_number": 0,
+            "vision_timeout": 10,
+            "viz_timeout": 10,
+            "wait_for_capture_complete": false
+        },
+        "robot_server": {
+            "ip": ""
+        }
+    },
+    "open_interface_service": true,
+    "robot_type": "",
+    "timestamp": "2026-04-10 11:42:04",
+    "vis_projects": {
+        "CAD_MATCH_OPTIMISATION": 2,
+        "CAD_Match": 1
+    }
+}

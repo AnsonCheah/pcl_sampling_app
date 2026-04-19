@@ -2,7 +2,7 @@ import open3d.visualization.gui as gui
 from enums import Stage
 from pathlib import Path
 from stages.stage_base import BaseStage
-from file_utils import pointcloud_to_ply
+from geometry.file_utils import pointcloud_to_ply
 from scipy.spatial.transform import Rotation as R
 # from open3d.io import write_triangle_mesh
 

@@ -85,7 +85,7 @@ render dict fields
 import numpy as np
 from scipy.spatial import cKDTree
 from scipy.ndimage import gaussian_filter, maximum_filter
-from geom_utils import estimate_normals
+from geometry.geom_utils import estimate_normals
 import time
 import open3d as o3d
 import sys
