@@ -16,6 +16,8 @@ Use pcd-sampling for all scripts in the workspace.
 base                   C:\Users\Hmgics\AppData\Local\anaconda3
 pcd-sampling           C:\Users\Hmgics\AppData\Local\anaconda3\envs\pcd-sampling
 
+use "C:\Users\Hmgics\AppData\Local\anaconda3\envs\pcd-sampling\python.exe" for running scripts
+
 ## Package Dependency Graph
 ```
 geometry/          ← no local imports (base layer)
@@ -28,7 +30,7 @@ stages/            ← geometry, sensor, physics (not registration yet)
     ↑
 app_v2.py          ← stages only
 ```
-Cross-package imports outside this graph are bugs.
+
 
 ## Cross-Domain Contracts
 

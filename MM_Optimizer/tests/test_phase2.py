@@ -166,9 +166,67 @@ def test_phase2_full():
         client.close()
 
 
+def test_early_exit_fires():
+    """evaluate_phase_sweep skips Pass 2 when top Pass-1 coverage >= TARGET_COVERAGE.
+
+    dry_run=True returns coverage=1.0 for every call.  We monkey-patch
+    evaluate_config to count actual calls and verify Pass 2 runs on 1 survivor
+    instead of K_SURVIVORS.
+    """
+    groups = list_synthetic_scenes(SCENES_DIR)
+    pcd    = load_reference_pcd(MODEL_PATH)
+    ws     = analyze_mesh(pcd)
+
+    orig_m_full, orig_m_small = SC.M_FULL, SC.M_SMALL
+    SC.M_FULL  = 3
+    SC.M_SMALL = 2
+    try:
+        opt = Optimizer(
+            part_name    = PART,
+            client       = None,
+            project_id   = -1,
+            scene_groups = groups,
+            warm_start   = ws,
+            cache        = None,
+            use_two_pass = True,
+            dry_run      = True,
+        )
+
+        # Count evaluate_config calls via monkey-patch
+        call_count = [0]
+        _orig = opt.evaluate_config
+        def _counting(*args, **kwargs):
+            call_count[0] += 1
+            return _orig(*args, **kwargs)
+        opt.evaluate_config = _counting
+
+        n_candidates = SC.TWO_PASS_MIN_CANDIDATES + 2   # ensure use_tp fires
+        coarse_v = [opt._default_coarse() for _ in range(n_candidates)]
+        fine_v   = [opt._default_fine()   for _ in range(n_candidates)]
+
+        result = opt.evaluate_phase_sweep(coarse_v, fine_v, label="test-early-exit")
+
+        # evaluate_config is called once per candidate (scenes are batched inside it).
+        # Pass 1: n_candidates calls; Pass 2: 1 call (early-exit → 1 survivor)
+        expected = n_candidates + 1
+        assert call_count[0] == expected, \
+            (f"Early-exit should give {expected} evaluate_config calls "
+             f"({n_candidates} Pass1 + 1 Pass2 survivor), got {call_count[0]}")
+        assert result.coverage == 1.0
+
+        log.info(f"  calls={call_count[0]}  expected={expected}")
+        log.info("PASS: test_early_exit_fires")
+
+    finally:
+        SC.M_FULL  = orig_m_full
+        SC.M_SMALL = orig_m_small
+        opt.cleanup()
+
+
 if __name__ == "__main__":
     print("test_phase2.py  (requires live MechVision for live tests)\n")
     test_dry_run_phase2()
+    test_early_exit_fires()
     test_phase2a_joint_grid()
     test_phase2_full()
     print("\nAll Phase 2 tests PASSED")

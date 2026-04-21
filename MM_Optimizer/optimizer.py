@@ -301,6 +301,10 @@ class Optimizer:
                 coarse.angleThreshold = (str(v), "double", "")
             elif k == "outputNum":
                 coarse.outputNum = (str(v), "double", "")
+            elif k == "minVoxelLength":
+                coarse.minVoxelLength = (str(v), "double", "m")
+            elif k == "maxVoxelLength":
+                coarse.maxVoxelLength = (str(v), "double", "m")
 
         fine = FineMatchingLite(
             name="Fine_Match_Synthetics",
@@ -486,9 +490,15 @@ class Optimizer:
                           f"cov={r.coverage:.2f} score={r.score:.1f}")
                 pass1_results.append((r, i))
 
-            # Top-K survivors by score
+            # Top-K survivors by score; early-exit if top-1 already meets target
             pass1_results.sort(key=lambda x: x[0].score)
-            survivors = pass1_results[:SC.K_SURVIVORS]
+            if pass1_results[0][0].coverage >= SC.TARGET_COVERAGE:
+                survivors = pass1_results[:1]
+                log.info(f"[{label}] early-exit: top-1 cov="
+                         f"{pass1_results[0][0].coverage:.2f} >= TARGET"
+                         f" — skipping costlier candidates")
+            else:
+                survivors = pass1_results[:SC.K_SURVIVORS]
             log.info(f"[{label}] two-pass: {n_candidates} → {len(survivors)} survivors")
             coarse_variants_p2 = [coarse_variants[i] for _, i in survivors]
             fine_variants_p2   = [fine_variants[i]   for _, i in survivors]
@@ -667,6 +677,15 @@ class Optimizer:
                     candidates = [max(1, int(warm_pairs * s))
                                   for s in SC.PHASE2B_PAIRS_SCALES]
 
+                # Joint pair sweep — min/max must be set together to keep min < max
+                if param_name == "voxelLengthRange":
+                    best_param = self._sweep_voxel_range(coarse, fine, ang_thresh=ang)
+                    if best_param.score < best_result.score:
+                        best_result = best_param
+                        coarse = copy.deepcopy(best_param.config["coarse"])
+                        improved = True
+                    continue
+
                 # Boolean sweep: skip two-pass (only 2 options)
                 if len(candidates) <= 2:
                     best_param = self._sweep_param_direct(
@@ -715,6 +734,24 @@ class Optimizer:
                  f"distQ={best.config['coarse']['distQuantification']:.2f}  "
                  f"cov={best.coverage:.2f}")
         return best
+
+    def _sweep_voxel_range(self, coarse, fine,
+                           ang_thresh=SC.ANG_THRESH_TIGHT) -> EvalResult:
+        """Sweep voxelLengthRange as geometry-derived (min, max) pairs.
+
+        Uses PHASE2B_VOXEL_SCALES × warm voxel lengths, preserving the
+        1:4 min:max ratio at every scale so min < max is always guaranteed.
+        """
+        coarse_variants, fine_variants = [], []
+        for scale in SC.PHASE2B_VOXEL_SCALES:
+            cp = copy.deepcopy(coarse)
+            cp["minVoxelLength"] = max(0.1, round(self.ws.minVoxelLength_mm * scale, 2))
+            cp["maxVoxelLength"] = max(0.2, round(self.ws.maxVoxelLength_mm * scale, 2))
+            coarse_variants.append(cp)
+            fine_variants.append(copy.deepcopy(fine))
+        return self.evaluate_phase_sweep(coarse_variants, fine_variants,
+                                         ang_thresh=ang_thresh,
+                                         label="2b-voxelLengthRange")
 
     def _sweep_param(self, param_name, candidates, coarse, fine,
                      is_coarse=True, label="",
@@ -1072,9 +1109,9 @@ class Optimizer:
     # Export
     # ─────────────────────────────────────────────────────────────────────
 
-    def export_best(self, result: EvalResult) -> str:
+    def export_best(self, result: EvalResult, prefix:str="", suffix:str="") -> str:
         """Write best config to YAML-style JSON for production use."""
-        out_path = os.path.join(RESULTS_DIR, f"best_config_{self.part_name}.json")
+        out_path = os.path.join(RESULTS_DIR, f"{prefix}best_config_{self.part_name}{suffix}.json")
         payload  = {
             "part_name":  self.part_name,
             "coverage":   result.coverage,
@@ -1131,7 +1168,7 @@ def _build_arg_parser():
     p.add_argument("--dry_run",     action="store_true", help="No MechVision calls")
     p.add_argument("--no_cache",    action="store_true", help="Disable EvalCache")
     p.add_argument("--no_two_pass", action="store_true", help="Disable two-pass")
-    p.add_argument("--export_best", action="store_true", help="Write best config JSON")
+    p.add_argument("--export_best", default=True, action="store_true", help="Write best config JSON")
     p.add_argument("--seed",        type=int, default=42, help="Random seed")
     return p
 
@@ -1210,7 +1247,7 @@ def main():
     try:
         result = opt.run()
         if result and args.export_best:
-            opt.export_best(result)
+            opt.export_best(result, prefix="CD_")
     finally:
         opt.cleanup()
         if client:

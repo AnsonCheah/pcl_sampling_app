@@ -32,9 +32,8 @@
     },
     "open_interface_service": true,
     "robot_type": "",
-    "timestamp": "2026-04-10 11:42:04",
+    "timestamp": "2026-04-21 11:47:16",
     "vis_projects": {
-        "CAD_MATCH_OPTIMISATION": 2,
         "CAD_Match": 1
     }
 }

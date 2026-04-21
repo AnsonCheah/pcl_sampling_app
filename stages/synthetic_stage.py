@@ -13,6 +13,8 @@ from geometry.geom_utils import o3d_to_trimesh, trimesh_to_o3d, camera_view_matr
 from sensor.scene_render import (
     scene_render,
     compute_dropout_mask,
+    add_projector_nonuniformity,
+    add_specular_patch_missing,
     add_edge_artifacts,
     add_multipath_outliers, add_pepper_noise, subset_render,
     add_sensor_noise,
@@ -158,6 +160,8 @@ class SyntheticStage(BaseStage):
         _update_pb("Synthesizing image space noise...")
 
         keep = compute_dropout_mask(render, roughness=0.4, density_cos_ref=0.7)
+        render = add_projector_nonuniformity(render, verbose=self.verbose)
+        keep   = add_specular_patch_missing(render, keep, verbose=self.verbose)
         render = add_image_space_effects(render, keep, smooth_sigma_px=0.5, sigma_fringe_corr=0.0001, verbose=self.verbose)
 
         add_to_render_scene("image_space_noise_scene", o3d.geometry.PointCloud(o3d.utility.Vector3dVector(render["points"])))
@@ -191,20 +195,20 @@ class SyntheticStage(BaseStage):
         add_to_render_scene("surface_noise_scene", o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts)))
         _update_pb("Synthesizing segmentation erosion/dilation...")
 
-        labels = segment_point_cloud( # labels : (N,) int32 — geom_id per point, -1 = unassigned
+        label_masks = segment_point_cloud(  # {geom_id: (N,) bool} — one mask per instance, may overlap
             render, pts, pix_all,
-            erosion_px=3.0,
-            dilation_px=1.5,
+            erosion_px=5.0,
+            dilation_px=5.0,
             confusion_depth_sigma=0.015,   # ~15 mm — tune to your part height spread
             confusion_boundary_px=4,
             occlusion_loss_px=2,
-            boundary_noise_px=6.0,
+            boundary_noise_px=10.0,
             seed=0,
             verbose=self.verbose
         )
         _update_pb("Filtering targets by point counts...")
 
-        unique_id_list = np.unique(labels[labels >= 0])
+        unique_id_list = list(label_masks.keys())
         rp(f"length of unique id list: {len(unique_id_list)} \n {unique_id_list}")
         valid_count = 0
         tf_by_id = {value.id: value.T_gt for value in self.o3d_scene.values()}
@@ -215,8 +219,8 @@ class SyntheticStage(BaseStage):
         min_overlap = 0.1
         bin_pcd = None
         for _, inst_id in enumerate(unique_id_list):
-            inst_pts = pts[labels == inst_id]
-            inst_nrm = nrm[labels == inst_id]
+            inst_pts = pts[label_masks[inst_id]]
+            inst_nrm = nrm[label_masks[inst_id]]
             inst_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(inst_pts))
             inst_pcd.normals = o3d.utility.Vector3dVector(inst_nrm)
             inst_pcd_downsampled = inst_pcd.voxel_down_sample(voxel_size)
@@ -227,20 +231,25 @@ class SyntheticStage(BaseStage):
                 continue
             
             xyz_inst = np.asarray(inst_pcd_downsampled.points)
-            if not (min(self.app.point_count_range)<=len(xyz_inst)<=max(self.app.point_count_range)):
-                print(f"Instance {inst_id} point count out of threshold {self.app.point_count_range}: {len(xyz_inst)}")
-                continue
-            
             inst_rmat = tf_by_id[inst_id][:3, :3]
             inst_trans = tf_by_id[inst_id][:3, 3]
             xyz_ref_in_scene = (inst_rmat @ ref_xyz.T + inst_trans[:, None]).T
-            overlap = compute_overlap(xyz_ref_in_scene, xyz_inst, threshold=voxel_size * 2.5)
-            # print(f"Instance {inst_id} overlap is {overlap}")
-            if overlap < min_overlap:
-                print(f"  [skip] Instance {inst_id}: overlap={overlap:.2f} < {min_overlap}")
-                continue
+            try:
+                overlap = compute_overlap(xyz_ref_in_scene, xyz_inst, threshold=voxel_size * 2.5)
+            except Exception as e:
+                print(f"[WARN] Failed to compute overlap for instance {inst_id} with {len(xyz_inst)} points: {e}")
+                overlap = 0.0
+            precheck_pass = True
 
-            # print(f"Instance {inst_id} point count within threshold {self.app.point_count_range}: {len(xyz_inst)}")
+            if not (min(self.app.point_count_range)<=len(xyz_inst)<=max(self.app.point_count_range)):
+                print(f"[skip] Instance {inst_id} point count out of threshold {self.app.point_count_range}: {len(xyz_inst)}")
+                precheck_pass = False
+                # continue
+            if overlap < min_overlap:
+                print(f"[skip] Instance {inst_id}: overlap={overlap:.2f} < {min_overlap}")
+                precheck_pass = False
+                # continue
+            if not precheck_pass: continue
             valid_count += 1
             inst_name = f"synthetic_sample_{valid_count}"
             self.app.synthetic_targets[inst_name] = O3DSceneObject(

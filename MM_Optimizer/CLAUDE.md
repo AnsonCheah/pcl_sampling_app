@@ -29,18 +29,12 @@ Two commands on `mm_adapter.py`:
 - trigger vision run: returns a flat list of poses (no dict structure from MechVision)
 MechVision returns poses as a flat list. Labels are disabled for now (`need_label: false` in config) but can be re-enabled.
 Do NOT re-run MechMind's adapter generator for fine registration parameters — it fails on generating adapter of more than 30 numbers
+MechVision logs folder: C:\Mech-Mind\Mech-Vision & Mech-Viz-1.8.3\Mech-Vision\logs
 
 ## Optimization Objective (priority order)
 1. Maximize pose precision vs synthetic ground truth (primary)
 2. Minimize pose error against GT poses from synthetic PLY (from `pcd-sampling` pipeline)
 3. Minimize cycle time — only as a tiebreaker when precision meets the tolerance threshold
 
-Not all parameters will be optimized — but parameter scope should be same for all parts.
-
 ## Ground Truth Interface
-GT poses come from the synthetic PLY files produced by the `pcd-sampling` pipeline. The optimizer reads these PLY files; it does not call into the sampling app directly (different conda env, different process).
-
-## What Does Not Exist Yet
-- The main optimizer loop (objective function, search strategy, result logging)
-
-When building the optimizer loop, it must live outside MechVision. Coarse and fine registration remain inside MechVision as black-box steps.
+GT poses come from the synthetic PLY files produced by the `pcd-sampling` pipeline. The optimizer reads these PLY files; it does not call into the sampling app directly 

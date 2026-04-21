@@ -36,18 +36,25 @@ def test_warm_start_values():
     print(f"  maxPairs        = {ws.maxNumOfPointPairsPerFeature}")
     print(f"  sym_order       = {ws.sym_order}")
     print(f"  sym_axis        = {ws.sym_axis}")
+    print(f"  minVoxelLength  = {ws.minVoxelLength_mm:.2f} mm")
+    print(f"  maxVoxelLength  = {ws.maxVoxelLength_mm:.2f} mm")
 
     # Basic sanity assertions
     assert ws.diameter_m > 0.01,          "Diameter should be > 10mm"
     assert ws.diameter_m < 1.0,           "Diameter should be < 1m (not absurd)"
     assert ws.refStep >= 1,               "refStep must be >= 1"
     assert ws.distQuantification > 0,     "distQuantification must be > 0"
-    assert abs(ws.dist_ratio_init - 1.0) < 0.5, "dist_ratio should be near 1"
+    assert 0 < ws.dist_ratio_init <= 1.0, \
+        f"dist_ratio_init={ws.dist_ratio_init:.3f} must be in (0, 1] (= 1/refStep)"
     assert ws.angleQuantification in [30, 45, 60, 90], \
         f"Unexpected angleQuantification: {ws.angleQuantification}"
     assert ws.maxNumOfPointPairsPerFeature >= 100, "Too few point pairs"
     assert ws.outputNum == 1,             "outputNum should match n_instances=1"
     assert isinstance(ws.prefer_edge, bool)
+    assert ws.minVoxelLength_mm >= 0.5,   "minVoxelLength_mm must be >= 0.5"
+    assert ws.maxVoxelLength_mm > ws.minVoxelLength_mm, \
+        f"maxVoxelLength ({ws.maxVoxelLength_mm}) must be > minVoxelLength ({ws.minVoxelLength_mm})"
+    assert ws.maxVoxelLength_mm >= 1.0,   "maxVoxelLength_mm must be >= 1.0"
 
     print("  PASS: warm_start_values")
 

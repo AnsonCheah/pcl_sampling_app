@@ -147,7 +147,6 @@ class MeshSamplingApp:
                 distance = 1.0 * np.linalg.norm(bbox.get_extent())
                 if distance < 1e-6:
                     return
-                # distance = (radius / np.tan(np.deg2rad(fov_deg) / 2.0)) * margin
                 cam_pos = look_at + np.array([distance, distance, distance])
                 T_cam = camera_view_matrix(cam_pos, look_at)
                 up = T_cam[:3, 1]

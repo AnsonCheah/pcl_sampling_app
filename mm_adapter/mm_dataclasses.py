@@ -102,10 +102,14 @@ class CoarseMatchingV2(_StepParams):
                                         1.0 = Manual (uses minVoxelLength / maxVoxelLength).
                                         Note: key name typo is intentional — matches the
                                         MechVision gRPC key.
-        minVoxelLength:                 (Manual strategy only) Lower limit of the voxel
-                                        edge length in mm. Default: 1.0 mm.
-        maxVoxelLength:                 (Manual strategy only) Upper limit of the voxel
-                                        edge length in mm. Default: 15.0 mm.
+        minVoxelLength:                 Lower limit of the voxel edge length. Value is
+                                        in mm; unit "m" triggers adapter ÷1000 conversion.
+                                        Applied in both Auto and Manual strategies.
+                                        Default: 1.0 mm.
+        maxVoxelLength:                 Upper limit of the voxel edge length. Value is
+                                        in mm; unit "m" triggers adapter ÷1000 conversion.
+                                        Applied in both Auto and Manual strategies.
+                                        Default: 15.0 mm.
         outputNum:                      Expected number of detected poses per input point
                                         cloud. Default: 3.
     """
@@ -135,8 +139,8 @@ class CoarseMatchingV2(_StepParams):
 
     # Pose verification
     voxelLengthGenetationStrategy:  Param = ("0.0", "double", "")       # 0.0=Auto (typo is intentional — matches MechVision key)
-    minVoxelLength:                 Param = ("0.001", "double", "mm")
-    maxVoxelLength:                 Param = ("0.001", "double", "mm")
+    minVoxelLength:                 Param = ("1.0", "double", "m")
+    maxVoxelLength:                 Param = ("15.0", "double", "m")
     outputNum:                      Param = ("1", "double", "")
 
 

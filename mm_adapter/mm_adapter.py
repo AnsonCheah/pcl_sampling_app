@@ -24,7 +24,7 @@ print(f"import time {time.time() - start}")
 HUB_ADDRESS = "127.0.0.1:5307"
 GRPC_METHOD = "/mmind.rpc.Json/call"
 MECH_VISION = "Mech-Vision"
-DEFAULT_TIMEOUT = 60  # seconds
+DEFAULT_TIMEOUT = 150  # seconds
 
 log = logging.getLogger(__name__)
 
@@ -287,6 +287,9 @@ class MechVisionClient(object):
 print(f"time before main: {time.time() - start}")
 if __name__ == "__main__":
     from mm_dataclasses import *
+    from pathlib import Path
+    from rich import print as rp
+    
     logging.basicConfig(level=logging.INFO)
 
     client = MechVisionClient()
@@ -296,8 +299,9 @@ if __name__ == "__main__":
 
     REF_NAME = "25333MB000"
     PROJ_NAME = "CAD_Match"
-    MM_REF_PATH = (f"C:/Users/Hmgics/Desktop/pcl_sampling_app/MM_Optimizer/{PROJ_NAME}/resource/3d_matching/{REF_NAME}")
-    SYN_SCENE_PATH = "C:/Users/Hmgics/Desktop/pcl_sampling_app/output/synthetic_target"
+    WORKING_DIR = Path.cwd()
+    MM_REF_PATH = f"{WORKING_DIR}/MM_Optimizer/{PROJ_NAME}/resource/3d_matching/{REF_NAME}"
+    SYN_SCENE_PATH = f"{WORKING_DIR}/output/synthetic_target"
 
     project_id = client._projects[PROJ_NAME]
 
@@ -308,7 +312,7 @@ if __name__ == "__main__":
     model_file_name    = (f"{MM_REF_PATH}_surface/{REF_NAME}_surface.ply", "string", "")
     geo_center_file    = (f"{MM_REF_PATH}_surface/geo_center.json", "string", "")
 
-    scene  = EasyCreateStringList(strings=(f"{SYN_SCENE_PATH}/{REF_NAME}/scene_00001/", "string", ""))
+    scene  = EasyCreateStringList(strings=(f"{SYN_SCENE_PATH}/{REF_NAME}/scene_00000/", "string", ""))
     pre_seg_py = CalcResultsbyPython(
         name="Pre_Segmentation",
         scriptFilePath=(f"C:/Users/Hmgics/Desktop/pcl_sampling_app/MM_Optimizer/optimizer_utils.py", "string", ""),
@@ -342,6 +346,7 @@ if __name__ == "__main__":
     result = client.run_vision(project_id)
     print(f"Coarse Match took {result['coarse_time_s']}")
     print(f"Fine Match took {result['fine_time_s']}")
+    rp(result)
 
     client.close()
     print(f"total time: {time.time() - start}")

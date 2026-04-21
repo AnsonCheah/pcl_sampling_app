@@ -29,6 +29,11 @@ class MujocoBinScene:
         self.rendering_flag = True
         self.verbose = True
         self.stable_steps = int(self.stable_duration / self.timestep)
+        self.camera_distance = 1.5
+        self.bin_transform = np.eye(4)
+        self.bin_transform[:3, :3] = R.from_euler("xyz", [180, 0, 0], degrees=True).as_matrix()
+        self.bin_transform[:3,  3] = np.asarray([0, 0, self.camera_distance])
+
 
         self.part_mesh = part_mesh
         self.part_convex_meshes = part_convex_meshes
@@ -82,17 +87,13 @@ class MujocoBinScene:
             ([self.hx, self.bin_dim[3], self.hh], [0, -self.hy + self.bin_dim[3], self.hh - self.bin_dim[3]]),    # -y wall
         ]
 
-        # Build bin_transform
-        self.bin_transform = np.eye(4)
-        self.bin_transform[:3, :3] = R.from_euler("xyz", [180, 0, 0], degrees=True).as_matrix()
-        self.bin_transform[:3,  3] = np.asarray([0, 0, 1.5])
 
         # Extract rotation and translation for geom application
-        R_bin = self.bin_transform[:3, :3]   # (3,3)
+        # R_bin = self.bin_transform[:3, :3]   # (3,3)
         # t_bin = self.bin_transform[:3,  3]   # (3,)
 
         # Precompute the quaternion for the bin rotation (MuJoCo: [w, x, y, z])
-        geom_quat = np.array(R.from_matrix(R_bin).as_quat(scalar_first=True))        # scipy: [x, y, z, w]
+        geom_quat = np.array(R.from_matrix(self.bin_transform[:3, :3]).as_quat(scalar_first=True))        # scipy: [x, y, z, w]
 
         # Build Open3D mesh with transform applied
         combined = o3d.geometry.TriangleMesh()
@@ -143,7 +144,7 @@ class MujocoBinScene:
                 layer = i // batch_size
                 x = np.random.uniform(-self.hx + radius*3, self.hx - radius*3)
                 y = np.random.uniform(-self.hy + radius*3, self.hy - radius*3)
-                z = max(radius, 0.5) + layer * (2.5 * radius) + np.random.uniform(-radius, radius)
+                z = self.camera_distance - max(radius, 0.5) - layer * (2.5 * radius) - np.random.uniform(-radius, radius)
                 pos = np.asarray([x, y, z])
                 T = np.eye(4)
                 T[:3, 3] = pos
@@ -202,7 +203,6 @@ class MujocoBinScene:
 
     def simulate(self, realtime=False):
         steps = int(self.settle_time / self.model.opt.timestep)
-        # input("enter")
         
         for i in range(steps):
             print(f"[t={self.data.time:.2f}s] step={i}/{steps}") if i%int(1.0 / self.model.opt.timestep)==0 else None
@@ -348,6 +348,8 @@ if __name__ == "__main__":
     from sensor.scene_render import (
         scene_render,
         compute_dropout_mask,
+        add_projector_nonuniformity,
+        add_specular_patch_missing,
         add_edge_artifacts,
         add_multipath_outliers, add_pepper_noise, subset_render,
         add_sensor_noise,
@@ -356,8 +358,10 @@ if __name__ == "__main__":
         add_scan_line_banding
     )
     from sensor.segment_instances import segment_point_cloud
+    from geometry.geom_utils import o3d_to_trimesh, trimesh_to_o3d, camera_view_matrix, compute_overlap, O3DSceneObject
     from enums import Stage
     import copy
+    import open3d.visualization.rendering as rendering
 
     app = MeshSamplingApp(headless=True)
 
@@ -367,7 +371,7 @@ if __name__ == "__main__":
 
 
     init_open3d()
-    scene = MujocoBinScene(part_mesh, app.convex_meshes, n_parts=50, render=True)
+    scene = MujocoBinScene(part_mesh, app.convex_meshes, n_parts=10, render=True)
     scene.simulate(realtime=scene.rendering_flag)
     scene_state = scene.extract_scene_state()
 
@@ -403,15 +407,12 @@ if __name__ == "__main__":
     bin_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(bin_pts))
     bin_pcd = bin_pcd.voxel_down_sample(0.001)
 
-    # scene_clean = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts)).voxel_down_sample(0.001)
-    # print(f"clean scene has {len(scene_clean.points)} points")
-    # # vis = o3d_display([scene_clean])
-    # vis.run()
-    # vis.destroy_window()
-    keep = compute_dropout_mask(render, roughness=0.4,
-                                albedo_per_geom_id={2: 0.04},  # black rubber part
-                                density_cos_ref=0.7,           # oblique density thinning
-                                verbose=scene.verbose)
+    keep   = compute_dropout_mask(render, roughness=0.4,
+                                 albedo_per_geom_id={2: 0.04},  # black rubber part
+                                 density_cos_ref=0.7,           # oblique density thinning
+                                 verbose=scene.verbose)
+    render = add_projector_nonuniformity(render, verbose=scene.verbose)
+    keep   = add_specular_patch_missing(render, keep, verbose=scene.verbose)
     render = add_image_space_effects(render, keep,
                                      smooth_sigma_px=0.5,
                                      sigma_fringe_corr=0.0001, 
@@ -442,47 +443,81 @@ if __name__ == "__main__":
     # shadow-visible set before dropout), which is the correct substrate for
     # mask generation.  pix_all maps every point — canonical and injected —
     # to its image pixel (-1 for injected points, which receive label -1).
-    labels = segment_point_cloud(
+    label_masks = segment_point_cloud(  # {geom_id: (N,) bool} — one mask per instance, may overlap
         render, pts, pix_all,
-        erosion_px=3.0,
-        dilation_px=1.5,
+        erosion_px=5.0,
+        dilation_px=5.0,
         confusion_depth_sigma=0.015,   # ~15 mm — tune to your part height spread
         confusion_boundary_px=4,
         occlusion_loss_px=2,
-        boundary_noise_px=6.0,
+        boundary_noise_px=10.0,
         seed=0,
         verbose=scene.verbose
     )
     print("segmented scene point virtually")
-    # labels : (N,) int32 — geom_id per point, -1 = unassigned
-    
-    # global bin_pcd 
-    pcds = [] # contains the valid object pcd 
-    rejected = [] # contains the rejected object pcd
-    bin_pcd = None
-    unique_id_list = np.unique(labels[labels >= 0])
-    for inst_id in unique_id_list:
-        inst_pts = pts[labels == inst_id]
-        inst_nrm = nrm[labels == inst_id]
-        inst_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(inst_pts))
-        inst_pcd_downsampled = inst_pcd.voxel_down_sample(0.001)
-        if inst_id == len(unique_id_list)-1: # box will always be at last
-            bin_pcd = copy.deepcopy(inst_pcd_downsampled)
-            bin_pcd.paint_uniform_color([1., 1., 1.])
-            continue
-        if len(inst_pcd_downsampled.points) in range(*app.point_count_range):
-            print(f"Instance {inst_id} point count within threshold {app.point_count_range}: {len(inst_pcd_downsampled.points)}")
-            pcds.append(inst_pcd_downsampled)
-            continue
-        print(f"Instance {inst_id} point count out of threshold {app.point_count_range}: {len(inst_pcd_downsampled.points)}")
-        rejected.append(inst_pcd_downsampled)
-    pcds.sort(key=lambda x: len(x.points), reverse=True)
-    
-    # vis = o3d_display([scene_noisy])
-    # vis.run()
-    # vis.destroy_window()
 
+    unique_id_list = list(label_masks.keys())
+    rp(f"length of unique id list: {len(unique_id_list)} \n {unique_id_list}")
+    valid_count = 0
+    tf_by_id = {value.id: value.T_gt for value in o3d_scene.values()}
+    bin_geom_id = o3d_scene["bin"].id  # set by scene_render; robust to any part count
+
+    voxel_size =  0.001
+    ref_xyz = np.asarray(app.down_pcd.points)
+    min_overlap = 0.1
+    bin_pcd = None
+    for _, inst_id in enumerate(unique_id_list):
+        inst_pts = pts[label_masks[inst_id]]
+        inst_nrm = nrm[label_masks[inst_id]]
+        inst_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(inst_pts))
+        inst_pcd.normals = o3d.utility.Vector3dVector(inst_nrm)
+        inst_pcd_downsampled = inst_pcd.voxel_down_sample(voxel_size)
+
+        if inst_id == bin_geom_id:
+            bin_pcd = copy.deepcopy(inst_pcd_downsampled)
+            app.synthetic_scenes["bin_pcd"] = bin_pcd
+            continue
+        
+        xyz_inst = np.asarray(inst_pcd_downsampled.points)
+        # if not (min(app.point_count_range)<=len(xyz_inst)<=max(app.point_count_range)):
+        #     print(f"Instance {inst_id} point count out of threshold {app.point_count_range}: {len(xyz_inst)}")
+        #     continue
+        
+        inst_rmat = tf_by_id[inst_id][:3, :3]
+        inst_trans = tf_by_id[inst_id][:3, 3]
+        xyz_ref_in_scene = (inst_rmat @ ref_xyz.T + inst_trans[:, None]).T
+        overlap = compute_overlap(xyz_ref_in_scene, xyz_inst, threshold=voxel_size * 2.5)
+        # print(f"Instance {inst_id} overlap is {overlap}")
+        # if overlap < min_overlap:
+        #     print(f"  [skip] Instance {inst_id}: overlap={overlap:.2f} < {min_overlap}")
+        #     continue
+
+        # print(f"Instance {inst_id} point count within threshold {app.point_count_range}: {len(xyz_inst)}")
+        valid_count += 1
+        inst_name = f"synthetic_sample_{valid_count}"
+        app.synthetic_targets[inst_name] = O3DSceneObject(
+            geom=inst_pcd_downsampled, 
+            ref_geom=o3d.geometry.PointCloud(o3d.utility.Vector3dVector(xyz_ref_in_scene)),
+            id=int(inst_id), 
+            T_gt=tf_by_id[inst_id],
+            xyz0=xyz_ref_in_scene,
+            xyz1=xyz_inst,
+            overlap=overlap
+        )
+
+    
+    default_point_material = rendering.MaterialRecord()
+    default_point_material.point_size = 1.5
+    default_point_material.base_color = [1.0, 1.0, 1.0, 1.0]
+    bin_pcd.paint_uniform_color([0.6, 0.6, 0.6])
+
+    pcds = []
+    for key in app.synthetic_targets:
+        geom = app.synthetic_targets[key].geom
+        geom.transform(scene.bin_transform)
+        pcds.append(geom)
     vis = o3d_display(pcds, dynamic_color=True)
+    bin_pcd.transform(scene.bin_transform)
     vis.add_geometry(bin_pcd)
     vis.run()
     vis.destroy_window()

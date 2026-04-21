@@ -58,7 +58,7 @@ class SaveStage(BaseStage):
                 return
         try:
             if self.app.stage == Stage.SAVE:
-                pcd_folder_path = Path.cwd() / "reference_pcd"
+                pcd_folder_path = Path.cwd() / "output" / "reference_pcd"
                 pcd_folder_path.mkdir(parents=True, exist_ok=True)
                 pcd_path = pcd_folder_path / (self.app.mesh_basename + ".ply")
                 self.app.output_pcd_path = pcd_path

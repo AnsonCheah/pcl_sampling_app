@@ -60,29 +60,42 @@ PHASE1_COVERAGE_GATE = 0.50    # min coverage @ loose threshold to pass Phase 1
 # Valid range confirmed by MechVision: roughly [0.1, 5.0].
 # ---------------------------------------------------------------------------
 
-PHASE2A_REFSTEP_SCALES = [0.5, 0.75, 1.0, 1.5, 2.0]
+PHASE2A_REFSTEP_SCALES = [2.0, 1.5, 1.0, 0.75, 0.5]   # coarser/faster first
 # Direct distQ FACTOR values to try — independent of refStep.
 # Centred on 1.0 (MechVision optimal), exploring ½×–3× range.
 PHASE2A_DISTQ_VALUES   = [0.5, 0.75, 1.0, 1.5, 2.0, 3.0]
 
 # ---------------------------------------------------------------------------
-# Phase 2b — Remaining coarse params (coordinate descent, in priority order)
+# Phase 2b — Remaining coarse params (pipeline-ordered for coordinate descent)
 # Each entry: (param_name, candidates_list, is_edge_only)
+#
+# Order follows the MechVision coarse matching pipeline:
+#   scene sub-sampling (referredStep)
+#   → Hough accumulator structure (angleQ, pairs, distQ already locked in 2a)
+#   → Hough threshold (maxVoteRatio — must be after voting params stable)
+#   → NMS / axis filtering (useDistanceNMS, edge-only axis filter)
+#   → pose verification voxel grid (voxelLengthRange)
+#   → final output count (outputNum — most downstream, must be last)
 # ---------------------------------------------------------------------------
 
 PHASE2B_PARAMS = [
-    ("angleQuantification",          [30, 45, 60, 90],               False),
-    ("maxVoteRatio",                  [0.3, 0.5, 0.6, 0.7, 0.8, 0.9], False),
-    ("maxNumOfPointPairsPerFeature",  None,                            False),  # warm-relative, computed at runtime
-    ("referredStep",                  [1, 2, 3],                       False),
-    ("useDistanceNMS",                [True, False],                   False),
-    ("outputNum",                     [1, 2, 3],                       False),
-    ("filterCandidatePoseByAxis",     [True, False],                   True),   # edge only
-    ("angleThreshold",                [45, 90, 135],                   True),   # edge only, only if above=True
+    ("referredStep",                  [3, 2, 1],                       False),  # scene sub-sampling — coarser/faster first
+    ("angleQuantification",           [90, 60, 45, 30],                False),  # Hough angle bins — coarser/faster first
+    ("maxNumOfPointPairsPerFeature",  None,                            False),  # voting density, warm-relative
+    ("maxVoteRatio",                  [0.3, 0.5, 0.6, 0.7, 0.8, 0.9], False),  # Hough threshold — after voting stable
+    ("useDistanceNMS",                [True, False],                   False),  # NMS candidate filter
+    ("filterCandidatePoseByAxis",     [True, False],                   True),   # edge only — axis filter
+    ("angleThreshold",                [45, 90, 135],                   True),   # edge only — conditional on above
+    ("voxelLengthRange",              None,                            False),  # pose verification, warm-relative pairs
+    ("outputNum",                     [1, 2, 3],                       False),  # final output count — most downstream
 ]
 
 # Multipliers for maxNumOfPointPairsPerFeature relative to warm-start value
 PHASE2B_PAIRS_SCALES = [0.25, 0.5, 1.0, 2.0, 4.0]
+
+# Multipliers for voxelLengthRange (min, max) relative to geometry-derived warm values.
+# Preserves the 1:4 min:max ratio at every scale so min < max is guaranteed.
+PHASE2B_VOXEL_SCALES = [0.25, 0.5, 1.0, 1.5, 2.0, 3.0]
 
 # Max rounds for Phase 2 coordinate descent
 PHASE2_MAX_ROUNDS = 3
@@ -166,3 +179,39 @@ PHASE_GATES = {
     "after_phase2":  (0.65, "skip_phase4"),    # symmetry correction not worth it
     "after_phase3":  (0.75, "skip_phase6"),    # interval narrowing not justified
 }
+
+# ---------------------------------------------------------------------------
+# Optuna settings  (used by optuna_optimizer.py)
+# ---------------------------------------------------------------------------
+
+# Legacy single-study budget (kept for backward compat with old CLI --n_trials)
+OPTUNA_N_TRIALS  = 100
+OPTUNA_N_STARTUP = 10
+
+# Staged architecture trial budgets
+OPTUNA_N_TRIALS_1A = 35   # Stage 1a: refStep × distQ grid (30) + TPE (5)
+OPTUNA_N_TRIALS_1B = 50   # Stage 1b: remaining coarse params
+OPTUNA_N_TRIALS_2  = 50   # Stage 2:  fine params
+
+# Time guard: prune if running mean_time > best × RATIO (Stage 1a only).
+# Warm-start gives ~4s/scene → cap ~12s. refStep=5 (40-74s) pruned at scene 2.
+OPTUNA_TIME_RATIO  = 3.0
+
+# Optuna integer/float bounds — derived from existing phase tables so
+# suggest_params functions never hard-code numbers.
+OPTUNA_REFSTEP_BOUNDS    = (1, 20)
+OPTUNA_DISTQ_BOUNDS      = (min(PHASE2A_DISTQ_VALUES), max(PHASE2A_DISTQ_VALUES))
+OPTUNA_VOTERATIO_BOUNDS  = (min(next(c for n, c, _ in PHASE2B_PARAMS if n == "maxVoteRatio")),
+                             max(next(c for n, c, _ in PHASE2B_PARAMS if n == "maxVoteRatio")))
+OPTUNA_REFERRED_BOUNDS   = (min(next(c for n, c, _ in PHASE2B_PARAMS if n == "referredStep")),
+                             max(next(c for n, c, _ in PHASE2B_PARAMS if n == "referredStep")))
+OPTUNA_OUTPUTNUM_BOUNDS  = (min(next(c for n, c, _ in PHASE2B_PARAMS if n == "outputNum")),
+                             max(next(c for n, c, _ in PHASE2B_PARAMS if n == "outputNum")))
+OPTUNA_CONFTHRESH_BOUNDS = (min(next(c for n, c in PHASE3_PARAMS if n == "confidenceThreshold")),
+                             max(next(c for n, c in PHASE3_PARAMS if n == "confidenceThreshold")))
+
+# Optuna categorical choices — lists already in fast→slow order from PHASE2B
+OPTUNA_ANGLQ_CHOICES   = next(c for n, c, _ in PHASE2B_PARAMS if n == "angleQuantification")
+OPTUNA_OPAPP_CHOICES   = next(c for n, c in PHASE3_PARAMS if n == "operationApproach")
+OPTUNA_DEVCAP_CHOICES  = next(c for n, c in PHASE3_PARAMS if n == "deviationCorrectionCapacity")
+OPTUNA_SCORELV_CHOICES = next(c for n, c in PHASE3_PARAMS if n == "scoreLevel")

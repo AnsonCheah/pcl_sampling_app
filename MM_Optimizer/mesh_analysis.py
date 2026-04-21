@@ -36,6 +36,10 @@ class WarmStart:
     maxNumOfPointPairsPerFeature:  int   = 5000
     outputNum:                     int   = 1       # overridden to N_instances
 
+    # Voxel verification bounds (mm) — geometry-derived, 0.5%/2% of diameter
+    minVoxelLength_mm: float = 1.0
+    maxVoxelLength_mm: float = 15.0
+
     # Geometry diagnostics (logged but not directly used as params)
     diameter_m:      float = 0.0
     surface_area_m2: float = 0.0
@@ -50,19 +54,17 @@ class WarmStart:
     sym_axis:  Optional[str]   = None    # 'x', 'y', 'z' if detected
 
 
-def analyze_mesh(ref_pcd: o3d.geometry.PointCloud) -> WarmStart:
+def analyze_mesh(ref_pcd: o3d.geometry.PointCloud,
+                 n_instances: int = 1) -> WarmStart:
     """Derive warm-start parameters from the reference model point cloud.
 
     Parameters
     ----------
-    ref_pcd : Reference model point cloud (pre-loaded, with normals).
-
-    Returns
-    -------
-    WarmStart dataclass.
+    ref_pcd     : Reference model point cloud (pre-loaded, with normals).
+    n_instances : Expected number of instances per scene. Sets outputNum warm-start.
     """
     ws = WarmStart()
-    ws.outputNum = 1   # hypotheses per instance; swept in Phase 2b
+    ws.outputNum = n_instances   # hypotheses per instance; swept in Phase 2b
 
     # ------------------------------------------------------------------ #
     #  Basic geometry                                                      #
@@ -72,6 +74,8 @@ def analyze_mesh(ref_pcd: o3d.geometry.PointCloud) -> WarmStart:
 
     ws.diameter_m      = D
     ws.surface_area_m2 = SA
+    ws.maxVoxelLength_mm = max(1.0, round(D * 0.02 * 1000, 1))    # 2% of diameter in mm
+    ws.minVoxelLength_mm = max(0.5, round(D * 0.005 * 1000, 1))   # 0.5% of diameter in mm (1:4 ratio)
 
     # ------------------------------------------------------------------ #
     #  PPF warm-start                                                      #

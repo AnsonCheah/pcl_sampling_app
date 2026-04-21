@@ -2,7 +2,7 @@ name: autotune
 channels:
   - defaults
 dependencies:
-  - python=3.11.9
+  - python=3.12.13
   - pip:
       - matplotlib==3.10.8
       - numpy==2.4.1
@@ -14,4 +14,6 @@ dependencies:
       - python-fcl==0.7.0.10
       - vhacdx==0.0.10
       - manifold3d==3.4.1
+      - grpcio==1.80.0
+      - optuna=4.8.0
       - rich==14.3.3
