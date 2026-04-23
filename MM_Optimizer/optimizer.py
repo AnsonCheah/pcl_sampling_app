@@ -72,12 +72,15 @@ OPTIMIZER_UTILS_PATH = os.path.join(_DIR, "optimizer_utils.py")
 
 @dataclass
 class EvalResult:
-    score:      float           # lower = better  (1-cov)*1e6 + mean_time
-    coverage:   float           # mean fraction of instances detected across M scenes
-    mean_time:  float           # mean coarse+fine cycle time (s)
-    per_scene:  List[dict] = field(default_factory=list)  # per-scene diagnostics
-    n_scenes:   int = 0
-    config:     dict = field(default_factory=dict)
+    score:           float           # raw score (lower=better): mean_time/NORM + (1-cov)*COV_NORM
+    coverage:        float           # mean fraction of instances detected across M scenes
+    mean_time:       float           # mean coarse+fine cycle time (s)
+    per_scene:       List[dict] = field(default_factory=list)  # per-scene diagnostics
+    n_scenes:        int = 0
+    config:          dict = field(default_factory=dict)
+    score_time_term: float = 0.0    # mean_time / SCORE_TIME_NORM
+    score_cov_term:  float = 0.0    # (1 - coverage) * SCORE_COV_NORM
+    score_quality:   float = 0.0    # 1 - score / SCORE_WORST_CASE (higher=better, [0,1])
 
     def soft_score(self) -> float:
         """Mean position error of passing instances — tiebreaker in Phase 5."""
@@ -438,13 +441,18 @@ class Optimizer:
             per_scene.append(s)
 
         coverage  = float(np.mean([s["instance_coverage"] for s in per_scene]))
-        mean_time = np.mean([s["coarse_time_s"] + s["fine_time_s"]
-                             for s in per_scene])
-        score     = (1.0 - coverage) * 1e6 + float(mean_time)
+        mean_time = float(np.mean([s["coarse_time_s"] + s["fine_time_s"]
+                                   for s in per_scene]))
+        _t    = mean_time / SC.SCORE_TIME_NORM
+        _c    = (1.0 - coverage) * SC.SCORE_COV_NORM
+        score = _t + _c
 
-        er = EvalResult(score=score, coverage=coverage, mean_time=float(mean_time),
+        er = EvalResult(score=score, coverage=coverage, mean_time=mean_time,
                         per_scene=per_scene, n_scenes=len(per_scene),
-                        config=combined)
+                        config=combined,
+                        score_time_term=_t,
+                        score_cov_term=_c,
+                        score_quality=1.0 - score / SC.SCORE_WORST_CASE)
 
         if use_cache:
             self.cache.put(key, asdict(er))
@@ -1096,7 +1104,10 @@ class Optimizer:
         log.info(f"OPTIMIZATION COMPLETE: {self.part_name}")
         log.info(f"  coverage   = {final_result.coverage:.3f}")
         log.info(f"  mean_time  = {final_result.mean_time:.3f} s")
-        log.info(f"  score      = {final_result.score:.1f}")
+        log.info(f"  score      = {final_result.score:.4f}  "
+                 f"(quality={final_result.score_quality:.3f}  "
+                 f"time_term={final_result.score_time_term:.4f}  "
+                 f"cov_term={final_result.score_cov_term:.4f})")
         log.info(f"  evals      = {self._n_evals}")
         log.info(f"  wall_time  = {elapsed:.0f} s")
         if cache_stats:
@@ -1113,12 +1124,15 @@ class Optimizer:
         """Write best config to YAML-style JSON for production use."""
         out_path = os.path.join(RESULTS_DIR, f"{prefix}best_config_{self.part_name}{suffix}.json")
         payload  = {
-            "part_name":  self.part_name,
-            "coverage":   result.coverage,
-            "mean_time":  result.mean_time,
-            "score":      result.score,
-            "coarse":     result.config.get("coarse", {}),
-            "fine":       result.config.get("fine",   {}),
+            "part_name":       self.part_name,
+            "coverage":        result.coverage,
+            "mean_time":       result.mean_time,
+            "score":           result.score,
+            "score_quality":   result.score_quality,
+            "score_time_term": result.score_time_term,
+            "score_cov_term":  result.score_cov_term,
+            "coarse":          result.config.get("coarse", {}),
+            "fine":            result.config.get("fine",   {}),
         }
         with open(out_path, "w") as f:
             json.dump(payload, f, indent=2, default=str)

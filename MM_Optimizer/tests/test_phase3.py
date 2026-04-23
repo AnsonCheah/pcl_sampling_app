@@ -49,10 +49,14 @@ def test_dry_run_phase3():
         coarse = opt._default_coarse()
         fine   = opt._default_fine()
 
+        _t = 0.5 / SC.SCORE_TIME_NORM
+        _c = (1.0 - 1.0) * SC.SCORE_COV_NORM
         ph2_result = EvalResult(
-            score=0.1, coverage=1.0, mean_time=0.5,
+            score=_t + _c, coverage=1.0, mean_time=0.5,
             per_scene=[{"pos_errors": [0.001]} for _ in range(3)],
             n_scenes=3, config={"coarse": coarse, "fine": fine},
+            score_time_term=_t, score_cov_term=_c,
+            score_quality=1.0 - (_t + _c) / SC.SCORE_WORST_CASE,
         )
 
         result = opt.phase3_fine_cd(coarse, fine, ph2_result)

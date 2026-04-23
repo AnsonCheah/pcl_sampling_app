@@ -101,7 +101,7 @@ def test_full_live(use_cache=True, use_two_pass=False):
         log.info(f"\n--- Full run summary ---")
         log.info(f"  coverage  = {result.coverage:.3f}  (mean instance coverage)")
         log.info(f"  mean_time = {result.mean_time:.3f}s  (per M-scene)")
-        log.info(f"  score     = {result.score:.1f}")
+        log.info(f"  score     = {result.score:.4f}  quality={result.score_quality:.3f}")
         log.info(f"  evals     = {opt._n_evals}")
         if cache:
             log.info(f"  cache     = {cache.stats()}")

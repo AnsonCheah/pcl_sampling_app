@@ -65,10 +65,13 @@ def test_single_evaluate():
         log.info("Running evaluate_config() with default warm-start params ...")
         result = opt.evaluate_config(coarse, fine, scenes,
                                      SC.POS_THRESH_TIGHT, SC.ANG_THRESH_TIGHT)
-        log.info(f"  coverage  = {result.coverage:.3f}  (mean instance coverage across scenes)")
-        log.info(f"  mean_time = {result.mean_time:.3f} s")
-        log.info(f"  score     = {result.score:.1f}")
-        log.info(f"  n_scenes  = {result.n_scenes}")
+        log.info(f"  coverage       = {result.coverage:.3f}")
+        log.info(f"  mean_time      = {result.mean_time:.3f} s")
+        log.info(f"  score          = {result.score:.4f}  (lower=better)")
+        log.info(f"  score_quality  = {result.score_quality:.3f}  (higher=better, [0,1])")
+        log.info(f"  score_time_term= {result.score_time_term:.4f}")
+        log.info(f"  score_cov_term = {result.score_cov_term:.4f}")
+        log.info(f"  n_scenes       = {result.n_scenes}")
         for i, s in enumerate(result.per_scene):
             n_gt   = len(s.get("pos_errors", []))
             n_pass = sum(1 for e in s.get("pos_errors", []) if e is not None)
@@ -86,7 +89,20 @@ def test_single_evaluate():
             assert "coarse_time_s"     in s
             assert "fine_time_s"       in s
 
-        log.info("PASS: single_evaluate  (structure OK)")
+        # Score decomposition invariants
+        import MM_Optimizer.search_config as SC
+        assert abs(result.score_time_term - result.mean_time / SC.SCORE_TIME_NORM) < 1e-10, \
+            f"score_time_term={result.score_time_term} != mean_time/SCORE_TIME_NORM"
+        assert abs(result.score_cov_term - (1.0 - result.coverage) * SC.SCORE_COV_NORM) < 1e-10, \
+            f"score_cov_term={result.score_cov_term} != (1-cov)*SCORE_COV_NORM"
+        assert abs(result.score - (result.score_time_term + result.score_cov_term)) < 1e-10, \
+            f"score={result.score} != score_time_term + score_cov_term"
+        assert abs(result.score_quality - (1.0 - result.score / SC.SCORE_WORST_CASE)) < 1e-10, \
+            f"score_quality={result.score_quality} != 1 - score/SCORE_WORST_CASE"
+        assert 0.0 <= result.score_quality <= 1.0, \
+            f"score_quality {result.score_quality:.4f} out of [0, 1]"
+
+        log.info("PASS: single_evaluate  (structure + score decomposition OK)")
 
     finally:
         SC.M_FULL = orig_m
