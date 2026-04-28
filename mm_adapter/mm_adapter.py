@@ -24,7 +24,7 @@ print(f"import time {time.time() - start}")
 HUB_ADDRESS = "127.0.0.1:5307"
 GRPC_METHOD = "/mmind.rpc.Json/call"
 MECH_VISION = "Mech-Vision"
-DEFAULT_TIMEOUT = 150  # seconds
+DEFAULT_TIMEOUT = 300  # seconds
 
 log = logging.getLogger(__name__)
 

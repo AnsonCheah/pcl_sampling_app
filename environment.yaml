@@ -16,4 +16,5 @@ dependencies:
       - manifold3d==3.4.1
       - grpcio==1.80.0
       - optuna=4.8.0
+      - scikit-learn==1.8.0
       - rich==14.3.3

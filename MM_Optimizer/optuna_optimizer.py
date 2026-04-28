@@ -1,34 +1,39 @@
 """
-optuna_optimizer.py — Staged Optuna TPE optimizer for MechVision pose estimation
-----------------------------------------------------------------------------------
-Replaces Phases 2–3–5–6 of the hierarchical coordinate descent with three
-sequential Optuna studies that mirror the CD structure:
+optuna_optimizer.py — Fully Joint Multivariate TPE optimizer for MechVision pose estimation
+---------------------------------------------------------------------------------------------
+Replaces all three staged studies (Stage 1a/1b/2) with a single joint study covering
+all 16–18 coarse+fine parameters at once using multivariate TPE.
 
-  Stage 1a : refStep × distQ          (2D, mirrors Phase 2a joint grid)
-  Stage 1b : remaining coarse params  (8–10D, mirrors Phase 2b CD)
-  Stage 2  : fine params              (6D, mirrors Phase 3 CD)
-
-Phases 0 (mesh analysis warm-start), 1 (regime gate), and 4 (symmetry) are
-unchanged and delegate to the wrapped Optimizer instance.
+Architecture
+------------
+- All params (refStep, distQ, coarse remaining, fine) suggested in one `suggest_params_joint`
+  call per trial. No stage isolation between coarse and fine.
+- The 30-trial refStep×distQ grid is preserved as enqueued warm-start trials (with default
+  fine params) so `_best_mean_time` is seeded early and initial coverage diversity is ensured.
+- Edge-only params (filterCandidatePoseByAxis, angleThreshold) are conditionally suggested
+  only when coarse_mode=1 (edge). group=True ensures separate joint models for surface vs edge
+  trials, preventing missing-value noise from contaminating either model.
+- Multi-round: same study extended by calling study.optimize() again in round 1+. TPE's
+  accumulated density model is preserved across rounds — no new study creation needed.
 
 Key design decisions
 --------------------
-- Stage 1a enqueues the full 5×6=30 refStep×distQ grid (fast→slow scale order)
-  before TPE, so the time guard is seeded early by cheap configs.
-- Time guard (Stage 1a only): prune if running mean_time > best×OPTUNA_TIME_RATIO.
-  refStep is locked after Stage 1a, so Stage 1b and 2 have no time guard —
-  this lets outputNum and fine params be explored freely.
-- Coarse stages (1a, 1b) use fixed default fine params (_default_fine) so fine
-  param variation does not contaminate coarse optimisation.
-- MedianPruner with n_startup_trials=2, n_warmup_steps=1, interval_steps=1
-  checks after every scene from the 2nd trial onward.
-- EvalCache from the existing Optimizer is preserved.
+- TPESampler(multivariate=True, group=True, n_startup_trials=20): joint kernel with automatic
+  parameter grouping for conditional suggests.
+- create_study(directions=["minimize","minimize"]): multi-objective (coverage_loss, mean_time).
+  Winner selected from Pareto front: max coverage first, min time as tiebreaker.
+- Two-level pruning: explicit time guard + coverage floor (trial.report not supported in MOO).
+- Scoring (pruning signal only): raw_score = mean_time/SCORE_TIME_NORM + (1-cov)*SCORE_COV_NORM.
+  Multi-objective objective returns (cov_loss, mean_time) tuple — not the scalarized score.
+- Phases 0 (mesh analysis warm-start), 1 (regime gate), and 4 (symmetry) are unchanged and
+  delegate to the wrapped Optimizer instance.
+- Visualization: after run(), exports all Optuna plots to a timestamped folder.
 - SQLite storage enables crash-resume (skipped in dry_run).
 
 CLI
 ---
   python MM_Optimizer/optuna_optimizer.py --part 25333MB000 [--dry_run]
-      [--n_trials_1a N] [--n_trials_1b N] [--n_trials_2 N]
+      [--n_trials_joint N] [--n_rounds N]
       [--scenes_dir PATH] [--m_full N] [--no_cache] [--seed N]
       [--export_best] [--storage PATH]
 """
@@ -39,7 +44,7 @@ import os
 import random
 import sys
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import optuna
@@ -66,94 +71,173 @@ log = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage-specific suggest_params functions
-# All bounds/choices reference SC.* constants — no literals.
+# suggest_params_joint — all 16/18D params in one function
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _suggest_voxel_params(
-    trial: optuna.Trial,
-    voxel_bounds: Tuple[float, float, float, float],
-) -> dict:
-    """Suggest minVoxelLength and maxVoxelLength as min + width (guarantees min < max)."""
-    min_lo, min_hi, width_lo, width_hi = voxel_bounds
-    min_vox = trial.suggest_float("minVoxelLength_mm", min_lo, min_hi)
-    vox_w   = trial.suggest_float("voxel_width_mm",   width_lo, width_hi)
-    return {
-        "minVoxelLength": min_vox,
-        "maxVoxelLength": min_vox + vox_w,
-    }
-
-
-def suggest_params_1a(
-    trial: optuna.Trial,
-    refstep_bounds: Tuple[int, int] = SC.OPTUNA_REFSTEP_BOUNDS,
-) -> dict:
-    """Stage 1a: suggest refStep (int) and distQ (float) only.
-
-    refstep_bounds is computed per-part in OptunaOptimizer.__init__ so the
-    upper bound scales with warm_start.refStep for large parts.
-    """
-    lo, hi   = refstep_bounds
-    dlo, dhi = SC.OPTUNA_DISTQ_BOUNDS
-    return {
-        "refStep":            trial.suggest_int(  "refStep", lo, hi),
-        "distQuantification": trial.suggest_float("distQ",   dlo, dhi),
-    }
-
-
-def suggest_params_1b(
+def suggest_params_joint(
     trial: optuna.Trial,
     regime: dict,
     pairs_candidates: List[int],
     voxel_bounds: Tuple[float, float, float, float],
+    refstep_bounds: Tuple[int, int],
 ) -> dict:
-    """Stage 1b: suggest remaining coarse params (refStep/distQ are fixed externally)."""
-    rlo, rhi = SC.OPTUNA_REFERRED_BOUNDS
-    vlo, vhi = SC.OPTUNA_VOTERATIO_BOUNDS
-    olo, ohi = SC.OPTUNA_OUTPUTNUM_BOUNDS
+    """Suggest all coarse + fine params jointly.
 
-    coarse = {
-        "angleQuantification":          trial.suggest_categorical(
-                                            "angleQ", SC.OPTUNA_ANGLQ_CHOICES),
-        "maxNumOfPointPairsPerFeature": trial.suggest_categorical(
-                                            "pairs", pairs_candidates),
-        "maxVoteRatio":                 trial.suggest_float(
-                                            "maxVoteRatio", vlo, vhi),
-        "referredStep":                 trial.suggest_int(
-                                            "referredStep", rlo, rhi),
-        "useDistanceNMS":               trial.suggest_categorical(
-                                            "useDistNMS", [True, False]),
-        "outputNum":                    trial.suggest_int(
-                                            "outputNum", olo, ohi),
-        **_suggest_voxel_params(trial, voxel_bounds),
-    }
-    if regime["coarse_mode"] == 1.0:
-        at_choices = next(c for n, c, _ in SC.PHASE2B_PARAMS if n == "angleThreshold")
-        fa = trial.suggest_categorical("filterCandidatePoseByAxis", [True, False])
-        coarse["filterCandidatePoseByAxis"] = fa
-        coarse["angleThreshold"] = (
-            trial.suggest_categorical("angleThreshold", at_choices) if fa else 90
-        )
-    return coarse
+    Conditional edge-only params (filterCandidatePoseByAxis, angleThreshold) are only
+    suggested when coarse_mode=1. group=True in the sampler ensures surface and edge
+    trials form separate joint groups, preventing missing-value noise.
 
+    Returns flat dict suitable for splitting into coarse/fine via _split_joint_params().
+    """
+    min_lo, min_hi, width_lo, width_hi = voxel_bounds
+    lo_ref, hi_ref = refstep_bounds
+    dlo, dhi       = SC.OPTUNA_DISTQ_BOUNDS
+    vlo, vhi       = SC.OPTUNA_VOTERATIO_BOUNDS
+    rlo            = SC.OPTUNA_REFERRED_BOUNDS[0]   # lower = 1; upper = hi_ref (matches refStep max)
+    olo, ohi       = SC.OPTUNA_OUTPUTNUM_BOUNDS
 
-def suggest_fine_params(trial: optuna.Trial, regime: dict) -> dict:
-    """Stage 2: suggest fine registration params only."""
-    clo, chi = SC.OPTUNA_CONFTHRESH_BOUNDS
+    # ── Coarse params ─────────────────────────────────────────────────────────
+    coarse_mode         = regime["coarse_mode"]   # fixed by Phase 1; not a free param
+
+    refStep             = trial.suggest_int(  "refStep",  lo_ref, hi_ref)
+    distQ               = trial.suggest_float("distQ",    dlo,    dhi)
+    angleQuantification = trial.suggest_categorical("angleQuantification", SC.OPTUNA_ANGLQ_CHOICES)
+    pairs_i             = trial.suggest_int(  "pairs_idx",  0, len(pairs_candidates) - 1)
+    voteRatio           = trial.suggest_float("maxVoteRatio", vlo, vhi)
+    referredStep        = trial.suggest_int("referredStep", rlo, refStep)   # upper = refStep so Optuna never suggests out-of-range values
+    useDistNMS          = trial.suggest_categorical("useDistNMS", [True, False])
+    outputNum           = trial.suggest_int("outputNum", olo, ohi)
+    min_vox             = trial.suggest_float("minVoxelLength_mm", min_lo, min_hi)
+    vox_w               = trial.suggest_float("voxel_width_mm",    width_lo, width_hi)
+
+    # Edge-only params — conditionally suggested so TPE models them in a separate group
+    atlo, athi = SC.OPTUNA_ANGLETHRESH_BOUNDS
+    if coarse_mode == 1.0:
+        filter_by_axis = trial.suggest_categorical("filterByAxis", [True, False])
+        if filter_by_axis:
+            angle_thresh = trial.suggest_int("angleThreshold", atlo, athi)
+        else:
+            angle_thresh = 90   # MechVision ignores when filterByAxis=False
+    else:
+        filter_by_axis = True   # surface mode: MechVision ignores these
+        angle_thresh   = 135
+
+    # ── Fine params ───────────────────────────────────────────────────────────
+    fine_mode  = regime["fine_mode"]   # fixed by Phase 1
+    oplo, ophi = SC.OPTUNA_OPAPP_BOUNDS
+    dvlo, dvhi = SC.OPTUNA_DEVCAP_BOUNDS
+    opApproach = trial.suggest_int("opApproach", oplo, ophi)
+    devCap     = trial.suggest_int("devCap",     dvlo, dvhi)
+    visibleSurf = trial.suggest_categorical("visibleSurf", [True, False])
+    normalAng   = trial.suggest_categorical("normalAng",   [True, False])
+
     return {
-        "registrationMode":                  regime["fine_mode"],
-        "operationApproach":                 trial.suggest_categorical(
-                                                 "opApproach", SC.OPTUNA_OPAPP_CHOICES),
-        "deviationCorrectionCapacity":       trial.suggest_categorical(
-                                                 "devCap", SC.OPTUNA_DEVCAP_CHOICES),
-        "onlyConsiderVisibleSurfaceOfModel": trial.suggest_categorical(
-                                                 "visibleSurf", [True, False]),
-        "considerErrorofNormalAngles":       trial.suggest_categorical(
-                                                 "normalAng", [True, False]),
-        "scoreLevel":                        trial.suggest_categorical(
-                                                 "scoreLevel", SC.OPTUNA_SCORELV_CHOICES),
-        "confidenceThreshold":               trial.suggest_float("confThresh", clo, chi),
+        # ── coarse ─────────────────────────────────────────────────────────
+        "coarse_mode":         coarse_mode,
+        "refStep":             refStep,
+        "distQuantification":  distQ,
+        "angleQuantification": angleQuantification,
+        "pairs_idx":           pairs_i,
+        "maxNumOfPointPairsPerFeature": pairs_candidates[pairs_i],
+        "maxVoteRatio":        voteRatio,
+        "referredStep":        referredStep,
+        "useDistanceNMS":      useDistNMS,
+        "outputNum":           outputNum,
+        "minVoxelLength_mm":   min_vox,
+        "voxel_width_mm":      vox_w,
+        "minVoxelLength":      min_vox,
+        "maxVoxelLength":      min_vox + vox_w,
+        "filterCandidatePoseByAxis": filter_by_axis,
+        "angleThreshold":      angle_thresh,
+        # ── fine ───────────────────────────────────────────────────────────
+        "fine_mode":           fine_mode,
+        "operationApproach":   float(opApproach),
+        "deviationCorrectionCapacity": float(devCap),
+        "onlyConsiderVisibleSurfaceOfModel": visibleSurf,
+        "considerErrorofNormalAngles":       normalAng,
+    }
+
+
+def _split_joint_params(p: dict) -> Tuple[dict, dict]:
+    """Convert flat joint param dict → (coarse_dict, fine_dict)."""
+    coarse_mode = p["coarse_mode"]
+    fine_mode   = p["fine_mode"]
+    coarse = {
+        "registrationMode":             coarse_mode,
+        "refStep":                      p["refStep"],
+        "distQuantification":           p["distQuantification"],
+        "angleQuantification":          p["angleQuantification"],
+        "maxNumOfPointPairsPerFeature": p["maxNumOfPointPairsPerFeature"],
+        "maxVoteRatio":                 p["maxVoteRatio"],
+        "referredStep":                 p["referredStep"],
+        "useDistanceNMS":               p["useDistanceNMS"],
+        "outputNum":                    p["outputNum"],
+        "minVoxelLength":               p["minVoxelLength"],
+        "maxVoxelLength":               p["maxVoxelLength"],
+    }
+    if coarse_mode == 1.0:
+        coarse["filterCandidatePoseByAxis"] = p["filterCandidatePoseByAxis"]
+        coarse["angleThreshold"]            = p["angleThreshold"]
+
+    fine = {
+        "registrationMode":                  fine_mode,
+        "operationApproach":                 p["operationApproach"],
+        "deviationCorrectionCapacity":       p["deviationCorrectionCapacity"],
+        "onlyConsiderVisibleSurfaceOfModel": p["onlyConsiderVisibleSurfaceOfModel"],
+        "considerErrorofNormalAngles":       p["considerErrorofNormalAngles"],
+        "scoreLevel":                        0.0,
+        "confidenceThreshold":               0.1,
         "candidateTopNum":                   1,
+    }
+    return coarse, fine
+
+
+def _expand_winner_params(
+    trial_params: dict,
+    regime: dict,
+    pairs_candidates: List[int],
+) -> dict:
+    """Reconstruct the full expanded param dict from winner.params (short trial-level names).
+
+    winner.params only contains names as used in trial.suggest_*; this mirrors the
+    transformation in suggest_params_joint to produce the same expanded dict.
+    """
+    p = trial_params
+    pairs_i  = p["pairs_idx"]
+    min_vox  = p["minVoxelLength_mm"]
+    vox_w    = p["voxel_width_mm"]
+    coarse_mode = regime["coarse_mode"]
+    fine_mode   = regime["fine_mode"]
+
+    if coarse_mode == 1.0:
+        filter_by_axis = p.get("filterByAxis", True)
+        angle_thresh   = p.get("angleThreshold", 90) if filter_by_axis else 90
+    else:
+        filter_by_axis = True
+        angle_thresh   = 135
+
+    return {
+        "coarse_mode":         coarse_mode,
+        "refStep":             p["refStep"],
+        "distQuantification":  p["distQ"],
+        "angleQuantification": p["angleQuantification"],
+        "pairs_idx":           pairs_i,
+        "maxNumOfPointPairsPerFeature": pairs_candidates[pairs_i],
+        "maxVoteRatio":        p["maxVoteRatio"],
+        "referredStep":        p["referredStep"],
+        "useDistanceNMS":      p["useDistNMS"],
+        "outputNum":           p["outputNum"],
+        "minVoxelLength_mm":   min_vox,
+        "voxel_width_mm":      vox_w,
+        "minVoxelLength":      min_vox,
+        "maxVoxelLength":      min_vox + vox_w,
+        "filterCandidatePoseByAxis": filter_by_axis,
+        "angleThreshold":      angle_thresh,
+        "fine_mode":           fine_mode,
+        "operationApproach":   float(p["opApproach"]),
+        "deviationCorrectionCapacity": float(p["devCap"]),
+        "onlyConsiderVisibleSurfaceOfModel": p["visibleSurf"],
+        "considerErrorofNormalAngles":       p["normalAng"],
     }
 
 
@@ -161,101 +245,75 @@ def suggest_fine_params(trial: optuna.Trial, regime: dict) -> dict:
 # Warm-start builders
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_warm_1b(
-    warm,
+def _build_warm_joint(
+    coarse_dict: dict,
+    fine_dict: dict,
     regime: dict,
     pairs_candidates: List[int],
     voxel_bounds: Tuple[float, float, float, float],
+    refstep_bounds: Tuple[int, int],
 ) -> dict:
-    """Geometry-derived warm-start for Stage 1b (remaining coarse params)."""
-    snapped_pairs = min(pairs_candidates,
-                        key=lambda x: abs(x - warm.maxNumOfPointPairsPerFeature))
+    """Convert a full (coarse, fine) config dict → flat joint trial params for enqueue.
+
+    Snaps pairs and angleQ to nearest valid categorical value. Clamps continuous params to bounds.
+    Clamps referredStep to refStep so the enqueued trial is valid (external dict may violate this).
+    """
     min_lo, min_hi, width_lo, width_hi = voxel_bounds
-    params = {
-        "angleQ":              warm.angleQuantification,
-        "pairs":               snapped_pairs,
-        "maxVoteRatio":        0.5,
-        "referredStep":        1,
-        "useDistNMS":          True,
-        "outputNum":           1,
-        "minVoxelLength_mm":   warm.minVoxelLength_mm,
-        "voxel_width_mm":      warm.maxVoxelLength_mm - warm.minVoxelLength_mm,
+    vlo, vhi   = SC.OPTUNA_VOTERATIO_BOUNDS
+    rlo        = SC.OPTUNA_REFERRED_BOUNDS[0]   # lower = 1
+    olo, ohi   = SC.OPTUNA_OUTPUTNUM_BOUNDS
+    lo_ref, hi_ref = refstep_bounds
+    rhi        = hi_ref                          # upper matches refStep max
+    dlo, dhi   = SC.OPTUNA_DISTQ_BOUNDS
+
+    # Snap angleQ to nearest valid categorical value
+    aq_choices = SC.OPTUNA_ANGLQ_CHOICES
+    aq_val = coarse_dict.get("angleQuantification", aq_choices[0])
+    aq_snap = min(aq_choices, key=lambda c: abs(c - aq_val))
+
+    # Snap pairs to nearest candidate index
+    pairs_val = coarse_dict.get("maxNumOfPointPairsPerFeature", pairs_candidates[0])
+    pairs_idx = min(range(len(pairs_candidates)),
+                    key=lambda i: abs(pairs_candidates[i] - pairs_val))
+
+    min_vox = float(np.clip(coarse_dict.get("minVoxelLength",
+                                            coarse_dict.get("minVoxelLength_mm", 1.0)),
+                            min_lo, min_hi))
+    max_vox = coarse_dict.get("maxVoxelLength",
+                               coarse_dict.get("maxVoxelLength_mm", min_vox + 14.0))
+    vox_w   = float(np.clip(max_vox - min_vox, width_lo, width_hi))
+
+    # Fine integer indices
+    oplo, ophi = SC.OPTUNA_OPAPP_BOUNDS
+    dvlo, dvhi = SC.OPTUNA_DEVCAP_BOUNDS
+    op  = int(np.clip(round(fine_dict.get("operationApproach", 1.0)),           oplo, ophi))
+    dev = int(np.clip(round(fine_dict.get("deviationCorrectionCapacity", 0.0)), dvlo, dvhi))
+
+    ref_val      = int(np.clip(coarse_dict.get("refStep", 10), lo_ref, hi_ref))
+    referred_val = int(np.clip(coarse_dict.get("referredStep", 1), rlo, rhi))
+    referred_val = min(referred_val, ref_val)   # enforce refStep >= referredStep
+
+    p: dict = {
+        "refStep":              ref_val,
+        "distQ":                float(np.clip(coarse_dict.get("distQuantification", 1.0), dlo, dhi)),
+        "angleQuantification":  aq_snap,
+        "pairs_idx":            pairs_idx,
+        "maxVoteRatio":         float(np.clip(coarse_dict.get("maxVoteRatio", 0.5), vlo, vhi)),
+        "referredStep":         referred_val,
+        "useDistNMS":           bool(coarse_dict.get("useDistanceNMS", True)),
+        "outputNum":            int(np.clip(coarse_dict.get("outputNum", 1),       olo, ohi)),
+        "minVoxelLength_mm":    min_vox,
+        "voxel_width_mm":       vox_w,
+        "opApproach":           op,
+        "devCap":               dev,
+        "visibleSurf":          bool(fine_dict.get("onlyConsiderVisibleSurfaceOfModel", False)),
+        "normalAng":            bool(fine_dict.get("considerErrorofNormalAngles", False)),
     }
     if regime["coarse_mode"] == 1.0:
-        params["filterCandidatePoseByAxis"] = True
-        params["angleThreshold"]            = 135
-
-    # Guard bounds
-    vlo, vhi = SC.OPTUNA_VOTERATIO_BOUNDS
-    rlo, rhi = SC.OPTUNA_REFERRED_BOUNDS
-    olo, ohi = SC.OPTUNA_OUTPUTNUM_BOUNDS
-    assert vlo <= params["maxVoteRatio"] <= vhi
-    assert rlo <= params["referredStep"] <= rhi
-    assert olo <= params["outputNum"]    <= ohi
-    assert params["angleQ"] in SC.OPTUNA_ANGLQ_CHOICES, \
-        f"angleQ={params['angleQ']} not in {SC.OPTUNA_ANGLQ_CHOICES}"
-    assert params["pairs"] in pairs_candidates
-    assert min_lo <= params["minVoxelLength_mm"] <= min_hi
-    assert width_lo <= params["voxel_width_mm"] <= width_hi
-    return params
-
-
-def _build_warm_fine() -> dict:
-    """Default warm-start for Stage 2 (fine params)."""
-    return {
-        "opApproach":  1.0,   # Standard ICP
-        "devCap":      0.0,
-        "visibleSurf": False,
-        "normalAng":   False,
-        "scoreLevel":  0.0,
-        "confThresh":  0.0,
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Reconstruct param dicts from completed trial params
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _trial_to_coarse(
-    best_1a: dict,
-    best_1b_params: dict,
-    regime: dict,
-) -> dict:
-    """Merge Stage 1a best and Stage 1b best_trial.params into a full coarse dict."""
-    min_vox = best_1b_params.get("minVoxelLength_mm", 1.0)
-    vox_w   = best_1b_params.get("voxel_width_mm",   14.0)
-    coarse = {
-        "registrationMode":             regime["coarse_mode"],
-        "refStep":                      best_1a["refStep"],
-        "distQuantification":           best_1a["distQuantification"],
-        "angleQuantification":          best_1b_params["angleQ"],
-        "maxNumOfPointPairsPerFeature": best_1b_params["pairs"],
-        "maxVoteRatio":                 best_1b_params["maxVoteRatio"],
-        "referredStep":                 best_1b_params["referredStep"],
-        "useDistanceNMS":               best_1b_params["useDistNMS"],
-        "outputNum":                    best_1b_params["outputNum"],
-        "minVoxelLength":               min_vox,
-        "maxVoxelLength":               min_vox + vox_w,
-    }
-    if regime["coarse_mode"] == 1.0:
-        coarse["filterCandidatePoseByAxis"] = best_1b_params.get(
-            "filterCandidatePoseByAxis", True)
-        coarse["angleThreshold"] = best_1b_params.get("angleThreshold", 90)
-    return coarse
-
-
-def _trial_to_fine(fine_params: dict, regime: dict) -> dict:
-    """Convert Stage 2 best_trial.params to a fine registration dict."""
-    return {
-        "registrationMode":                  regime["fine_mode"],
-        "operationApproach":                 fine_params["opApproach"],
-        "deviationCorrectionCapacity":       fine_params["devCap"],
-        "onlyConsiderVisibleSurfaceOfModel": fine_params["visibleSurf"],
-        "considerErrorofNormalAngles":       fine_params["normalAng"],
-        "scoreLevel":                        fine_params["scoreLevel"],
-        "confidenceThreshold":               fine_params["confThresh"],
-        "candidateTopNum":                   1,
-    }
+        atlo, athi = SC.OPTUNA_ANGLETHRESH_BOUNDS
+        p["filterByAxis"]   = bool(coarse_dict.get("filterCandidatePoseByAxis", True))
+        p["angleThreshold"] = int(np.clip(coarse_dict.get("angleThreshold", 135), atlo, athi))
+    return p
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -266,12 +324,89 @@ def _budget_audit_callback(
     study: optuna.Study,
     trial: optuna.trial.FrozenTrial,
 ) -> None:
-    if (trial.state == optuna.trial.TrialState.COMPLETE
+    if (trial.state in (optuna.trial.TrialState.COMPLETE,
+                        optuna.trial.TrialState.PRUNED)
             and trial.number % 10 == 0):
-        n_pruned = sum(1 for t in study.trials
-                       if t.state == optuna.trial.TrialState.PRUNED)
-        log.info(f"  [budget] trial={trial.number:3d}  "
-                 f"best_score={study.best_value:.3f}  pruned={n_pruned}")
+        n_complete = sum(1 for t in study.trials
+                         if t.state == optuna.trial.TrialState.COMPLETE)
+        n_pruned   = sum(1 for t in study.trials
+                         if t.state == optuna.trial.TrialState.PRUNED)
+        reasons    = [t.user_attrs.get("prune_reason", "?")
+                      for t in study.trials
+                      if t.state == optuna.trial.TrialState.PRUNED]
+        cov_p  = sum(1 for r in reasons if r.startswith("cov"))
+        med_p  = sum(1 for r in reasons if r.startswith("median"))
+        time_p = sum(1 for r in reasons if r.startswith("time"))
+        best_str = ""
+        if study.best_trials:
+            best = min(study.best_trials, key=lambda t: (t.values[0], t.values[1]))
+            best_str = (f"  best=({1-best.values[0]:.3f}cov, "
+                        f"{best.values[1]:.2f}s)")
+        log.info(f"  [budget] trial={trial.number:3d}  complete={n_complete}  "
+                 f"pruned={n_pruned} (cov:{cov_p} median:{med_p} time:{time_p})"
+                 f"{best_str}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pareto front winner selection
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _select_pareto_winner(study: optuna.Study) -> optuna.trial.FrozenTrial:
+    """Select winner from Pareto front: max coverage first, then min time."""
+    pareto = study.best_trials
+    if not pareto:
+        # Fallback: best complete trial by scalarized score
+        complete = [t for t in study.trials
+                    if t.state == optuna.trial.TrialState.COMPLETE]
+        if not complete:
+            raise RuntimeError("No complete trials in study — all were pruned.")
+        log.warning("Pareto front is empty — falling back to best scalarized score.")
+        return min(complete,
+                   key=lambda t: (t.values[0] * SC.SCORE_COV_NORM
+                                  + t.values[1] / SC.SCORE_TIME_NORM))
+    # values = (cov_loss, mean_time); sort by cov_loss first (lower=higher cov), then time
+    return min(pareto, key=lambda t: (t.values[0], t.values[1]))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Visualization export
+# ─────────────────────────────────────────────────────────────────────────────
+
+def export_plots(study: optuna.Study, part_name: str, ts: int) -> str:
+    """Export all Optuna visualization plots to a timestamped folder."""
+    try:
+        import optuna.visualization as vis
+    except ImportError:
+        log.warning("optuna.visualization not available — skipping plot export.")
+        return ""
+
+    folder = os.path.join(RESULTS_DIR, f"optuna_plots_{part_name}_{ts}")
+    os.makedirs(folder, exist_ok=True)
+
+    target_cov  = lambda t: t.values[0]
+    target_time = lambda t: t.values[1]
+
+    plots = {
+        "pareto_front":                  (vis.plot_pareto_front,         dict(study=study)),
+        "optimization_history_coverage": (vis.plot_optimization_history, dict(study=study, target=target_cov,  target_name="coverage_loss")),
+        "optimization_history_time":     (vis.plot_optimization_history, dict(study=study, target=target_time, target_name="mean_time")),
+        "param_importances_coverage":    (vis.plot_param_importances,    dict(study=study, target=target_cov,  target_name="coverage_loss")),
+        "param_importances_time":        (vis.plot_param_importances,    dict(study=study, target=target_time, target_name="mean_time")),
+        "parallel_coordinate_coverage":  (vis.plot_parallel_coordinate,  dict(study=study, target=target_cov,  target_name="coverage_loss")),
+        "parallel_coordinate_time":      (vis.plot_parallel_coordinate,  dict(study=study, target=target_time, target_name="mean_time")),
+        "hypervolume_history":           (vis.plot_hypervolume_history,  dict(study=study, reference_point=[SC.SCORE_COV_NORM, SC.SCORE_TIME_NORM])),
+        "timeline":                      (vis.plot_timeline,             dict(study=study)),
+        "slice_coverage":                (vis.plot_slice,                dict(study=study, target=target_cov,  target_name="coverage_loss")),
+    }
+    for name, (fn, kwargs) in plots.items():
+        try:
+            fig = fn(**kwargs)
+            fig.write_html(os.path.join(folder, f"{name}.html"))
+        except Exception as e:
+            log.warning(f"  Plot '{name}' failed: {e}")
+
+    log.info(f"Plots exported → {folder}/")
+    return folder
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -279,43 +414,41 @@ def _budget_audit_callback(
 # ─────────────────────────────────────────────────────────────────────────────
 
 class OptunaOptimizer:
-    """Staged Optuna TPE optimizer for MechVision pose estimation parameters.
+    """Fully joint multivariate TPE optimizer for MechVision pose estimation.
 
-    Replaces Phases 2–3–5–6 of the hierarchical coordinate descent with three
-    sequential studies. Phases 0, 1, and 4 are unchanged.
+    Replaces Phases 2–3–5–6 of the hierarchical coordinate descent with a
+    single joint multi-objective TPE study. Phases 0, 1, and 4 are unchanged.
 
     Parameters
     ----------
-    part_name    : Part identifier (matches model dir and scene dir names).
-    client       : Connected MechVisionClient, or None for dry_run.
-    project_id   : Integer project ID for PROJ_NAME.
-    scene_groups : List[List[str]] — one inner list per scene_MMMMM directory.
-    warm_start   : WarmStart from mesh_analysis.analyze_mesh().
-    cache        : EvalCache instance, or None to disable.
-    dry_run      : Build param dicts but do not call MechVision.
-    n_trials_1a  : Stage 1a trial budget (default: SC.OPTUNA_N_TRIALS_1A).
-    n_trials_1b  : Stage 1b trial budget (default: SC.OPTUNA_N_TRIALS_1B).
-    n_trials_2   : Stage 2  trial budget (default: SC.OPTUNA_N_TRIALS_2).
-    seed         : Random seed for reproducibility.
-    storage_path : Path to SQLite DB prefix for crash-resume, e.g. "results/optuna".
-                   Three DBs are created: {prefix}_1a.db, {prefix}_1b.db, {prefix}_2.db.
-                   None = in-memory studies (no persistence).
+    part_name      : Part identifier (matches model dir and scene dir names).
+    client         : Connected MechVisionClient, or None for dry_run.
+    project_id     : Integer project ID for PROJ_NAME.
+    scene_groups   : List[List[str]] — one inner list per scene_MMMMM directory.
+    warm_start     : WarmStart from mesh_analysis.analyze_mesh().
+    cache          : EvalCache instance, or None to disable.
+    dry_run        : Build param dicts but do not call MechVision.
+    n_trials_joint : Round 0 trial budget (default: SC.OPTUNA_N_TRIALS_JOINT).
+    n_rounds       : Number of optimization rounds (default: SC.OPTUNA_N_ROUNDS).
+    seed           : Random seed for reproducibility.
+    storage_path   : SQLite DB prefix for crash-resume, e.g. "results/optuna".
+                     DB created as {prefix}_{part}_joint.db.
+                     None = in-memory study (no persistence).
     """
 
     def __init__(
         self,
-        part_name:    str,
+        part_name:      str,
         client,
-        project_id:   int,
-        scene_groups: List[List[str]],
+        project_id:     int,
+        scene_groups:   List[List[str]],
         warm_start,
-        cache:        Optional[EvalCache] = None,
-        dry_run:      bool = False,
-        n_trials_1a:  Optional[int] = None,
-        n_trials_1b:  Optional[int] = None,
-        n_trials_2:   Optional[int] = None,
-        seed:         int = 42,
-        storage_path: Optional[str] = None,
+        cache:          Optional[EvalCache] = None,
+        dry_run:        bool = False,
+        n_trials_joint: Optional[int] = None,
+        n_rounds:       Optional[int] = None,
+        seed:           int = 42,
+        storage_path:   Optional[str] = None,
     ):
         self.opt = Optimizer(
             part_name    = part_name,
@@ -327,41 +460,36 @@ class OptunaOptimizer:
             use_two_pass = False,
             dry_run      = dry_run,
         )
-        self.n_trials_1a   = n_trials_1a if n_trials_1a is not None else SC.OPTUNA_N_TRIALS_1A
-        self.n_trials_1b   = n_trials_1b if n_trials_1b is not None else SC.OPTUNA_N_TRIALS_1B
-        self.n_trials_2    = n_trials_2  if n_trials_2  is not None else SC.OPTUNA_N_TRIALS_2
-        self._seed         = seed
-        self._storage_path = storage_path
+        self.n_trials_joint  = (n_trials_joint if n_trials_joint is not None
+                                else SC.OPTUNA_N_TRIALS_JOINT)
+        self.n_rounds        = n_rounds if n_rounds is not None else SC.OPTUNA_N_ROUNDS
+        self._seed           = seed
+        self._storage_path   = storage_path
+        self._best_mean_time: float = SC.OPTUNA_TIME_INITIAL_CAP
 
-        warm_pairs = warm_start.maxNumOfPointPairsPerFeature
+        ws = warm_start
+        warm_pairs = ws.maxNumOfPointPairsPerFeature
         self._pairs_candidates: List[int] = sorted(set(
-            max(1, min(20000, int(warm_pairs * s)))
+            max(1, min(10000, int(warm_pairs * s)))
             for s in SC.PHASE2B_PAIRS_SCALES
         ))
         self._voxel_bounds: Tuple[float, float, float, float] = (
-            max(0.1, warm_start.minVoxelLength_mm * 0.2),
-            warm_start.minVoxelLength_mm * 6.0,
-            max(0.5, warm_start.maxVoxelLength_mm * 0.1),
-            warm_start.maxVoxelLength_mm * 6.0,
+            max(0.1, ws.minVoxelLength_mm * 0.2),
+            ws.minVoxelLength_mm * 6.0,
+            max(0.5, ws.maxVoxelLength_mm * 0.1),
+            ws.maxVoxelLength_mm * 6.0,
         )
-        # Upper bound scales with warm_start.refStep so large parts aren't
-        # capped at 20 — e.g. D=0.5m part has ws.refStep=25, needs hi >= 50.
         refstep_hi = max(SC.OPTUNA_REFSTEP_BOUNDS[1],
-                         int(warm_start.refStep * max(SC.PHASE2A_REFSTEP_SCALES)))
+                         int(ws.refStep * max(SC.PHASE2A_REFSTEP_SCALES)))
         self._refstep_bounds: Tuple[int, int] = (SC.OPTUNA_REFSTEP_BOUNDS[0], refstep_hi)
 
-        # Populated by run() for post-run inspection / testing
-        self._study_1a: Optional[optuna.Study] = None
-        self._study_1b: Optional[optuna.Study] = None
-        self._study_2:  Optional[optuna.Study] = None
-        self._best_mean_time: float = float("inf")
+        self._study: Optional[optuna.Study] = None
 
     # ─────────────────────────────────────────────────────────────────────
     # Default param helpers
     # ─────────────────────────────────────────────────────────────────────
 
     def _default_fine(self, regime: dict) -> dict:
-        """Fixed fine params for Stage 1a/1b — warm-start defaults."""
         return {
             "registrationMode":                  regime["fine_mode"],
             "operationApproach":                 1.0,
@@ -369,17 +497,18 @@ class OptunaOptimizer:
             "onlyConsiderVisibleSurfaceOfModel": False,
             "considerErrorofNormalAngles":       False,
             "scoreLevel":                        0.0,
-            "confidenceThreshold":               0.0,
+            "confidenceThreshold":               0.1,
             "candidateTopNum":                   1,
         }
 
     def _default_coarse_remaining(self, regime: dict) -> dict:
-        """Default coarse params (excluding refStep/distQ) for Stage 1a evaluation."""
         ws = self.opt.ws
         snapped_pairs = min(self._pairs_candidates,
                             key=lambda x: abs(x - ws.maxNumOfPointPairsPerFeature))
         base = {
             "registrationMode":             regime["coarse_mode"],
+            "refStep":                      ws.refStep,
+            "distQuantification":           ws.distQuantification,
             "angleQuantification":          ws.angleQuantification,
             "maxNumOfPointPairsPerFeature": snapped_pairs,
             "maxVoteRatio":                 0.5,
@@ -398,82 +527,108 @@ class OptunaOptimizer:
     # Study factory
     # ─────────────────────────────────────────────────────────────────────
 
-    def _create_study(self, name: str, storage_suffix: str = "") -> optuna.Study:
+    def _create_study_joint(self, name: str, storage_suffix: str = "") -> optuna.Study:
         sampler = optuna.samplers.TPESampler(
-            n_startup_trials=SC.OPTUNA_N_STARTUP,
+            multivariate=True,
+            group=True,
+            n_startup_trials=SC.OPTUNA_N_STARTUP_JOINT,
             seed=self._seed,
         )
-        pruner = optuna.pruners.MedianPruner(
-            n_startup_trials=2,
-            n_warmup_steps=1,
-            interval_steps=1,
-        )
+        # trial.report/should_prune are not supported in multi-objective mode;
+        # pruning is handled explicitly via time guard + coverage floor in _objective_joint.
         storage = None
         if self._storage_path and storage_suffix:
             storage = f"sqlite:///{self._storage_path}{storage_suffix}.db"
         return optuna.create_study(
-            direction      = "minimize",
+            directions     = ["minimize", "minimize"],
             sampler        = sampler,
-            pruner         = pruner,
             storage        = storage,
             study_name     = name,
             load_if_exists = True,
         )
 
     # ─────────────────────────────────────────────────────────────────────
-    # Stage 1a grid enqueue
+    # Grid warm-start enqueue
     # ─────────────────────────────────────────────────────────────────────
 
-    def _enqueue_1a_grid(self, study: optuna.Study) -> None:
-        """Enqueue full refStep×distQ grid (fast→slow scale order)."""
+    def _enqueue_joint_grid(
+        self,
+        study: optuna.Study,
+        regime: dict,
+        op_approach_hint: float = 1.0,
+    ) -> None:
+        """Enqueue refStep×distQ grid with default fine params (fast→slow scale order).
+
+        Each warm-start trial is padded with geometry-derived coarse remaining defaults
+        and the op_approach_hint from the pre-study look-ahead.
+        """
         ws = self.opt.ws
         lo, hi = self._refstep_bounds
-        for ref_scale in SC.PHASE2A_REFSTEP_SCALES:   # [2.0, 1.5, 1.0, 0.75, 0.5]
+        default_coarse = self._default_coarse_remaining(regime)
+
+        # Snap defaults to index space
+        snapped_pairs = default_coarse["maxNumOfPointPairsPerFeature"]
+        pairs_idx = min(range(len(self._pairs_candidates)),
+                        key=lambda i: abs(self._pairs_candidates[i] - snapped_pairs))
+
+        aq_choices = SC.OPTUNA_ANGLQ_CHOICES
+        aq_val  = default_coarse["angleQuantification"]
+        aq_snap = min(aq_choices, key=lambda c: abs(c - aq_val))
+
+        vlo, vhi = SC.OPTUNA_VOTERATIO_BOUNDS
+        rlo, rhi = SC.OPTUNA_REFERRED_BOUNDS
+        olo, ohi = SC.OPTUNA_OUTPUTNUM_BOUNDS
+        min_lo, min_hi, width_lo, width_hi = self._voxel_bounds
+        min_vox = float(np.clip(ws.minVoxelLength_mm, min_lo, min_hi))
+        vox_w   = float(np.clip(ws.maxVoxelLength_mm - ws.minVoxelLength_mm,
+                                width_lo, width_hi))
+
+        enqueued = 0
+        for ref_scale in SC.PHASE2A_REFSTEP_SCALES:
             ref = max(lo, min(hi, int(ws.refStep * ref_scale)))
             for dq in SC.PHASE2A_DISTQ_VALUES:
-                study.enqueue_trial({"refStep": ref, "distQ": dq})
+                p: dict = {
+                    "refStep":              ref,
+                    "distQ":               dq,
+                    "angleQuantification": aq_snap,
+                    "pairs_idx":           pairs_idx,
+                    "maxVoteRatio":      float(np.clip(0.5, vlo, vhi)),
+                    "referredStep":      int(np.clip(1, rlo, rhi)),
+                    "useDistNMS":        True,
+                    "outputNum":         int(np.clip(1, olo, ohi)),
+                    "minVoxelLength_mm": min_vox,
+                    "voxel_width_mm":    vox_w,
+                    "opApproach":        int(round(op_approach_hint)),
+                    "devCap":            0,
+                    "visibleSurf":       False,
+                    "normalAng":         False,
+                }
+                if regime["coarse_mode"] == 1.0:
+                    p["filterByAxis"]   = True
+                    p["angleThreshold"] = 135
+                study.enqueue_trial(p)
+                enqueued += 1
+
+        log.info(f"Enqueued {enqueued} grid warm-start trials "
+                 f"(fast→slow scale order, opApproach hint={op_approach_hint})")
 
     # ─────────────────────────────────────────────────────────────────────
-    # Streaming objective
+    # Objective
     # ─────────────────────────────────────────────────────────────────────
 
-    def _objective_streaming(
+    def _objective_joint(
         self,
         trial: optuna.Trial,
         regime: dict,
-        voxel_bounds: Optional[Tuple[float, float, float, float]],
-        fixed_1a: Optional[Dict]  = None,
-        fixed_coarse: Optional[Dict] = None,
-    ) -> float:
-        """Scene-by-scene evaluation with per-scene pruning + stage-conditional time guard.
+    ) -> Tuple[float, float]:
+        """Scene-by-scene evaluation with three-level pruning.
 
-        Stage 1a (fixed_1a=None,  fixed_coarse=None): suggest {refStep, distQ}.
-        Stage 1b (fixed_1a=dict,  fixed_coarse=None): suggest remaining coarse.
-        Stage 2  (fixed_coarse=dict):                 suggest fine params only.
-
-        Time guard is Stage 1a only — refStep varies there and can reach 97s/scene.
-        Stage 1b has no time guard so outputNum is explored freely.
+        Returns (coverage_loss, mean_time) for multi-objective optimization.
+        Pruning uses a scalarized running_score so trial.report() receives a scalar.
         """
-        is_stage_1a = (fixed_1a is None and fixed_coarse is None)
-        is_stage_2  = (fixed_coarse is not None)
-
-        if is_stage_2:
-            coarse_p = fixed_coarse
-            fine_p   = suggest_fine_params(trial, regime)
-        elif is_stage_1a:
-            _1a      = suggest_params_1a(trial, self._refstep_bounds)
-            coarse_p = {**self._default_coarse_remaining(regime),
-                        "refStep":            _1a["refStep"],
-                        "distQuantification": _1a["distQuantification"]}
-            fine_p   = self._default_fine(regime)
-        else:
-            # Stage 1b
-            _1b      = suggest_params_1b(trial, regime,
-                                         self._pairs_candidates, voxel_bounds)
-            coarse_p = {**fixed_1a,
-                        "registrationMode": regime["coarse_mode"],
-                        **_1b}
-            fine_p   = self._default_fine(regime)
+        p        = suggest_params_joint(trial, regime, self._pairs_candidates,
+                                        self._voxel_bounds, self._refstep_bounds)
+        coarse_p, fine_p = _split_joint_params(p)
 
         ang        = SC.ANG_THRESH_REGIME_GATE
         all_scenes = self.opt._sample_scenes(SC.M_FULL)
@@ -488,42 +643,35 @@ class OptunaOptimizer:
             total_time += res.mean_time
             running_cov   = total_cov  / (step + 1)
             running_time  = total_time / (step + 1)
-            running_score = (1.0 - running_cov) * 1e6 + running_time
 
-            trial.report(running_score, step=step)
-            if trial.should_prune():
+            # Level 2: Time guard  (trial.report/should_prune not available in multi-objective)
+            if running_time > self._best_mean_time * SC.OPTUNA_TIME_RATIO:
+                trial.set_user_attr("prune_reason", f"time@{step}")
                 raise optuna.TrialPruned()
 
-            # Time guard — Stage 1a only (refStep can cause 97s/scene blowup)
-            if (is_stage_1a
-                    and step >= 1
-                    and self._best_mean_time < float("inf")
-                    and running_time > self._best_mean_time * SC.OPTUNA_TIME_RATIO):
+            # Level 3: Coverage floor (after 3rd scene)
+            if step >= 2 and running_cov < SC.OPTUNA_COV_PRUNE_FLOOR:
+                trial.set_user_attr("prune_reason", f"cov@{step}")
                 raise optuna.TrialPruned()
 
-            # Hard abort: zero coverage after 3+ scenes (all stages)
-            if step >= 2 and running_cov == 0.0:
-                raise optuna.TrialPruned()
+        final_cov  = total_cov  / SC.M_FULL
+        final_time = total_time / SC.M_FULL
 
-        final_cov   = total_cov  / SC.M_FULL
-        final_time  = total_time / SC.M_FULL
-        final_score = (1.0 - final_cov) * 1e6 + final_time
-
-        if is_stage_1a and final_cov > 0.0:
+        if final_cov > 0.0:
             self._best_mean_time = min(self._best_mean_time, final_time)
 
-        return final_score
+        return (1.0 - final_cov, final_time)
 
     # ─────────────────────────────────────────────────────────────────────
     # Main run loop
     # ─────────────────────────────────────────────────────────────────────
 
     def run(self) -> Optional[EvalResult]:
-        """Execute full optimization: Phase 1 → three Optuna stages → Phase 4."""
+        """Execute full optimization: Phase 1 → joint TPE study (multi-round) → Phase 4."""
         t0 = time.time()
         log.info(f"\n{'='*60}")
         log.info(f"OptunaOptimizer: part={self.opt.part_name}  "
-                 f"1a={self.n_trials_1a}  1b={self.n_trials_1b}  2={self.n_trials_2}  "
+                 f"n_trials_joint={self.n_trials_joint}  n_rounds={self.n_rounds}  "
                  f"seed={self._seed}  M_FULL={SC.M_FULL}  "
                  f"cache={'ON' if self.opt.cache else 'OFF'}")
 
@@ -538,116 +686,103 @@ class OptunaOptimizer:
 
         part = self.opt.part_name
 
-        # ── Stage 1a: refStep × distQ (time guard active) ────────────────
+        # ── Pre-study look-ahead: geometry coarse → opApproach hint ──────
+        log.info("Pre-study look-ahead: evaluating geometry warm-start config...")
+        _geom_coarse = self._default_coarse_remaining(best_regime)
+        _geom_fine   = self._default_fine(best_regime)
+        _la_result   = self.opt.evaluate_config(
+            _geom_coarse, _geom_fine,
+            self.opt._sample_scenes(SC.M_FULL),
+            SC.POS_THRESH_TIGHT, SC.ANG_THRESH_REGIME_GATE,
+        )
+        _pos_errs   = [e for s in _la_result.per_scene
+                       for e in s.get("pos_errors", []) if e is not None]
+        _median_err = float(np.median(_pos_errs)) if _pos_errs else 0.01
+        _op_hint    = SC.phase3_approach_candidates(_median_err)[0]
+        log.info(f"  median coarse pos err = {_median_err*1e3:.2f}mm → "
+                 f"opApproach hint = {_op_hint}")
+
+        # ── Joint study ───────────────────────────────────────────────────
         log.info("=" * 60)
-        log.info("STAGE 1a — refStep × distQ grid + TPE")
-        self._best_mean_time = float("inf")
-        self._study_1a = self._create_study(f"{part}_1a", f"_{part}_1a")
-        if not self._study_1a.trials:
-            self._enqueue_1a_grid(self._study_1a)
-            log.info(f"Enqueued {len(SC.PHASE2A_REFSTEP_SCALES) * len(SC.PHASE2A_DISTQ_VALUES)}"
-                     f" grid trials (fast→slow scale order)")
-        else:
-            log.info(f"Resumed Stage 1a: {len(self._study_1a.trials)} prior trials")
+        log.info("JOINT STUDY — fully joint coarse+fine multivariate TPE (multi-objective)")
+        self._best_mean_time = SC.OPTUNA_TIME_INITIAL_CAP
 
-        n_done_1a = sum(1 for t in self._study_1a.trials
-                        if t.state != optuna.trial.TrialState.WAITING)
-        remaining_1a = max(0, self.n_trials_1a - n_done_1a)
-        if remaining_1a > 0:
-            self._study_1a.optimize(
-                lambda t: self._objective_streaming(t, best_regime, None),
-                n_trials=remaining_1a,
-                callbacks=[_budget_audit_callback],
+        self._study = self._create_study_joint(
+            f"{part}_joint", f"_{part}_joint")
+
+        if not self._study.trials:
+            self._enqueue_joint_grid(self._study, best_regime, _op_hint)
+            warm_p = _build_warm_joint(
+                _geom_coarse, _geom_fine, best_regime,
+                self._pairs_candidates, self._voxel_bounds, self._refstep_bounds,
             )
-
-        complete_1a = [t for t in self._study_1a.trials
-                       if t.state == optuna.trial.TrialState.COMPLETE]
-        if not complete_1a:
-            log.error("Stage 1a produced no complete trials.")
-            return None
-        best_1a = {
-            "refStep":            self._study_1a.best_trial.params["refStep"],
-            "distQuantification": self._study_1a.best_trial.params["distQ"],
-        }
-        log.info(f"Stage 1a best: refStep={best_1a['refStep']}  "
-                 f"distQ={best_1a['distQuantification']:.2f}  "
-                 f"score={self._study_1a.best_value:.3f}")
-
-        # ── Stage 1b: remaining coarse (no time guard) ───────────────────
-        log.info("=" * 60)
-        log.info("STAGE 1b — remaining coarse params (outputNum freely explored)")
-        self._best_mean_time = float("inf")
-        self._study_1b = self._create_study(f"{part}_1b", f"_{part}_1b")
-        if not self._study_1b.trials:
-            warm_1b = _build_warm_1b(self.opt.ws, best_regime,
-                                     self._pairs_candidates, self._voxel_bounds)
-            self._study_1b.enqueue_trial(warm_1b)
-            log.info("Enqueued warm-start for Stage 1b")
+            self._study.enqueue_trial(warm_p)
+            log.info("Enqueued geometry warm-start trial")
         else:
-            log.info(f"Resumed Stage 1b: {len(self._study_1b.trials)} prior trials")
+            log.info(f"Resumed study: {len(self._study.trials)} prior trials")
 
-        n_done_1b = sum(1 for t in self._study_1b.trials
-                        if t.state != optuna.trial.TrialState.WAITING)
-        remaining_1b = max(0, self.n_trials_1b - n_done_1b)
-        if remaining_1b > 0:
-            self._study_1b.optimize(
-                lambda t: self._objective_streaming(
-                    t, best_regime, self._voxel_bounds, fixed_1a=best_1a),
-                n_trials=remaining_1b,
-                callbacks=[_budget_audit_callback],
-            )
+        # ── Multi-round loop (same study, extended) ───────────────────────
+        prev_best_score = float("inf")
+        for round_idx in range(self.n_rounds):
+            n_done = sum(1 for t in self._study.trials
+                         if t.state != optuna.trial.TrialState.WAITING)
+            if round_idx == 0:
+                n_target = self.n_trials_joint
+            else:
+                n_target = n_done + SC.OPTUNA_N_TRIALS_JOINT_REFINE
 
-        complete_1b = [t for t in self._study_1b.trials
-                       if t.state == optuna.trial.TrialState.COMPLETE]
-        if not complete_1b:
-            log.error("Stage 1b produced no complete trials.")
-            return None
-        best_coarse = _trial_to_coarse(best_1a, self._study_1b.best_trial.params,
-                                       best_regime)
-        log.info(f"Stage 1b best score={self._study_1b.best_value:.3f}  "
-                 f"outputNum={best_coarse.get('outputNum', '?')}  "
-                 f"angleQ={best_coarse.get('angleQuantification', '?')}")
+            remaining = max(0, n_target - n_done)
+            log.info(f"  Round {round_idx}: running {remaining} trials "
+                     f"(total target {n_target})")
 
-        # ── Stage 2: fine params (no time guard) ─────────────────────────
-        log.info("=" * 60)
-        log.info("STAGE 2 — fine registration params")
-        self._best_mean_time = float("inf")
-        self._study_2 = self._create_study(f"{part}_2", f"_{part}_2")
-        if not self._study_2.trials:
-            warm_2 = _build_warm_fine()
-            self._study_2.enqueue_trial(warm_2)
-            log.info("Enqueued warm-start for Stage 2")
-        else:
-            log.info(f"Resumed Stage 2: {len(self._study_2.trials)} prior trials")
+            if remaining > 0:
+                self._study.optimize(
+                    lambda t: self._objective_joint(t, best_regime),
+                    n_trials=remaining,
+                    callbacks=[_budget_audit_callback],
+                )
 
-        n_done_2 = sum(1 for t in self._study_2.trials
-                       if t.state != optuna.trial.TrialState.WAITING)
-        remaining_2 = max(0, self.n_trials_2 - n_done_2)
-        if remaining_2 > 0:
-            self._study_2.optimize(
-                lambda t: self._objective_streaming(
-                    t, best_regime, None, fixed_coarse=best_coarse),
-                n_trials=remaining_2,
-                callbacks=[_budget_audit_callback],
-            )
+            if not self._study.best_trials:
+                log.error(f"Round {round_idx}: no complete trials.")
+                if round_idx == 0:
+                    return None
+                break
 
-        complete_2 = [t for t in self._study_2.trials
-                      if t.state == optuna.trial.TrialState.COMPLETE]
-        if not complete_2:
-            log.error("Stage 2 produced no complete trials.")
-            return None
-        best_fine = _trial_to_fine(self._study_2.best_trial.params, best_regime)
-        log.info(f"Stage 2 best score={self._study_2.best_value:.3f}  "
-                 f"opApproach={best_fine.get('operationApproach', '?')}")
+            winner      = _select_pareto_winner(self._study)
+            round_score = winner.values[0] + winner.values[1]
+            log.info(f"  Round {round_idx} best: "
+                     f"cov={1-winner.values[0]:.3f}  "
+                     f"time={winner.values[1]:.3f}s  "
+                     f"score={round_score:.3f}  "
+                     f"Pareto front size={len(self._study.best_trials)}")
 
-        # ── Post-study: re-evaluate best with tight angular threshold ─────
+            if (round_idx > 0
+                    and (prev_best_score - round_score) < SC.OPTUNA_SCORE_IMPROVE_MIN):
+                log.info(f"  Round {round_idx}: improvement "
+                         f"{prev_best_score - round_score:.4f} < threshold — stopping.")
+                break
+            prev_best_score = round_score
+
+        # ── Extract best config ───────────────────────────────────────────
+        winner      = _select_pareto_winner(self._study)
+        expanded    = _expand_winner_params(winner.params, best_regime, self._pairs_candidates)
+        best_coarse, best_fine = _split_joint_params(expanded)
+
+        log.info(f"Best config: refStep={best_coarse.get('refStep')}  "
+                 f"distQ={best_coarse.get('distQuantification', 0):.2f}  "
+                 f"opApproach={best_fine.get('operationApproach')}  "
+                 f"outputNum={best_coarse.get('outputNum')}")
+
+        # ── Post-study re-eval with tight angular threshold ───────────────
         scenes_final = self.opt._sample_scenes(SC.M_FULL)
         best_result  = self.opt.evaluate_config(
             best_coarse, best_fine, scenes_final,
             SC.POS_THRESH_TIGHT, SC.ANG_THRESH_TIGHT,
         )
-        log.info(f"Re-eval (tight ±{SC.POS_THRESH_TIGHT*1e3:.0f}mm ±{SC.ANG_THRESH_TIGHT:.0f}°): "
-                 f"cov={best_result.coverage:.3f}  time={best_result.mean_time:.3f}s")
+        log.info(f"Re-eval (tight ±{SC.POS_THRESH_TIGHT*1e3:.0f}mm "
+                 f"±{SC.ANG_THRESH_TIGHT:.0f}°): "
+                 f"cov={best_result.coverage:.3f}  "
+                 f"time={best_result.mean_time:.3f}s")
 
         # ── Phase 4: symmetry (conditional) ──────────────────────────────
         if best_result.coverage >= SC.PHASE_GATES["after_phase2"][0]:
@@ -658,37 +793,41 @@ class OptunaOptimizer:
             final_result = best_result
 
         # ── Summary ──────────────────────────────────────────────────────
-        elapsed = time.time() - t0
-        n_complete = (len(complete_1a) + len(complete_1b) + len(complete_2))
-        n_pruned   = sum(
-            1 for study in (self._study_1a, self._study_1b, self._study_2)
-            for t in study.trials
-            if t.state == optuna.trial.TrialState.PRUNED
-        )
+        elapsed    = time.time() - t0
+        n_complete = sum(1 for t in self._study.trials
+                         if t.state == optuna.trial.TrialState.COMPLETE)
+        n_pruned   = sum(1 for t in self._study.trials
+                         if t.state == optuna.trial.TrialState.PRUNED)
         cache_stats = self.opt.cache.stats() if self.opt.cache else {}
 
         log.info(f"\n{'='*60}")
         log.info(f"OPTUNA COMPLETE: {self.opt.part_name}")
-        log.info(f"  coverage   = {final_result.coverage:.3f}")
-        log.info(f"  mean_time  = {final_result.mean_time:.3f} s")
-        log.info(f"  score      = {final_result.score:.3f}")
-        log.info(f"  mv_evals   = {self.opt._n_evals}")
-        log.info(f"  trials     = {n_complete} complete, {n_pruned} pruned")
-        log.info(f"  wall_time  = {elapsed:.0f} s")
+        log.info(f"  coverage      = {final_result.coverage:.3f}")
+        log.info(f"  mean_time     = {final_result.mean_time:.3f} s")
+        log.info(f"  score         = {final_result.score:.3f}")
+        log.info(f"  score_quality = {final_result.score_quality:.3f}")
+        log.info(f"  mv_evals      = {self.opt._n_evals}")
+        log.info(f"  trials        = {n_complete} complete, {n_pruned} pruned")
+        log.info(f"  Pareto size   = {len(self._study.best_trials)}")
+        log.info(f"  wall_time     = {elapsed:.0f} s")
         if cache_stats:
-            log.info(f"  cache      = {cache_stats}")
+            log.info(f"  cache         = {cache_stats}")
 
-        self._log_result_json(final_result)
+        ts = int(time.time())
+        export_plots(self._study, self.opt.part_name, ts)
+        self._log_result_json(final_result, ts=ts)
         return final_result
 
     # ─────────────────────────────────────────────────────────────────────
     # Export / logging
     # ─────────────────────────────────────────────────────────────────────
 
-    def export_best(self, result: EvalResult, prefix:str="", suffix:str="") -> str:
+    def export_best(self, result: EvalResult, prefix: str = "", suffix: str = "") -> str:
         return self.opt.export_best(result, prefix=prefix, suffix=suffix)
 
-    def _log_result_json(self, result: EvalResult) -> None:
+    def _log_result_json(self, result: EvalResult, ts: Optional[int] = None) -> None:
+        if ts is None:
+            ts = int(time.time())
         self.opt._log_result_json(result)
 
     def cleanup(self) -> None:
@@ -701,23 +840,21 @@ class OptunaOptimizer:
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="OptunaOptimizer — staged TPE auto-tuner for MechVision")
-    p.add_argument("--part",          required=True)
-    p.add_argument("--scenes_dir",    default=None)
-    p.add_argument("--n_trials_1a",   type=int, default=None,
-                   help=f"Stage 1a budget (default: {SC.OPTUNA_N_TRIALS_1A})")
-    p.add_argument("--n_trials_1b",   type=int, default=None,
-                   help=f"Stage 1b budget (default: {SC.OPTUNA_N_TRIALS_1B})")
-    p.add_argument("--n_trials_2",    type=int, default=None,
-                   help=f"Stage 2  budget (default: {SC.OPTUNA_N_TRIALS_2})")
-    p.add_argument("--m_full",        type=int, default=None)
-    p.add_argument("--dry_run",       action="store_true")
-    p.add_argument("--no_cache",      action="store_true")
-    p.add_argument("--seed",          type=int, default=42)
-    p.add_argument("--export_best",   default=True, action="store_true")
-    p.add_argument("--storage",       default=None,
+        description="OptunaOptimizer — fully joint multivariate TPE for MechVision")
+    p.add_argument("--part",           required=True)
+    p.add_argument("--scenes_dir",     default=None)
+    p.add_argument("--n_trials_joint", type=int, default=None,
+                   help=f"Joint study trial budget (default: {SC.OPTUNA_N_TRIALS_JOINT})")
+    p.add_argument("--n_rounds",       type=int, default=None,
+                   help=f"Number of optimization rounds (default: {SC.OPTUNA_N_ROUNDS})")
+    p.add_argument("--m_full",         type=int, default=None)
+    p.add_argument("--dry_run",        action="store_true")
+    p.add_argument("--no_cache",       action="store_true")
+    p.add_argument("--seed",           type=int, default=42)
+    p.add_argument("--export_best",    default=True, action="store_true")
+    p.add_argument("--storage",        default=None,
                    help="SQLite path prefix (e.g. MM_Optimizer/results/optuna); "
-                        "creates {prefix}_{part}_1a.db etc.")
+                        "creates {prefix}_{part}_joint.db")
     return p
 
 
@@ -771,18 +908,17 @@ def main() -> None:
         storage_path = os.path.join(RESULTS_DIR, "optuna")
 
     opt = OptunaOptimizer(
-        part_name    = args.part,
-        client       = client,
-        project_id   = project_id,
-        scene_groups = scene_groups,
-        warm_start   = ws,
-        cache        = cache,
-        dry_run      = args.dry_run,
-        n_trials_1a  = args.n_trials_1a,
-        n_trials_1b  = args.n_trials_1b,
-        n_trials_2   = args.n_trials_2,
-        seed         = args.seed,
-        storage_path = storage_path,
+        part_name      = args.part,
+        client         = client,
+        project_id     = project_id,
+        scene_groups   = scene_groups,
+        warm_start     = ws,
+        cache          = cache,
+        dry_run        = args.dry_run,
+        n_trials_joint = args.n_trials_joint,
+        n_rounds       = args.n_rounds,
+        seed           = args.seed,
+        storage_path   = storage_path,
     )
 
     try:

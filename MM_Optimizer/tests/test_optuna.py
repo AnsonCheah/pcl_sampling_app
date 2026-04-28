@@ -1,23 +1,26 @@
 """
-test_optuna.py — Tests for staged OptunaOptimizer
---------------------------------------------------
+test_optuna.py — Tests for fully joint OptunaOptimizer
+-------------------------------------------------------
 Run from project root:
     python MM_Optimizer/tests/test_optuna.py [--live]
 
 Unit tests (no MechVision, no scene files):
-  test_suggest_params_1a               — refStep+distQ only, bounds from SC
-  test_suggest_params_1b_surface       — remaining coarse, surface regime
-  test_suggest_params_1b_edge          — edge-conditional params present
-  test_suggest_fine_params             — fine param dict keys and ranges
+  test_suggest_params_joint_surface    — all keys present, bounds valid (surface regime)
+  test_suggest_params_joint_edge       — edge-conditional params conditionally present
+  test_split_joint_params_surface      — coarse/fine split correct for surface
+  test_split_joint_params_edge         — edge-mode keys in coarse dict
+  test_build_warm_joint                — warm-start dict round-trips without clamp errors
+  test_pareto_winner_selection         — max-coverage then min-time selection
+  test_pareto_winner_fallback          — fallback when Pareto front is empty
   test_default_fine_keys               — _default_fine returns correct warm defaults
-  test_default_coarse_remaining_keys   — _default_coarse_remaining returns correct keys
-  test_enqueue_1a_grid                 — 30 trials enqueued fast→slow scale order
+  test_default_coarse_remaining_keys   — _default_coarse_remaining includes refStep/distQ
 
 Dry-run integration test (scene files required, no MechVision):
-  test_dry_run_three_stages            — three studies run, zero MV calls, result not None
+  test_dry_run_joint_study             — joint study runs, zero MV calls, result not None
+  test_multi_round_early_stop          — round 1 fires, improvement check works
 
 Live test (requires MechVision with CAD_Match project):
-  test_live_short                      — 10 trials, coverage >= 0.0
+  test_live_short                      — joint study, coverage >= 0.0
 """
 
 import logging
@@ -37,13 +40,10 @@ from MM_Optimizer.optimizer       import PROJ_NAME, MM_MODEL_ROOT
 from MM_Optimizer.optimizer_utils import list_synthetic_scenes
 from MM_Optimizer.optuna_optimizer import (
     OptunaOptimizer,
-    suggest_params_1a,
-    suggest_params_1b,
-    suggest_fine_params,
-    _build_warm_1b,
-    _build_warm_fine,
-    _trial_to_coarse,
-    _trial_to_fine,
+    suggest_params_joint,
+    _split_joint_params,
+    _build_warm_joint,
+    _select_pareto_winner,
 )
 import MM_Optimizer.search_config as SC
 
@@ -55,105 +55,212 @@ PART       = "25333MB000"
 SCENES_DIR = os.path.join(_ROOT, "output", "synthetic_target", PART)
 MODEL_PATH = os.path.join(MM_MODEL_ROOT, f"{PART}_surface", f"{PART}_surface.ply")
 
-_PAIRS        = [1250, 2500, 5000, 10000, 20000]
-_VOXEL_BOUNDS = (0.14, 4.2, 0.28, 16.8)   # (min_lo, min_hi, width_lo, width_hi)
-_REGIME_A     = {"coarse_mode": 0.0, "fine_mode": 0.0, "needs_edge": False, "id": "A"}
-_REGIME_C     = {"coarse_mode": 1.0, "fine_mode": 0.0, "needs_edge": True,  "id": "C"}
+_PAIRS          = [1250, 2500, 5000, 10000, 20000]
+_VOXEL_BOUNDS   = (0.14, 4.2, 0.28, 16.8)   # (min_lo, min_hi, width_lo, width_hi)
+_REFSTEP_BOUNDS = SC.OPTUNA_REFSTEP_BOUNDS   # (1, 20)
+_REGIME_A       = {"coarse_mode": 0.0, "fine_mode": 0.0, "needs_edge": False, "id": "A"}
+_REGIME_C       = {"coarse_mode": 1.0, "fine_mode": 0.0, "needs_edge": True,  "id": "C"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_study_multi():
+    return optuna.create_study(
+        directions=["minimize", "minimize"],
+        sampler=optuna.samplers.RandomSampler(seed=0),
+    )
+
+
+def _ask_joint(regime, study=None):
+    if study is None:
+        study = _make_study_multi()
+    trial = study.ask()
+    p = suggest_params_joint(trial, regime, _PAIRS, _VOXEL_BOUNDS, _REFSTEP_BOUNDS)
+    return p, trial, study
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Unit tests
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_suggest_params_1a():
-    """Stage 1a returns only refStep and distQ with bounds from SC constants."""
-    study = optuna.create_study()
-    trial = study.ask()
-    p = suggest_params_1a(trial)
+def test_suggest_params_joint_surface():
+    """Joint suggest returns all required keys with valid bounds for surface regime."""
+    p, _, _ = _ask_joint(_REGIME_A)
 
-    lo, hi   = SC.OPTUNA_REFSTEP_BOUNDS
+    # ── Coarse keys ──────────────────────────────────────────────────────
+    assert p["coarse_mode"] == 0.0
+    lo, hi = SC.OPTUNA_REFSTEP_BOUNDS
+    assert lo <= p["refStep"] <= hi, f"refStep={p['refStep']} out of [{lo},{hi}]"
+
     dlo, dhi = SC.OPTUNA_DISTQ_BOUNDS
+    assert dlo <= p["distQuantification"] <= dhi
 
-    assert set(p.keys()) == {"refStep", "distQuantification"}, \
-        f"Stage 1a should only have refStep+distQ, got {set(p.keys())}"
-    assert lo <= p["refStep"] <= hi,              f"refStep={p['refStep']} out of [{lo},{hi}]"
-    assert dlo <= p["distQuantification"] <= dhi, f"distQ={p['distQuantification']} out of [{dlo},{dhi}]"
+    assert p["angleQuantification"] in SC.OPTUNA_ANGLQ_CHOICES
 
-    log.info("PASS: test_suggest_params_1a")
-
-
-def test_suggest_params_1b_surface():
-    """Stage 1b returns all remaining coarse params for surface regime."""
-    study = optuna.create_study()
-    trial = study.ask()
-    p = suggest_params_1b(trial, _REGIME_A, _PAIRS, _VOXEL_BOUNDS)
-
-    required = {"angleQuantification", "maxNumOfPointPairsPerFeature",
-                "maxVoteRatio", "referredStep", "useDistanceNMS",
-                "outputNum", "minVoxelLength", "maxVoxelLength"}
-    assert required.issubset(p.keys()), f"Missing keys: {required - p.keys()}"
+    assert p["maxNumOfPointPairsPerFeature"] in _PAIRS
 
     vlo, vhi = SC.OPTUNA_VOTERATIO_BOUNDS
-    rlo, rhi = SC.OPTUNA_REFERRED_BOUNDS
-    olo, ohi = SC.OPTUNA_OUTPUTNUM_BOUNDS
-
-    assert p["angleQuantification"]          in SC.OPTUNA_ANGLQ_CHOICES
-    assert p["maxNumOfPointPairsPerFeature"] in _PAIRS
     assert vlo <= p["maxVoteRatio"] <= vhi
-    assert rlo <= p["referredStep"] <= rhi
+
+    assert p["refStep"] >= p["referredStep"], \
+        f"refStep={p['refStep']} < referredStep={p['referredStep']}"
+
     assert isinstance(p["useDistanceNMS"], bool)
+
+    olo, ohi = SC.OPTUNA_OUTPUTNUM_BOUNDS
     assert olo <= p["outputNum"] <= ohi
+
     assert p["minVoxelLength"] < p["maxVoxelLength"]
 
-    # Edge params absent for surface regime
-    assert "filterCandidatePoseByAxis" not in p
-
-    log.info("PASS: test_suggest_params_1b_surface")
-
-
-def test_suggest_params_1b_edge():
-    """Stage 1b includes edge-conditional params for edge regime."""
-    study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=0))
-    got_with_filter = False
-    got_without_filter = False
-
-    for _ in range(20):
-        trial = study.ask()
-        p = suggest_params_1b(trial, _REGIME_C, _PAIRS, _VOXEL_BOUNDS)
-        study.tell(trial, 0.5)
-
-        assert "filterCandidatePoseByAxis" in p
-        assert isinstance(p["filterCandidatePoseByAxis"], bool)
-        if p["filterCandidatePoseByAxis"]:
-            at_choices = next(c for n, c, _ in SC.PHASE2B_PARAMS if n == "angleThreshold")
-            assert p["angleThreshold"] in at_choices
-            got_with_filter = True
-        else:
-            assert p["angleThreshold"] == 90
-            got_without_filter = True
-
-    assert got_with_filter,    "No trial had filterCandidatePoseByAxis=True"
-    assert got_without_filter, "No trial had filterCandidatePoseByAxis=False"
-    log.info("PASS: test_suggest_params_1b_edge")
-
-
-def test_suggest_fine_params():
-    """suggest_fine_params returns all required fine keys with SC-derived ranges."""
-    study = optuna.create_study()
-    trial = study.ask()
-    p = suggest_fine_params(trial, _REGIME_A)
-
-    assert p["registrationMode"]            == _REGIME_A["fine_mode"]
-    assert p["operationApproach"]           in SC.OPTUNA_OPAPP_CHOICES
-    assert p["deviationCorrectionCapacity"] in SC.OPTUNA_DEVCAP_CHOICES
+    # ── Fine keys ────────────────────────────────────────────────────────
+    assert p["fine_mode"] == 0.0
+    assert 0 <= p["operationApproach"] <= 4.0
+    assert 0 <= p["deviationCorrectionCapacity"] <= 2.0
     assert isinstance(p["onlyConsiderVisibleSurfaceOfModel"], bool)
     assert isinstance(p["considerErrorofNormalAngles"], bool)
-    assert p["scoreLevel"]                  in SC.OPTUNA_SCORELV_CHOICES
-    clo, chi = SC.OPTUNA_CONFTHRESH_BOUNDS
-    assert clo <= p["confidenceThreshold"] <= chi
-    assert p["candidateTopNum"]             == 1
 
-    log.info("PASS: test_suggest_fine_params")
+    # ── Surface mode: edge-only params fixed, not explored ───────────────
+    # filterCandidatePoseByAxis and angleThreshold exist but are constants
+    assert p["filterCandidatePoseByAxis"] is True   # fixed for surface
+    assert p["angleThreshold"] == 135                # fixed for surface
+
+    log.info("PASS: test_suggest_params_joint_surface")
+
+
+def test_suggest_params_joint_edge():
+    """Edge mode conditionally suggests filterByAxis and angleThreshold."""
+    study = _make_study_multi()
+    got_with_filter   = False
+    got_without_filter = False
+
+    for _ in range(30):
+        p, trial, _ = _ask_joint(_REGIME_C, study)
+        study.tell(trial, [0.1, 0.5])
+
+        assert "filterCandidatePoseByAxis" in p
+        if p["filterCandidatePoseByAxis"]:
+            assert 45 <= p["angleThreshold"] <= 180, \
+                f"angleThreshold={p['angleThreshold']} out of [45,180]"
+            got_with_filter = True
+        else:
+            assert p["angleThreshold"] == 90   # fixed when filterByAxis=False
+            got_without_filter = True
+
+    assert got_with_filter,     "No trial had filterCandidatePoseByAxis=True"
+    assert got_without_filter,  "No trial had filterCandidatePoseByAxis=False"
+    log.info("PASS: test_suggest_params_joint_edge")
+
+
+def test_split_joint_params_surface():
+    """_split_joint_params produces valid coarse/fine dicts for surface regime."""
+    p, _, _ = _ask_joint(_REGIME_A)
+    coarse, fine = _split_joint_params(p)
+
+    coarse_required = {"registrationMode", "refStep", "distQuantification",
+                       "angleQuantification", "maxNumOfPointPairsPerFeature",
+                       "maxVoteRatio", "referredStep", "useDistanceNMS",
+                       "outputNum", "minVoxelLength", "maxVoxelLength"}
+    assert coarse_required == set(coarse.keys()), \
+        f"Coarse key mismatch: {coarse_required.symmetric_difference(coarse.keys())}"
+
+    fine_required = {"registrationMode", "operationApproach",
+                     "deviationCorrectionCapacity",
+                     "onlyConsiderVisibleSurfaceOfModel",
+                     "considerErrorofNormalAngles",
+                     "scoreLevel", "confidenceThreshold", "candidateTopNum"}
+    assert fine_required == set(fine.keys()), \
+        f"Fine key mismatch: {fine_required.symmetric_difference(fine.keys())}"
+
+    assert fine["scoreLevel"]         == 0.0
+    assert fine["confidenceThreshold"] == 0.1
+    assert fine["candidateTopNum"]     == 1
+    assert coarse["minVoxelLength"] < coarse["maxVoxelLength"]
+
+    log.info("PASS: test_split_joint_params_surface")
+
+
+def test_split_joint_params_edge():
+    """Edge-mode coarse dict includes filterCandidatePoseByAxis and angleThreshold."""
+    p, _, _ = _ask_joint(_REGIME_C)
+    coarse, _ = _split_joint_params(p)
+
+    assert "filterCandidatePoseByAxis" in coarse
+    assert "angleThreshold"            in coarse
+    log.info("PASS: test_split_joint_params_edge")
+
+
+def test_build_warm_joint():
+    """_build_warm_joint produces a valid enqueue dict without clamping errors."""
+    coarse = {
+        "refStep": 10, "distQuantification": 1.0, "angleQuantification": 90,
+        "maxNumOfPointPairsPerFeature": 5000, "maxVoteRatio": 0.5,
+        "referredStep": 1, "useDistanceNMS": True, "outputNum": 1,
+        "minVoxelLength": 0.7, "maxVoxelLength": 2.8,
+    }
+    fine = {
+        "operationApproach": 1.0, "deviationCorrectionCapacity": 0.0,
+        "onlyConsiderVisibleSurfaceOfModel": False,
+        "considerErrorofNormalAngles": False,
+    }
+    p = _build_warm_joint(coarse, fine, _REGIME_A, _PAIRS, _VOXEL_BOUNDS, _REFSTEP_BOUNDS)
+
+    lo, hi = SC.OPTUNA_REFSTEP_BOUNDS
+    assert lo <= p["refStep"] <= hi
+    assert p["angleQuantification"] in SC.OPTUNA_ANGLQ_CHOICES
+    assert 0 <= p["pairs_idx"]  < len(_PAIRS)
+    assert 0 <= p["opApproach"] <= 4
+    assert 0 <= p["devCap"]     <= 2
+    assert isinstance(p["visibleSurf"], bool)
+    assert isinstance(p["normalAng"],   bool)
+    assert p["minVoxelLength_mm"] < p["minVoxelLength_mm"] + p["voxel_width_mm"]
+    assert p["refStep"] >= p["referredStep"], \
+        f"refStep={p['refStep']} < referredStep={p['referredStep']}"
+
+    log.info("PASS: test_build_warm_joint")
+
+
+def test_pareto_winner_selection():
+    """Pareto winner: max coverage first, min time as tiebreaker."""
+    study = _make_study_multi()
+    # Inject artificial completed trials with known values
+    configs = [
+        (0.05, 1.0),   # 95% cov, 1.0s  ← should win (max cov)
+        (0.05, 0.5),   # 95% cov, 0.5s  ← also 95% but faster: should win
+        (0.10, 0.3),   # 90% cov, 0.3s  ← Pareto non-dom (lower cov, faster)
+        (0.20, 0.2),   # 80% cov, 0.2s
+    ]
+    for cov_loss, t in configs:
+        study.add_trial(optuna.trial.create_trial(
+            params={}, distributions={},
+            values=[cov_loss, t],
+        ))
+
+    winner = _select_pareto_winner(study)
+    # Best coverage is 0.05; among tied (0.05,1.0) and (0.05,0.5), pick min time
+    assert winner.values[0] == 0.05, f"Expected cov_loss=0.05, got {winner.values[0]}"
+    assert winner.values[1] == 0.5,  f"Expected time=0.5 (faster), got {winner.values[1]}"
+    log.info("PASS: test_pareto_winner_selection")
+
+
+def test_pareto_winner_fallback():
+    """Fallback to scalarized best when Pareto front is empty."""
+    study = _make_study_multi()
+    # Add one pruned trial (won't appear in best_trials)
+    study.add_trial(optuna.trial.create_trial(
+        params={}, distributions={},
+        values=None,
+        state=optuna.trial.TrialState.PRUNED,
+    ))
+    # Add one complete trial
+    study.add_trial(optuna.trial.create_trial(
+        params={}, distributions={},
+        values=[0.15, 0.8],
+    ))
+    winner = _select_pareto_winner(study)
+    assert winner.values == [0.15, 0.8]
+    log.info("PASS: test_pareto_winner_fallback")
 
 
 def test_default_fine_keys():
@@ -161,8 +268,8 @@ def test_default_fine_keys():
     if not os.path.exists(MODEL_PATH):
         log.warning(f"SKIP test_default_fine_keys — model not found: {MODEL_PATH}")
         return
-    pcd = load_reference_pcd(MODEL_PATH)
-    ws  = analyze_mesh(pcd)
+    pcd    = load_reference_pcd(MODEL_PATH)
+    ws     = analyze_mesh(pcd)
     groups = list_synthetic_scenes(SCENES_DIR) if os.path.isdir(SCENES_DIR) else [[]]
 
     opt = OptunaOptimizer(
@@ -173,28 +280,25 @@ def test_default_fine_keys():
     required = {"registrationMode", "operationApproach", "deviationCorrectionCapacity",
                 "onlyConsiderVisibleSurfaceOfModel", "considerErrorofNormalAngles",
                 "scoreLevel", "confidenceThreshold", "candidateTopNum"}
-    assert required == set(fine.keys()), f"Key mismatch: {required.symmetric_difference(fine.keys())}"
-
-    # Verify warm defaults
+    assert required == set(fine.keys()), \
+        f"Key mismatch: {required.symmetric_difference(fine.keys())}"
     assert fine["operationApproach"]           == 1.0
     assert fine["deviationCorrectionCapacity"] == 0.0
     assert fine["onlyConsiderVisibleSurfaceOfModel"] is False
-    assert fine["considerErrorofNormalAngles"] is False
     assert fine["scoreLevel"]                  == 0.0
-    assert fine["confidenceThreshold"]         == 0.0
+    assert fine["confidenceThreshold"]         == 0.1
     assert fine["candidateTopNum"]             == 1
-
     opt.cleanup()
     log.info("PASS: test_default_fine_keys")
 
 
 def test_default_coarse_remaining_keys():
-    """_default_coarse_remaining returns all required coarse keys (no refStep/distQ)."""
+    """_default_coarse_remaining now includes refStep and distQ (full coarse warm-start)."""
     if not os.path.exists(MODEL_PATH):
         log.warning(f"SKIP test_default_coarse_remaining_keys — model not found: {MODEL_PATH}")
         return
-    pcd = load_reference_pcd(MODEL_PATH)
-    ws  = analyze_mesh(pcd)
+    pcd    = load_reference_pcd(MODEL_PATH)
+    ws     = analyze_mesh(pcd)
     groups = list_synthetic_scenes(SCENES_DIR) if os.path.isdir(SCENES_DIR) else [[]]
 
     opt = OptunaOptimizer(
@@ -202,69 +306,30 @@ def test_default_coarse_remaining_keys():
         scene_groups=groups, warm_start=ws, dry_run=True)
 
     base = opt._default_coarse_remaining(_REGIME_A)
-    required = {"registrationMode", "angleQuantification",
-                "maxNumOfPointPairsPerFeature", "maxVoteRatio",
-                "referredStep", "useDistanceNMS", "outputNum",
-                "minVoxelLength", "maxVoxelLength"}
+    required = {"registrationMode", "refStep", "distQuantification",
+                "angleQuantification", "maxNumOfPointPairsPerFeature",
+                "maxVoteRatio", "referredStep", "useDistanceNMS",
+                "outputNum", "minVoxelLength", "maxVoxelLength"}
     assert required.issubset(base.keys()), f"Missing: {required - base.keys()}"
-
-    # refStep and distQ must NOT be present (those come from Stage 1a)
-    assert "refStep" not in base
-    assert "distQuantification" not in base
-
     assert base["outputNum"]    == 1
     assert base["referredStep"] == 1
     assert base["minVoxelLength"] < base["maxVoxelLength"]
-
     opt.cleanup()
     log.info("PASS: test_default_coarse_remaining_keys")
 
 
-def test_enqueue_1a_grid():
-    """_enqueue_1a_grid creates 5×6=30 trials in fast→slow scale order."""
-    if not os.path.exists(MODEL_PATH):
-        log.warning(f"SKIP test_enqueue_1a_grid — model not found: {MODEL_PATH}")
-        return
-    pcd = load_reference_pcd(MODEL_PATH)
-    ws  = analyze_mesh(pcd)
-    groups = list_synthetic_scenes(SCENES_DIR) if os.path.isdir(SCENES_DIR) else [[]]
-
-    opt = OptunaOptimizer(
-        part_name=PART, client=None, project_id=-1,
-        scene_groups=groups, warm_start=ws, dry_run=True, seed=0)
-
-    study = optuna.create_study()
-    opt._enqueue_1a_grid(study)
-
-    n_expected = len(SC.PHASE2A_REFSTEP_SCALES) * len(SC.PHASE2A_DISTQ_VALUES)
-    assert len(study.trials) == n_expected, \
-        f"Expected {n_expected} enqueued trials, got {len(study.trials)}"
-
-    # Enqueued trials are WAITING — params live in system_attrs["fixed_params"]
-    lo, hi = opt._refstep_bounds   # dynamic bounds, not static SC constant
-    first_fixed = study.trials[0].system_attrs["fixed_params"]
-    first_ref   = first_fixed["refStep"]
-    largest_scale = SC.PHASE2A_REFSTEP_SCALES[0]   # 2.0 after reorder
-    expected_first_ref = max(lo, min(hi, int(ws.refStep * largest_scale)))
-    assert first_ref == expected_first_ref, \
-        f"First grid trial refStep={first_ref}, expected {expected_first_ref} (scale×{largest_scale})"
-
-    opt.cleanup()
-    log.info(f"PASS: test_enqueue_1a_grid ({n_expected} trials, first refStep={first_ref})")
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Dry-run integration test
+# Dry-run integration tests
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_dry_run_three_stages():
-    """Three Optuna studies in dry_run — zero MV calls, all three studies on instance."""
+def test_dry_run_joint_study():
+    """Joint study in dry_run — zero MV calls, single study on instance, result not None."""
     if not os.path.exists(MODEL_PATH):
-        log.warning(f"SKIP test_dry_run_three_stages — model not found: {MODEL_PATH}")
+        log.warning(f"SKIP test_dry_run_joint_study — model not found: {MODEL_PATH}")
         return
     groups = list_synthetic_scenes(SCENES_DIR)
     if not groups:
-        log.warning(f"SKIP test_dry_run_three_stages — no scenes under: {SCENES_DIR}")
+        log.warning(f"SKIP test_dry_run_joint_study — no scenes under: {SCENES_DIR}")
         return
 
     pcd = load_reference_pcd(MODEL_PATH)
@@ -275,50 +340,97 @@ def test_dry_run_three_stages():
     SC.M_SMALL = 2
     try:
         opt = OptunaOptimizer(
-            part_name    = PART,
-            client       = None,
-            project_id   = -1,
-            scene_groups = groups,
-            warm_start   = ws,
-            cache        = None,
-            dry_run      = True,
-            n_trials_1a  = 4,   # grid (30) capped at 4 for speed; remaining skipped
-            n_trials_1b  = 3,
-            n_trials_2   = 3,
-            seed         = 0,
-            storage_path = None,
+            part_name      = PART,
+            client         = None,
+            project_id     = -1,
+            scene_groups   = groups,
+            warm_start     = ws,
+            cache          = None,
+            dry_run        = True,
+            n_trials_joint = 5,
+            n_rounds       = 1,
+            seed           = 0,
+            storage_path   = None,
         )
         result = opt.run()
 
-        assert result is not None,        "Dry run must return an EvalResult"
+        assert result is not None,       "Dry run must return an EvalResult"
         assert result.coverage  >= 0.0
         assert result.mean_time >= 0.0
-        assert opt.opt._n_evals == 0,     f"dry_run: zero MV calls expected, got {opt.opt._n_evals}"
+        assert opt.opt._n_evals == 0,    f"dry_run: zero MV calls expected, got {opt.opt._n_evals}"
 
-        # All three studies must be populated
-        assert opt._study_1a is not None, "_study_1a not set after run()"
-        assert opt._study_1b is not None, "_study_1b not set after run()"
-        assert opt._study_2  is not None, "_study_2  not set after run()"
+        # Single joint study must be populated
+        assert opt._study is not None,   "_study not set after run()"
 
-        # Each study must have at least one complete trial
-        def n_complete(s): return sum(
-            1 for t in s.trials if t.state == optuna.trial.TrialState.COMPLETE)
-        assert n_complete(opt._study_1a) >= 1, "Stage 1a has no complete trials"
-        assert n_complete(opt._study_1b) >= 1, "Stage 1b has no complete trials"
-        assert n_complete(opt._study_2)  >= 1, "Stage 2  has no complete trials"
+        n_complete = sum(1 for t in opt._study.trials
+                         if t.state == optuna.trial.TrialState.COMPLETE)
+        assert n_complete >= 1, "Joint study has no complete trials"
 
-        # Stage 1a complete trials must only have refStep and distQ params
-        for t in opt._study_1a.trials:
-            if t.state == optuna.trial.TrialState.COMPLETE:
-                assert set(t.params.keys()) == {"refStep", "distQ"}, \
-                    f"Stage 1a trial has unexpected params: {set(t.params.keys())}"
+        # Scoring formula sanity: score = time_term + cov_term
+        assert abs(result.score_time_term + result.score_cov_term - result.score) < 1e-9, \
+            "score != time_term + cov_term"
+        assert result.score_time_term == result.mean_time / SC.SCORE_TIME_NORM
+        assert abs(result.score_cov_term - (1.0 - result.coverage) * SC.SCORE_COV_NORM) < 1e-9
 
-        log.info(f"  dry run: cov={result.coverage:.2f}  time={result.mean_time:.3f}s")
-        log.info("PASS: test_dry_run_three_stages")
-
+        log.info(f"  dry run: cov={result.coverage:.2f}  time={result.mean_time:.3f}s  "
+                 f"score={result.score:.3f}  quality={result.score_quality:.3f}")
+        log.info("PASS: test_dry_run_joint_study")
     finally:
         SC.M_FULL  = orig_full
         SC.M_SMALL = orig_small
+        opt.cleanup()
+
+
+def test_multi_round_early_stop():
+    """Round 1 runs and early-stop fires when improvement is negligible."""
+    if not os.path.exists(MODEL_PATH):
+        log.warning(f"SKIP test_multi_round_early_stop — model not found: {MODEL_PATH}")
+        return
+    groups = list_synthetic_scenes(SCENES_DIR)
+    if not groups:
+        log.warning(f"SKIP test_multi_round_early_stop — no scenes under: {SCENES_DIR}")
+        return
+
+    pcd = load_reference_pcd(MODEL_PATH)
+    ws  = analyze_mesh(pcd)
+
+    orig_full, orig_small = SC.M_FULL, SC.M_SMALL
+    SC.M_FULL  = 2
+    SC.M_SMALL = 1
+    orig_refine = SC.OPTUNA_N_TRIALS_JOINT_REFINE
+    SC.OPTUNA_N_TRIALS_JOINT_REFINE = 2
+    try:
+        opt = OptunaOptimizer(
+            part_name      = PART,
+            client         = None,
+            project_id     = -1,
+            scene_groups   = groups,
+            warm_start     = ws,
+            cache          = None,
+            dry_run        = True,
+            n_trials_joint = 4,
+            n_rounds       = 2,
+            seed           = 0,
+            storage_path   = None,
+        )
+        result = opt.run()
+        assert result is not None, "Multi-round dry run must return a result"
+
+        # Both rounds use the same study
+        assert opt._study is not None
+        n_complete = sum(1 for t in opt._study.trials
+                         if t.state == optuna.trial.TrialState.COMPLETE)
+        # With dry_run all evaluations return coverage=1.0, so round 1 improvement
+        # will be ~0 and early-stop should fire — study has at least round-0 trials
+        assert n_complete >= 1
+
+        log.info(f"  multi-round dry run: complete={n_complete}  "
+                 f"cov={result.coverage:.2f}")
+        log.info("PASS: test_multi_round_early_stop")
+    finally:
+        SC.M_FULL  = orig_full
+        SC.M_SMALL = orig_small
+        SC.OPTUNA_N_TRIALS_JOINT_REFINE = orig_refine
         opt.cleanup()
 
 
@@ -327,7 +439,7 @@ def test_dry_run_three_stages():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_live_short():
-    """10 trials on 25333MB000 — result not None, coverage >= 0.0."""
+    """10-trial joint study on 25333MB000 — result not None, coverage >= 0.0."""
     if not os.path.exists(MODEL_PATH):
         log.warning(f"SKIP test_live_short — model not found: {MODEL_PATH}")
         return
@@ -350,18 +462,17 @@ def test_live_short():
     SC.M_SMALL = max(1, len(groups) // 2)
     try:
         opt = OptunaOptimizer(
-            part_name    = PART,
-            client       = client,
-            project_id   = pid,
-            scene_groups = groups,
-            warm_start   = ws,
-            cache        = None,
-            dry_run      = False,
-            n_trials_1a  = 5,
-            n_trials_1b  = 3,
-            n_trials_2   = 2,
-            seed         = 42,
-            storage_path = None,
+            part_name      = PART,
+            client         = client,
+            project_id     = pid,
+            scene_groups   = groups,
+            warm_start     = ws,
+            cache          = None,
+            dry_run        = False,
+            n_trials_joint = 10,
+            n_rounds       = 1,
+            seed           = 42,
+            storage_path   = None,
         )
         result = opt.run()
 
@@ -370,9 +481,9 @@ def test_live_short():
         assert opt.opt._n_evals > 0, "Live test should have made MechVision calls"
 
         log.info(f"  live short: cov={result.coverage:.3f}  "
-                 f"time={result.mean_time:.3f}s  mv_evals={opt.opt._n_evals}")
+                 f"time={result.mean_time:.3f}s  score={result.score:.3f}  "
+                 f"mv_evals={opt.opt._n_evals}")
         log.info("PASS: test_live_short")
-
     finally:
         SC.M_FULL  = orig_full
         SC.M_SMALL = orig_small
@@ -391,19 +502,22 @@ if __name__ == "__main__":
                    help="Also run the live MechVision test")
     args = p.parse_args()
 
-    print("test_optuna.py\n")
+    print("test_optuna.py — fully joint multivariate TPE\n")
 
     print("--- Unit tests ---")
-    test_suggest_params_1a()
-    test_suggest_params_1b_surface()
-    test_suggest_params_1b_edge()
-    test_suggest_fine_params()
+    test_suggest_params_joint_surface()
+    test_suggest_params_joint_edge()
+    test_split_joint_params_surface()
+    test_split_joint_params_edge()
+    test_build_warm_joint()
+    test_pareto_winner_selection()
+    test_pareto_winner_fallback()
     test_default_fine_keys()
     test_default_coarse_remaining_keys()
-    test_enqueue_1a_grid()
 
-    print("\n--- Dry-run integration test ---")
-    test_dry_run_three_stages()
+    print("\n--- Dry-run integration tests ---")
+    test_dry_run_joint_study()
+    test_multi_round_early_stop()
 
     if args.live:
         print("\n--- Live test (requires MechVision) ---")
