@@ -30,6 +30,7 @@ MM_Optimizer/backup_task_records.json
 *.code-workspace
 .claude/
 .vscode/
+output/
 
 # Distribution / packaging
 .Python

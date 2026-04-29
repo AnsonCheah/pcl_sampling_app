@@ -80,15 +80,15 @@ PHASE2A_DISTQ_VALUES   = [0.5, 0.75, 1.0, 1.5, 2.0, 3.0]
 
 PHASE2B_PARAMS = {
     # Order is intentional: follows MechVision coarse matching pipeline
-    "referredStep":                 {"candidates": [3, 2, 1],                  "edge_only": False},  # scene sub-sampling — coarser/faster first
-    "angleQuantification":          {"candidates": [180, 135, 90, 60, 45, 30], "edge_only": False},  # Hough angle bins — coarser/faster first
-    "maxNumOfPointPairsPerFeature": {"candidates": None,                       "edge_only": False},  # voting density, warm-relative
-    "maxVoteRatio":                 {"candidates": [0.5, 0.6, 0.7, 0.8, 0.9], "edge_only": False},  # Hough threshold — after voting stable
-    "useDistanceNMS":               {"candidates": [True, False],              "edge_only": False},  # NMS candidate filter
-    "filterCandidatePoseByAxis":    {"candidates": [True, False],              "edge_only": True},   # edge only — axis filter
-    "angleThreshold":               {"candidates": [45, 90, 135],             "edge_only": True},   # edge only — conditional on above
-    "voxelLengthRange":             {"candidates": None,                       "edge_only": False},  # pose verification, warm-relative pairs
-    "outputNum":                    {"candidates": [1, 2, 3],                  "edge_only": False},  # final output count — most downstream
+    "referredStep":                 {"candidates": [3, 2, 1],                   "edge_only": False},  # scene sub-sampling — coarser/faster first
+    "angleQuantification":          {"candidates": [180, 135, 90, 60, 45, 30],  "edge_only": False},  # Hough angle bins — coarser/faster first
+    "maxNumOfPointPairsPerFeature": {"candidates": None,                        "edge_only": False},  # voting density, warm-relative
+    "maxVoteRatio":                 {"candidates": [0.5, 0.6, 0.7, 0.8, 0.9],   "edge_only": False},  # Hough threshold — after voting stable
+    "useDistanceNMS":               {"candidates": [True, False],               "edge_only": False},  # NMS candidate filter
+    "filterCandidatePoseByAxis":    {"candidates": [True, False],               "edge_only": True},   # edge only — axis filter
+    "angleThreshold":               {"candidates": [45, 90, 135],               "edge_only": True},   # edge only — conditional on above
+    "voxelLengthRange":             {"candidates": None,                        "edge_only": False},  # pose verification, warm-relative pairs
+    "outputNum":                    {"candidates": [1, 2, 3],                   "edge_only": False},  # final output count — most downstream
 }
 
 # Multipliers for maxNumOfPointPairsPerFeature relative to warm-start value
