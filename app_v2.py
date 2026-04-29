@@ -85,6 +85,8 @@ class MeshSamplingApp:
         self.target_mesh = None
         self.raw_pcd = None
         self.down_pcd = None
+        self.down_pcd_surface = None
+        self.down_pcd_edge = None
         self.visible_target_pcd = None
         self.occluders_pcd = None
         self.mesh_basename = None
@@ -92,7 +94,7 @@ class MeshSamplingApp:
         self.synthetic_targets = {}
         self.synthetic_scenes = {}
         self.feature_pcd = None
-        self.flat_pcd = None
+        self.pcd_flat = None
         self.output_pcd_path = None
         self.geocenter = np.eye(4)
         self.point_count_mean = None

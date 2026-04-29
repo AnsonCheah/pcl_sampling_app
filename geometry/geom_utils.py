@@ -6,6 +6,7 @@ import colorsys
 from dataclasses import dataclass
 from typing import Optional
 import open3d.visualization.rendering as rendering
+from geometry.math_utils import find_cdf_knee
 # import cupy as cp
 
 @dataclass
@@ -203,6 +204,63 @@ def mask_point_cloud(pcd, mask):
     masked_pcd.points = o3d.utility.Vector3dVector(np.asarray(pcd.points)[mask])
     masked_pcd.normals = o3d.utility.Vector3dVector(np.asarray(pcd.normals)[mask])
     return masked_pcd
+
+def extract_edge_points(pcd, voxel_size):
+    """
+    Classify each point as edge or non-edge using angular gap analysis in the
+    local tangent plane.  For each point, neighbor vectors are projected onto
+    the plane perpendicular to the point's normal; the largest gap between
+    consecutive azimuthal angles is the edge score.  The threshold is chosen
+    automatically via CDF knee detection — no per-part tuning required.
+
+    Returns a boolean mask (True = edge) over the input point cloud.
+    """
+    pts = np.asarray(pcd.points)
+    nrm = np.asarray(pcd.normals)
+    n_points = len(pts)
+
+    tree = o3d.geometry.KDTreeFlann(pcd)
+    radius = voxel_size * 5.0
+
+    max_gaps = np.zeros(n_points, dtype=np.float64)
+
+    for i in range(n_points):
+        _, idx, _ = tree.search_radius_vector_3d(pts[i], radius)
+        idx = np.asarray(idx)
+        if len(idx) < 4:  # need self + at least 3 neighbours
+            continue
+
+        n = nrm[i]
+        n_norm = np.linalg.norm(n)
+        if n_norm < 1e-10:
+            continue
+        n = n / n_norm
+
+        neighbors = pts[idx[1:]] - pts[i]  # vectors to neighbours (exclude self)
+
+        # Project onto tangent plane
+        projected = neighbors - (neighbors @ n)[:, None] * n
+
+        # Orthonormal basis in tangent plane
+        arb = np.array([1.0, 0.0, 0.0]) if abs(n[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+        u = np.cross(n, arb)
+        u /= np.linalg.norm(u)
+        v = np.cross(n, u)
+
+        cu = projected @ u
+        cv = projected @ v
+        valid = np.sqrt(cu ** 2 + cv ** 2) > 1e-10
+        if valid.sum() < 2:
+            continue
+
+        angles = np.sort(np.arctan2(cv[valid], cu[valid]))
+        gaps = np.diff(angles)
+        wrap_gap = (angles[0] + 2.0 * np.pi) - angles[-1]
+        max_gaps[i] = np.max(np.append(gaps, wrap_gap))
+
+    threshold, _, _ = find_cdf_knee(max_gaps)
+    return max_gaps >= threshold
+
 
 def orient_normals_using_cameras(pcd, cam_positions):
     pts = np.asarray(pcd.points)
