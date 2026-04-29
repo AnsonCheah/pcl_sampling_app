@@ -79,7 +79,6 @@ def suggest_params_joint(
     regime: dict,
     pairs_candidates: List[int],
     voxel_bounds: Tuple[float, float, float, float],
-    refstep_bounds: Tuple[int, int],
 ) -> dict:
     """Suggest all coarse + fine params jointly.
 
@@ -90,10 +89,10 @@ def suggest_params_joint(
     Returns flat dict suitable for splitting into coarse/fine via _split_joint_params().
     """
     min_lo, min_hi, width_lo, width_hi = voxel_bounds
-    lo_ref, hi_ref = refstep_bounds
+    lo_ref, hi_ref = SC.REFSTEP_BOUNDS
     dlo, dhi       = SC.OPTUNA_DISTQ_BOUNDS
     vlo, vhi       = SC.OPTUNA_VOTERATIO_BOUNDS
-    rlo            = SC.OPTUNA_REFERRED_BOUNDS[0]   # lower = 1; upper = hi_ref (matches refStep max)
+    rlo            = SC.REFSTEP_BOUNDS[0]   # lower = 1
     olo, ohi       = SC.OPTUNA_OUTPUTNUM_BOUNDS
 
     # ── Coarse params ─────────────────────────────────────────────────────────
@@ -104,7 +103,7 @@ def suggest_params_joint(
     angleQuantification = trial.suggest_categorical("angleQuantification", SC.OPTUNA_ANGLQ_CHOICES)
     pairs_i             = trial.suggest_int(  "pairs_idx",  0, len(pairs_candidates) - 1)
     voteRatio           = trial.suggest_float("maxVoteRatio", vlo, vhi)
-    referredStep        = trial.suggest_int("referredStep", rlo, refStep)   # upper = refStep so Optuna never suggests out-of-range values
+    referredStep        = trial.suggest_int("referredStep", rlo, refStep)
     useDistNMS          = trial.suggest_categorical("useDistNMS", [True, False])
     outputNum           = trial.suggest_int("outputNum", olo, ohi)
     min_vox             = trial.suggest_float("minVoxelLength_mm", min_lo, min_hi)
@@ -251,7 +250,6 @@ def _build_warm_joint(
     regime: dict,
     pairs_candidates: List[int],
     voxel_bounds: Tuple[float, float, float, float],
-    refstep_bounds: Tuple[int, int],
 ) -> dict:
     """Convert a full (coarse, fine) config dict → flat joint trial params for enqueue.
 
@@ -259,12 +257,11 @@ def _build_warm_joint(
     Clamps referredStep to refStep so the enqueued trial is valid (external dict may violate this).
     """
     min_lo, min_hi, width_lo, width_hi = voxel_bounds
-    vlo, vhi   = SC.OPTUNA_VOTERATIO_BOUNDS
-    rlo        = SC.OPTUNA_REFERRED_BOUNDS[0]   # lower = 1
-    olo, ohi   = SC.OPTUNA_OUTPUTNUM_BOUNDS
-    lo_ref, hi_ref = refstep_bounds
-    rhi        = hi_ref                          # upper matches refStep max
-    dlo, dhi   = SC.OPTUNA_DISTQ_BOUNDS
+    vlo, vhi       = SC.OPTUNA_VOTERATIO_BOUNDS
+    olo, ohi       = SC.OPTUNA_OUTPUTNUM_BOUNDS
+    lo_ref, hi_ref = SC.REFSTEP_BOUNDS
+    rlo, rhi       = SC.REFSTEP_BOUNDS   # same as REFSTEP_BOUNDS (1–20)
+    dlo, dhi       = SC.OPTUNA_DISTQ_BOUNDS
 
     # Snap angleQ to nearest valid categorical value
     aq_choices = SC.OPTUNA_ANGLQ_CHOICES
@@ -291,7 +288,7 @@ def _build_warm_joint(
 
     ref_val      = int(np.clip(coarse_dict.get("refStep", 10), lo_ref, hi_ref))
     referred_val = int(np.clip(coarse_dict.get("referredStep", 1), rlo, rhi))
-    referred_val = min(referred_val, ref_val)   # enforce refStep >= referredStep
+    referred_val = min(referred_val, ref_val)   # enforce referredStep ≤ refStep
 
     p: dict = {
         "refStep":              ref_val,
@@ -479,10 +476,6 @@ class OptunaOptimizer:
             max(0.5, ws.maxVoxelLength_mm * 0.1),
             ws.maxVoxelLength_mm * 6.0,
         )
-        refstep_hi = max(SC.OPTUNA_REFSTEP_BOUNDS[1],
-                         int(ws.refStep * max(SC.PHASE2A_REFSTEP_SCALES)))
-        self._refstep_bounds: Tuple[int, int] = (SC.OPTUNA_REFSTEP_BOUNDS[0], refstep_hi)
-
         self._study: Optional[optuna.Study] = None
 
     # ─────────────────────────────────────────────────────────────────────
@@ -507,7 +500,7 @@ class OptunaOptimizer:
                             key=lambda x: abs(x - ws.maxNumOfPointPairsPerFeature))
         base = {
             "registrationMode":             regime["coarse_mode"],
-            "refStep":                      ws.refStep,
+            "refStep":                      SC.REFSTEP_BOUNDS[1] // 2,
             "distQuantification":           ws.distQuantification,
             "angleQuantification":          ws.angleQuantification,
             "maxNumOfPointPairsPerFeature": snapped_pairs,
@@ -548,70 +541,6 @@ class OptunaOptimizer:
         )
 
     # ─────────────────────────────────────────────────────────────────────
-    # Grid warm-start enqueue
-    # ─────────────────────────────────────────────────────────────────────
-
-    def _enqueue_joint_grid(
-        self,
-        study: optuna.Study,
-        regime: dict,
-        op_approach_hint: float = 1.0,
-    ) -> None:
-        """Enqueue refStep×distQ grid with default fine params (fast→slow scale order).
-
-        Each warm-start trial is padded with geometry-derived coarse remaining defaults
-        and the op_approach_hint from the pre-study look-ahead.
-        """
-        ws = self.opt.ws
-        lo, hi = self._refstep_bounds
-        default_coarse = self._default_coarse_remaining(regime)
-
-        # Snap defaults to index space
-        snapped_pairs = default_coarse["maxNumOfPointPairsPerFeature"]
-        pairs_idx = min(range(len(self._pairs_candidates)),
-                        key=lambda i: abs(self._pairs_candidates[i] - snapped_pairs))
-
-        aq_choices = SC.OPTUNA_ANGLQ_CHOICES
-        aq_val  = default_coarse["angleQuantification"]
-        aq_snap = min(aq_choices, key=lambda c: abs(c - aq_val))
-
-        vlo, vhi = SC.OPTUNA_VOTERATIO_BOUNDS
-        rlo, rhi = SC.OPTUNA_REFERRED_BOUNDS
-        olo, ohi = SC.OPTUNA_OUTPUTNUM_BOUNDS
-        min_lo, min_hi, width_lo, width_hi = self._voxel_bounds
-        min_vox = float(np.clip(ws.minVoxelLength_mm, min_lo, min_hi))
-        vox_w   = float(np.clip(ws.maxVoxelLength_mm - ws.minVoxelLength_mm,
-                                width_lo, width_hi))
-
-        enqueued = 0
-        for ref_scale in SC.PHASE2A_REFSTEP_SCALES:
-            ref = max(lo, min(hi, int(ws.refStep * ref_scale)))
-            for dq in SC.PHASE2A_DISTQ_VALUES:
-                p: dict = {
-                    "refStep":              ref,
-                    "distQ":               dq,
-                    "angleQuantification": aq_snap,
-                    "pairs_idx":           pairs_idx,
-                    "maxVoteRatio":      float(np.clip(0.5, vlo, vhi)),
-                    "referredStep":      int(np.clip(1, rlo, rhi)),
-                    "useDistNMS":        True,
-                    "outputNum":         int(np.clip(1, olo, ohi)),
-                    "minVoxelLength_mm": min_vox,
-                    "voxel_width_mm":    vox_w,
-                    "opApproach":        int(round(op_approach_hint)),
-                    "devCap":            0,
-                    "visibleSurf":       False,
-                    "normalAng":         False,
-                }
-                if regime["coarse_mode"] == 1.0:
-                    p["filterByAxis"]   = True
-                    p["angleThreshold"] = 135
-                study.enqueue_trial(p)
-                enqueued += 1
-
-        log.info(f"Enqueued {enqueued} grid warm-start trials "
-                 f"(fast→slow scale order, opApproach hint={op_approach_hint})")
-
     # ─────────────────────────────────────────────────────────────────────
     # Objective
     # ─────────────────────────────────────────────────────────────────────
@@ -627,7 +556,7 @@ class OptunaOptimizer:
         Pruning uses a scalarized running_score so trial.report() receives a scalar.
         """
         p        = suggest_params_joint(trial, regime, self._pairs_candidates,
-                                        self._voxel_bounds, self._refstep_bounds)
+                                        self._voxel_bounds)
         coarse_p, fine_p = _split_joint_params(p)
 
         ang        = SC.ANG_THRESH_REGIME_GATE
@@ -643,7 +572,9 @@ class OptunaOptimizer:
             total_time += res.mean_time
             running_cov   = total_cov  / (step + 1)
             running_time  = total_time / (step + 1)
-
+            # logging.info(f"  Trial {trial.number:3d}  Scene {step+1}/{SC.M_FULL}  "
+            #              f"cov={res.coverage:.3f}  mean_time={res.mean_time:.2f}s  "
+            #              f"running_cov={running_cov:.3f}  running_time={running_time:.2f}s")
             # Level 2: Time guard  (trial.report/should_prune not available in multi-objective)
             if running_time > self._best_mean_time * SC.OPTUNA_TIME_RATIO:
                 trial.set_user_attr("prune_reason", f"time@{step}")
@@ -651,7 +582,7 @@ class OptunaOptimizer:
 
             # Level 3: Coverage floor (after 3rd scene)
             if step >= 2 and running_cov < SC.OPTUNA_COV_PRUNE_FLOOR:
-                trial.set_user_attr("prune_reason", f"cov@{step}")
+                trial.set_user_attr("prune_reason", f"cov@{step}, running_cov={running_cov:.2f}")
                 raise optuna.TrialPruned()
 
         final_cov  = total_cov  / SC.M_FULL
@@ -711,13 +642,12 @@ class OptunaOptimizer:
             f"{part}_joint", f"_{part}_joint")
 
         if not self._study.trials:
-            self._enqueue_joint_grid(self._study, best_regime, _op_hint)
             warm_p = _build_warm_joint(
                 _geom_coarse, _geom_fine, best_regime,
-                self._pairs_candidates, self._voxel_bounds, self._refstep_bounds,
+                self._pairs_candidates, self._voxel_bounds,
             )
             self._study.enqueue_trial(warm_p)
-            log.info("Enqueued geometry warm-start trial")
+            log.info("Enqueued geometry warm-start trial (TPE explores all 16 params jointly)")
         else:
             log.info(f"Resumed study: {len(self._study.trials)} prior trials")
 

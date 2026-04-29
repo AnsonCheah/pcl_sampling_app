@@ -54,13 +54,12 @@ PHASE1_COVERAGE_GATE = 0.50    # min coverage @ loose threshold to pass Phase 1
 
 # ---------------------------------------------------------------------------
 # Phase 2a — Joint quantization grid (refStep × distQuantification)
-# refStep candidates are multipliers on the warm-start value.
-# distQuantification is MechVision's UNITLESS FACTOR (default 1.0).
-# Explored independently of refStep — values are direct distQ candidates.
+# refStep sweeps the full MechMind range 20→1 (coarser/faster first); no geometry scaling.
+# distQuantification is MechVision's UNITLESS FACTOR (default 1.0), independent of refStep.
 # Valid range confirmed by MechVision: roughly [0.1, 5.0].
 # ---------------------------------------------------------------------------
 
-PHASE2A_REFSTEP_SCALES = [2.0, 1.5, 1.0, 0.75, 0.5]   # coarser/faster first
+PHASE2A_REFSTEP_VALUES = list(range(1, 21))   # 1→20, finer/slower first; high-coverage trials complete before TPE activates
 # Direct distQ FACTOR values to try — independent of refStep.
 # Centred on 1.0 (MechVision optimal), exploring ½×–3× range.
 PHASE2A_DISTQ_VALUES   = [0.5, 0.75, 1.0, 1.5, 2.0, 3.0]
@@ -209,16 +208,14 @@ OPTUNA_TIME_RATIO       = 3.0
 OPTUNA_TIME_INITIAL_CAP = 5.0  # seconds; replaces float("inf") at study start
 
 # Coverage prune floor: prune if running_cov < this after 3+ scenes (step ≥ 2, 0-indexed).
-OPTUNA_COV_PRUNE_FLOOR = 0.50
+OPTUNA_COV_PRUNE_FLOOR = 0.10
 
 # Optuna integer/float bounds — derived from existing phase tables so
 # suggest_params functions never hard-code numbers.
-OPTUNA_REFSTEP_BOUNDS    = (1, 20)
+REFSTEP_BOUNDS           = (1, 20)   # MechMind hard limit: integer 1–20 for both refStep and referredStep
 OPTUNA_DISTQ_BOUNDS      = (min(PHASE2A_DISTQ_VALUES), max(PHASE2A_DISTQ_VALUES))
 OPTUNA_VOTERATIO_BOUNDS  = (min(PHASE2B_PARAMS["maxVoteRatio"]["candidates"]),
                              max(PHASE2B_PARAMS["maxVoteRatio"]["candidates"]))
-OPTUNA_REFERRED_BOUNDS   = (min(PHASE2B_PARAMS["referredStep"]["candidates"]),
-                             max(PHASE2B_PARAMS["referredStep"]["candidates"]))
 OPTUNA_OUTPUTNUM_BOUNDS  = (min(PHASE2B_PARAMS["outputNum"]["candidates"]),
                              max(PHASE2B_PARAMS["outputNum"]["candidates"]))
 OPTUNA_CONFTHRESH_BOUNDS = (min(PHASE3_PARAMS["confidenceThreshold"]),

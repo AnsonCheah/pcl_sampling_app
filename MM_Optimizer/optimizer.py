@@ -560,7 +560,7 @@ class Optimizer:
     def _default_coarse(self) -> dict:
         return {
             "registrationMode":              0.0,
-            "refStep":                       self.ws.refStep,
+            "refStep":                       SC.REFSTEP_BOUNDS[1] // 2,
             "distQuantification":            self.ws.distQuantification,
             "angleQuantification":           self.ws.angleQuantification,
             "maxNumOfPointPairsPerFeature":  self.ws.maxNumOfPointPairsPerFeature,
@@ -738,10 +738,8 @@ class Optimizer:
         distQ is MechVision's unitless factor — swept independently of refStep.
         Grid size = len(REFSTEP_SCALES) × len(DISTQ_VALUES).
         """
-        warm_step = self.ws.refStep
         coarse_variants, fine_variants = [], []
-        for scale in SC.PHASE2A_REFSTEP_SCALES:
-            ref = max(1, int(warm_step * scale))
+        for ref in SC.PHASE2A_REFSTEP_VALUES:
             for distq in SC.PHASE2A_DISTQ_VALUES:
                 cp   = copy.deepcopy(coarse)
                 cp["refStep"]            = ref
@@ -992,7 +990,7 @@ class Optimizer:
             fp = copy.deepcopy(seed_result.config["fine"])
 
             # -- refStep  (distQuantification follows via locked ratio) --
-            best_ref  = cp.get("refStep", self.ws.refStep)
+            best_ref  = cp.get("refStep", SC.REFSTEP_BOUNDS[1] // 2)
             best_dist_q = cp.get("distQuantification", self.ws.distQuantification)
             ratio = best_dist_q / best_ref if best_ref > 0 else 1.0
             ref_candidates = list(range(max(1, best_ref - SC.PHASE6_REFSTEP_DELTA),
@@ -1062,8 +1060,7 @@ class Optimizer:
                  f"M={len(self.scene_groups)} scenes  N={n_per} inst/scene  "
                  f"cache={'ON' if self.cache else 'OFF'}  "
                  f"two_pass={'ON' if self.use_two_pass else 'OFF'}")
-        log.info(f"Warm start: refStep={self.ws.refStep}  "
-                 f"distQ={self.ws.distQuantification:.1f}  "
+        log.info(f"Warm start: distQ={self.ws.distQuantification:.1f}  "
                  f"prefer_edge={self.ws.prefer_edge}")
 
         # ── Phase 1 ──────────────────────────────────────────────────────
@@ -1235,8 +1232,7 @@ def main():
         sys.exit(1)
     pcd = load_reference_pcd(model_path)
     ws  = analyze_mesh(pcd)
-    log.info(f"Warm start: D={ws.diameter_m*1e3:.1f}mm  refStep={ws.refStep}  "
-             f"prefer_edge={ws.prefer_edge}")
+    log.info(f"Warm start: D={ws.diameter_m*1e3:.1f}mm  prefer_edge={ws.prefer_edge}")
 
     if args.dry_run:
         log.info("DRY RUN — no MechVision calls")

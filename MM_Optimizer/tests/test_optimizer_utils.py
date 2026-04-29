@@ -145,7 +145,6 @@ def test_warm_start_values():
     log.info(f"  diameter        = {ws.diameter_m*1e3:.1f} mm")
     log.info(f"  flatness_ratio  = {ws.flatness_ratio:.2f}")
     log.info(f"  prefer_edge     = {ws.prefer_edge}")
-    log.info(f"  refStep         = {ws.refStep}")
     log.info(f"  distQ           = {ws.distQuantification:.2f}")
     log.info(f"  angleQ          = {ws.angleQuantification}")
     log.info(f"  maxPairs        = {ws.maxNumOfPointPairsPerFeature}")
@@ -154,10 +153,7 @@ def test_warm_start_values():
 
     assert ws.diameter_m > 0.01,          "diameter should be > 10mm"
     assert ws.diameter_m < 1.0,           "diameter should be < 1m"
-    assert ws.refStep >= 1,               "refStep must be >= 1"
     assert ws.distQuantification > 0,     "distQuantification must be > 0"
-    assert 0 < ws.dist_ratio_init <= 1.0, \
-        f"dist_ratio_init={ws.dist_ratio_init:.3f} must be in (0, 1]"
     assert ws.angleQuantification in [30, 45, 60, 90]
     assert ws.maxNumOfPointPairsPerFeature >= 100
     assert ws.outputNum == 1

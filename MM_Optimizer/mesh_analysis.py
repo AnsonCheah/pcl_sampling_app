@@ -29,9 +29,7 @@ class WarmStart:
     """All geometry-derived starting values for the optimizer."""
 
     # Coarse warm-start values
-    refStep:                       int   = 5
-    distQuantification:            float = 5.0     # = refStep × dist_ratio_init
-    dist_ratio_init:               float = 1.0     # distQuantification / refStep
+    distQuantification:            float = 1.0     # MechVision distQ factor (unitless); 1.0 = optimal
     angleQuantification:           int   = 60
     maxNumOfPointPairsPerFeature:  int   = 5000
     outputNum:                     int   = 1       # overridden to N_instances
@@ -80,14 +78,11 @@ def analyze_mesh(ref_pcd: o3d.geometry.PointCloud,
     # ------------------------------------------------------------------ #
     #  PPF warm-start                                                      #
     # ------------------------------------------------------------------ #
-    RELATIVE_STEP = 0.02   # 2% of diameter per step → refStep≈5 for D=10cm
-    ws.refStep             = max(1, int(D / RELATIVE_STEP))
-    # distQuantification is a FACTOR: DistanceInterval = distQuantification × SamplingInterval.
+    # refStep is swept from 20→1 by the optimizer (MechMind integer constraint);
+    # no geometry-derived warm-start needed.
+    # distQuantification is a FACTOR: DistanceInterval = distQ × SamplingInterval.
     # MechVision default = 1.0 (optimal bin width ≈ one sampling interval).
-    # Plan1 coupling "distQ ≈ refStep" refers to OpenCV's unitless relativeDistanceStep;
-    # in MechVision's parameterisation the equivalent is distQ ≈ 1.0 for any refStep.
     ws.distQuantification  = 1.0
-    ws.dist_ratio_init     = 1.0 / ws.refStep if ws.refStep > 0 else 0.2
     ws.angleQuantification = 60
     ws.maxNumOfPointPairsPerFeature = 5000 if D < 0.1 else 10000
 
@@ -177,9 +172,7 @@ if __name__ == "__main__":
     print(f"  flatness_ratio   = {ws.flatness_ratio:.2f}")
     print(f"  normal_conc      = {ws.normal_concentration:.2f}")
     print(f"  prefer_edge      = {ws.prefer_edge}")
-    print(f"  refStep (warm)   = {ws.refStep}")
     print(f"  distQuant (warm) = {ws.distQuantification:.2f}")
-    print(f"  dist_ratio_init  = {ws.dist_ratio_init:.3f}")
     print(f"  angleQuant       = {ws.angleQuantification}")
     print(f"  maxPairs (warm)  = {ws.maxNumOfPointPairsPerFeature}")
     print(f"  sym_order        = {ws.sym_order}")

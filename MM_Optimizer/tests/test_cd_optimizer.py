@@ -93,7 +93,7 @@ def test_dry_phase2():
         result = opt.phase2_coarse_cd(regime)
         assert result is not None
         assert result.coverage == 1.0, f"Expected cov=1.0, got {result.coverage}"
-        n_grid = len(SC.PHASE2A_REFSTEP_SCALES) * len(SC.PHASE2A_DISTQ_VALUES)
+        n_grid = len(SC.PHASE2A_REFSTEP_VALUES) * len(SC.PHASE2A_DISTQ_VALUES)
         log.info(f"  dry phase2: 2a grid size={n_grid}  evals={opt._n_evals}")
         log.info("PASS: test_dry_phase2")
     finally:

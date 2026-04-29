@@ -55,11 +55,10 @@ PART       = "25333MB000"
 SCENES_DIR = os.path.join(_ROOT, "output", "synthetic_target", PART)
 MODEL_PATH = os.path.join(MM_MODEL_ROOT, f"{PART}_surface", f"{PART}_surface.ply")
 
-_PAIRS          = [1250, 2500, 5000, 10000, 20000]
-_VOXEL_BOUNDS   = (0.14, 4.2, 0.28, 16.8)   # (min_lo, min_hi, width_lo, width_hi)
-_REFSTEP_BOUNDS = SC.OPTUNA_REFSTEP_BOUNDS   # (1, 20)
-_REGIME_A       = {"coarse_mode": 0.0, "fine_mode": 0.0, "needs_edge": False, "id": "A"}
-_REGIME_C       = {"coarse_mode": 1.0, "fine_mode": 0.0, "needs_edge": True,  "id": "C"}
+_PAIRS        = [1250, 2500, 5000, 10000, 20000]
+_VOXEL_BOUNDS = (0.14, 4.2, 0.28, 16.8)   # (min_lo, min_hi, width_lo, width_hi)
+_REGIME_A     = {"coarse_mode": 0.0, "fine_mode": 0.0, "needs_edge": False, "id": "A"}
+_REGIME_C     = {"coarse_mode": 1.0, "fine_mode": 0.0, "needs_edge": True,  "id": "C"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -77,7 +76,7 @@ def _ask_joint(regime, study=None):
     if study is None:
         study = _make_study_multi()
     trial = study.ask()
-    p = suggest_params_joint(trial, regime, _PAIRS, _VOXEL_BOUNDS, _REFSTEP_BOUNDS)
+    p = suggest_params_joint(trial, regime, _PAIRS, _VOXEL_BOUNDS)
     return p, trial, study
 
 
@@ -91,7 +90,7 @@ def test_suggest_params_joint_surface():
 
     # ── Coarse keys ──────────────────────────────────────────────────────
     assert p["coarse_mode"] == 0.0
-    lo, hi = SC.OPTUNA_REFSTEP_BOUNDS
+    lo, hi = SC.REFSTEP_BOUNDS
     assert lo <= p["refStep"] <= hi, f"refStep={p['refStep']} out of [{lo},{hi}]"
 
     dlo, dhi = SC.OPTUNA_DISTQ_BOUNDS
@@ -204,9 +203,9 @@ def test_build_warm_joint():
         "onlyConsiderVisibleSurfaceOfModel": False,
         "considerErrorofNormalAngles": False,
     }
-    p = _build_warm_joint(coarse, fine, _REGIME_A, _PAIRS, _VOXEL_BOUNDS, _REFSTEP_BOUNDS)
+    p = _build_warm_joint(coarse, fine, _REGIME_A, _PAIRS, _VOXEL_BOUNDS)
 
-    lo, hi = SC.OPTUNA_REFSTEP_BOUNDS
+    lo, hi = SC.REFSTEP_BOUNDS
     assert lo <= p["refStep"] <= hi
     assert p["angleQuantification"] in SC.OPTUNA_ANGLQ_CHOICES
     assert 0 <= p["pairs_idx"]  < len(_PAIRS)
