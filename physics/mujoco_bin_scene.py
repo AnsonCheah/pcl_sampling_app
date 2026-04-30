@@ -20,7 +20,7 @@ class SceneObject:
     body_name: str
 
 class MujocoBinScene:
-    def __init__(self, part_mesh, part_convex_meshes, n_parts=1, bin_dim=(0.76, 0.585, 0.25, 0.005), settle_time=10.0, render=True):
+    def __init__(self, part_mesh, part_convex_meshes, n_parts=1, bin_dim=(0.76, 0.585, 0.25, 0.005), settle_time=10.0, render=True, arrangement: str = "random"):
         self.timestep = 0.002
         self.lvel_threshold = 0.03
         self.avel_threshold = 0.5
@@ -44,6 +44,7 @@ class MujocoBinScene:
         self.data = None
         self.render_flag = render
         self.viewer = None
+        self.arrangement = arrangement
 
         self.spec = mujoco.MjSpec()
         self.spec.option.timestep = self.timestep
@@ -131,8 +132,85 @@ class MujocoBinScene:
 
         return combined
     
-    def generate_scene(self):
-        self.part_counter = 0
+    def _find_stable_pose(self) -> np.ndarray:
+        """Return 3x3 rotation matrix orienting part_mesh stably on the XY floor (analytical)."""
+        import trimesh.poses
+        transforms, probs = trimesh.poses.compute_stable_poses(self.part_mesh)
+        return transforms[int(np.argmax(probs))][:3, :3]
+
+    def _compute_structured_grid(self, R_stable):
+        """
+        Compute centered rectangular grid positions and a yaw-aligned rotation.
+
+        Returns xs, ys (1-D arrays of grid coords), R_aligned (3x3), raw_pos_z (float).
+        raw_pos_z places the part centre 10 mm above the bin floor (floor at z=0 raw).
+        Yaw is auto-selected so the long axis fits the bin and grid slot count is maximised.
+        """
+        verts = np.asarray(self.part_mesh.vertices)
+        sv = (R_stable @ verts.T).T
+        mins, maxs = sv.min(axis=0), sv.max(axis=0)
+        fp_x = maxs[0] - mins[0]
+        fp_y = maxs[1] - mins[1]
+        # Floor surface in MuJoCo world is at camera_distance (1.5 m).
+        # After R_bin (180° Rx), the part's max world-z extent = -mins[2].
+        # So part bottom in world = raw_pos_z + (-mins[2]) = camera_distance - gap.
+        raw_pos_z = float(self.camera_distance + mins[2] - 0.01)  # 10 mm gap above floor
+
+        bin_x = 2 * self.hx   # 0.76
+        bin_y = 2 * self.hy   # 0.585
+        gap = max(fp_x, fp_y) * 0.1
+
+        R_yaw90 = R.from_euler("z", 90, degrees=True).as_matrix()
+        apply_yaw90 = False
+
+        if max(fp_x, fp_y) > bin_y:
+            # Long axis must go along x; rotate if it is currently along y
+            if fp_y > fp_x:
+                apply_yaw90 = True
+        else:
+            # Both orientations fit — pick whichever packs more slots
+            nx_a = max(1, int(bin_x / (fp_x + gap)))
+            ny_a = max(1, int(bin_y / (fp_y + gap)))
+            nx_b = max(1, int(bin_x / (fp_y + gap)))
+            ny_b = max(1, int(bin_y / (fp_x + gap)))
+            if nx_b * ny_b > nx_a * ny_a:
+                apply_yaw90 = True
+
+        if apply_yaw90:
+            R_aligned = R_yaw90 @ R_stable
+            fp_x, fp_y = fp_y, fp_x
+        else:
+            R_aligned = R_stable
+
+        pitch_x = fp_x + gap
+        pitch_y = fp_y + gap
+        nx = max(1, int(bin_x / pitch_x))
+        ny = max(1, int(bin_y / pitch_y))
+
+        xs = np.linspace(-(nx - 1) * pitch_x / 2, (nx - 1) * pitch_x / 2, nx)
+        ys = np.linspace(-(ny - 1) * pitch_y / 2, (ny - 1) * pitch_y / 2, ny)
+
+        rp(f"[STRUCTURED] footprint {fp_x:.3f}x{fp_y:.3f} m  pitch {pitch_x:.3f}x{pitch_y:.3f} m  grid {nx}x{ny}={'(yaw-corrected)' if apply_yaw90 else ''}")
+        return xs, ys, R_aligned, raw_pos_z
+
+    def _spawn_bodies(self, valid_poses, static=False):
+        """Add part bodies to the MjSpec. static=True omits the freejoint (structured mode)."""
+        for pose in valid_poses:
+            body = self.world.add_body()
+            body.name = f"part_{self.part_counter}"
+            body.pos = pose[:3]
+            body.quat = pose[3:]
+            if not static:
+                body.add_freejoint()
+            for mesh_name in self.convex_mesh_names:
+                geom = body.add_geom()
+                geom.type = mujoco.mjtGeom.mjGEOM_MESH
+                geom.meshname = mesh_name
+                geom.mass = 0.1
+            self.scene_objects.append(SceneObject(body.name, body.name))
+            self.part_counter += 1
+
+    def _generate_random_scene(self):
         collision_manager = CollisionManager()
         radius = self.part_mesh.bounding_sphere.primitive.radius
         batch_size = min(10, int((2 * self.hx) // (2 * radius)) * int((2 * self.hy) // (2 * radius)))
@@ -142,8 +220,8 @@ class MujocoBinScene:
             candidate_trimesh = copy.deepcopy(self.part_mesh)
             for _ in range(200):
                 layer = i // batch_size
-                x = np.random.uniform(-self.hx + radius*3, self.hx - radius*3)
-                y = np.random.uniform(-self.hy + radius*3, self.hy - radius*3)
+                x = np.random.uniform(-self.hx + radius*2, self.hx - radius*2)
+                y = np.random.uniform(-self.hy + radius*2, self.hy - radius*2)
                 z = self.camera_distance - max(radius, 0.5) - layer * (2.5 * radius) - np.random.uniform(-radius, radius)
                 pos = np.asarray([x, y, z])
                 T = np.eye(4)
@@ -162,27 +240,42 @@ class MujocoBinScene:
                 break
             if not success:
                 print(f"[WARNING] Could not place part {i} without intersection")
-
         print(f"[INFO] Successfully placed {len(valid_poses)} parts")
+        self._spawn_bodies(valid_poses)
 
-        for pose in valid_poses:
-            body = self.world.add_body()
-            body.name = f"part_{self.part_counter}"
-            body.pos = pose[:3]
-            body.quat = pose[3:]
-            body.add_freejoint()
+    def _generate_structured_scene(self):
+        R_stable = self._find_stable_pose()
+        xs, ys, R_aligned, raw_pos_z = self._compute_structured_grid(R_stable)
 
-            for mesh_name in self.convex_mesh_names:
-                geom = body.add_geom()
-                geom.type = mujoco.mjtGeom.mjGEOM_MESH
-                geom.meshname = mesh_name
-                geom.mass = 0.1
+        grid_slots = [(x, y) for x in xs for y in ys]
+        self.n_parts = len(grid_slots)
 
-            self.scene_objects.append(SceneObject(body.name,body.name))
-            self.part_counter += 1
+        valid_poses = np.zeros((self.n_parts, 7))
+        for i, (x, y) in enumerate(grid_slots):
+            R_jitter = R.from_euler("xyz", np.random.uniform(-5, 5, 3), degrees=True).as_matrix()
+            R_local = R_aligned @ R_jitter
+            T_local = np.eye(4)
+            T_local[:3, :3] = R_local
+            T_local[:3, 3] = [x, y, raw_pos_z]
+            T = self.bin_transform @ T_local
+            quat = R.from_matrix(T[:3, :3]).as_quat(scalar_first=True)
+            valid_poses[i, :3] = [x, y, raw_pos_z]
+            valid_poses[i, 3:] = quat
+        # Static bodies — no freejoint; non-intersection guaranteed by grid pitch
+        self._spawn_bodies(valid_poses, static=True)
+
+    def generate_scene(self):
+        self.part_counter = 0
+        if self.arrangement == "structured":
+            self._generate_structured_scene()
+        else:
+            self._generate_random_scene()
 
         self.model = self.spec.compile()
         self.data = mujoco.MjData(self.model)
+
+        if self.arrangement == "structured":
+            mujoco.mj_forward(self.model, self.data)  # populate xpos/xquat without dynamics
 
         if self.render_flag and self.viewer is None:
             self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
@@ -202,6 +295,8 @@ class MujocoBinScene:
         return self._stable_count >= self.stable_steps
 
     def simulate(self, realtime=False):
+        if self.arrangement == "structured":
+            return  # poses are final; mj_forward already called in generate_scene
         steps = int(self.settle_time / self.model.opt.timestep)
         
         for i in range(steps):

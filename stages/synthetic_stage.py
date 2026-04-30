@@ -42,6 +42,7 @@ class SyntheticStage(BaseStage):
         self.rendering_flag = False
         self.verbose = True
         self.o3d_scene = {}
+        self.arrangement = "random"  # headless callers may set before _run_worker()
 
     def build_panel(self):
         if self.app.headless:
@@ -51,6 +52,11 @@ class SyntheticStage(BaseStage):
         self.num_targets_slider = self.register_widget(gui.Slider(gui.Slider.INT))
         self.num_targets_slider.set_limits(2, 200)
         self.num_targets_slider.int_value = 6
+        self.arrangement_combo = self.register_widget(gui.Combobox())
+        self.arrangement_combo.add_item("Random")
+        self.arrangement_combo.add_item("Structured")
+        self.arrangement_combo.selected_index = 0
+        self.arrangement_combo.set_on_selection_changed(self._on_arrangement_changed)
         self.btn_generate = self.register_widget(gui.Button("Generate Synthetic Targets"))
         self.btn_generate.set_on_clicked(self.start)
         self.btn_reset = self.register_widget(gui.Button("Clear Synthetic Targets"), lambda: len(self.app.synthetic_targets)>0)
@@ -69,6 +75,7 @@ class SyntheticStage(BaseStage):
         self.btn_restart.set_on_clicked(lambda: self.app._restart())
         v.add_child(gui.Label("Generate Synthetic Targets"))
         v.add_child(gui.Label(""))
+        v.add_child(self.arrangement_combo)
         v.add_child(self.num_targets_slider)
         v.add_child(self.btn_generate)
         v.add_child(self.btn_reset)
@@ -85,6 +92,9 @@ class SyntheticStage(BaseStage):
 
         print("loaded synthetic panel")
         return v
+
+    def _on_arrangement_changed(self, text, idx):
+        self.num_targets_slider.enabled = (text == "Random")
 
     def _refresh_ui(self):
         if self.app.headless:
@@ -107,7 +117,8 @@ class SyntheticStage(BaseStage):
         if not self.app.headless:
             self.app.show_progress("Simulating synthetic scene...")
             self.app.main_thread(lambda: self.app._clear_scene())
-            self.num_targets = self.num_targets_slider.int_value 
+            self.num_targets = self.num_targets_slider.int_value
+            self.arrangement = self.arrangement_combo.selected_text.lower()
 
         def add_to_render_scene(name:str, geom):
             self.app.synthetic_scenes[name] = O3DSceneObject(geom)
@@ -130,7 +141,7 @@ class SyntheticStage(BaseStage):
             self.app.update_progress(self.worker_step/TOTAL_STEPS, message)
 
         part_mesh = o3d_to_trimesh(self.app.target_mesh)
-        self.mj_scene = MujocoBinScene(part_mesh, self.app.convex_meshes, n_parts=self.num_targets, render=self.rendering_flag)
+        self.mj_scene = MujocoBinScene(part_mesh, self.app.convex_meshes, n_parts=self.num_targets, render=self.rendering_flag, arrangement=self.arrangement)
         self.mj_scene.simulate(realtime=self.rendering_flag)
         self.mj_scene.verify_parts_in_bin()
         scene_state = self.mj_scene.extract_scene_state()
@@ -155,7 +166,7 @@ class SyntheticStage(BaseStage):
 
         render = scene_render(self.o3d_scene, T_cam, look_at, self.fov_deg, self.res_width, self.res_height, verbose=self.verbose)
         pts = render["points"]
-        rp(np.unique(render["geom_ids"]))
+        # rp(np.unique(render["geom_ids"]))
         add_to_render_scene("canonical_scene", o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts)))
         _update_pb("Synthesizing image space noise...")
 

@@ -52,3 +52,8 @@ Noise functions return modified arrays; they do not return a new render dict.
 - Phase 3 (CVAE+Flow): ○ Not started
 
 **Reference implementations**: SAPIEN active stereo sensor, PD-Flow, PointFlow, Noise Flow, ScoreDenoise, DREDS
+
+
+## User Preference
+1. When diagnosing issues or bugs, DO NOT GUESS, spawn agents to check resources online to verify hypothesis
+2. When planning for implementations, ask clarifying questions BEFORE creating a plan, and BEFORE modifying plan from user feedbacks.
