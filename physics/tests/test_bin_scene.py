@@ -5,7 +5,7 @@ Stops at mesh scene construction (no raycasting/rendering).
 Run with --display to open the Open3D viewer after each test.
 
 Usage:
-  python physics/tests/test_bin_scene.py --arrangement both --display
+  python physics/tests/test_bin_scene.py --mesh path/to/part.stl --arrangement both --display
   python physics/tests/test_bin_scene.py --arrangement structured
   python physics/tests/test_bin_scene.py --arrangement random --n_parts 15 --display
 """
@@ -18,41 +18,40 @@ import copy
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import numpy as np
+# import open3d as o3d
+# import trimesh
+from trimesh.collision import CollisionManager
 from rich import print as rp
+# from pathlib import Path
+from scipy.spatial.transform import Rotation as R
 
-from geometry.geom_utils import o3d_to_trimesh, trimesh_to_o3d, o3d_display, init_open3d
-from physics.mujoco_bin_scene import MujocoBinScene
-from app_v2 import MeshSamplingApp
-from enums import Stage
+from geometry.geom_utils import o3d_to_trimesh, init_open3d
+from physics.mujoco_bin_scene import MujocoBinScene, load_part, _display_scene
 
-
-# -- Mesh loading --------------------------------------------------------------
-
-def load_part(verbose: bool = True):
-    if verbose:
-        rp("[bold]Loading part mesh via MeshSamplingApp...[/bold]")
-    app = MeshSamplingApp(headless=True)
-    app.stages[Stage.IMPORT_MESH]._run_worker()
-    app._express_sampling_worker()
-    part_mesh = o3d_to_trimesh(app.target_mesh)
-    if verbose:
-        rp(f"  vertices: {len(part_mesh.vertices):,}  faces: {len(part_mesh.faces):,}")
-        rp(f"  bounding sphere r = {part_mesh.bounding_sphere.primitive.radius:.4f} m")
-    return part_mesh, app.convex_meshes
 
 
 # -- Test helpers --------------------------------------------------------------
 
-def _display_scene(scene, scene_state):
-    import open3d as o3d
-    o3d_scene = scene.mujoco_scene_to_o3d(scene_state)
-    geom_list = []
-    for obj in o3d_scene.values():
-        mesh = copy.deepcopy(obj.geom)
-        geom_list.append(mesh.transform(obj.T_gt))
-    vis = o3d_display(geom_list, dynamic_color=True)
-    vis.run()
-    vis.destroy_window()
+def _check_no_bin_intersection(scene, scene_state):
+    """Assert that no settled part mesh intersects the bin geometry."""
+    bin_trimesh = o3d_to_trimesh(scene.bin_mesh)
+    cm = CollisionManager()
+    cm.add_object("bin", bin_trimesh)
+    colliding = []
+    for body_name, data in scene_state.items():
+        pos  = data["position"]
+        quat = data["quaternion"]          # w x y z (MuJoCo convention)
+        T = np.eye(4)
+        T[:3, :3] = R.from_quat(quat, scalar_first=True).as_matrix()
+        T[:3, 3]  = pos
+        hit = cm.in_collision_single(scene.part_mesh, transform=T)
+        if hit:
+            colliding.append(body_name)
+    assert not colliding, (
+        f"{len(colliding)} part(s) intersect the bin: {colliding[:5]}"
+        f"{'  ...' if len(colliding) > 5 else ''}"
+    )
+    rp(f"  No part-bin intersections (checked {len(scene_state)} parts)")
 
 
 def _check_scene(scene, scene_state, arrangement):
@@ -71,13 +70,14 @@ def _check_scene(scene, scene_state, arrangement):
         assert bin_result["n_out"] == 0, (
             f"Structured mode: {bin_result['n_out']} parts escaped the bin"
         )
-        # import mujoco
         assert scene.data.time == 0.0, (
             "Structured mode: data.time > 0 implies simulate() ran physics steps"
         )
 
+        _check_no_bin_intersection(scene, scene_state)
 
-# -- Individual test functions ------------------------------------------------─
+
+# -- Individual test functions -------------------------------------------------
 
 def test_random(part_mesh, convex_meshes, n_parts: int, display: bool):
     rp("\n[bold cyan]=== RANDOM ARRANGEMENT ===[/bold cyan]")
@@ -89,36 +89,45 @@ def test_random(part_mesh, convex_meshes, n_parts: int, display: bool):
     )
     scene.simulate()
     scene_state = scene.extract_scene_state()
-    _check_scene(scene, scene_state, "random")
-    rp(f"[green]  PASS -random ({len(scene_state)} parts)[/green]")
+    try:
+        _check_scene(scene, scene_state, "random")
+        rp(f"[green]  PASS - random ({len(scene_state)} parts)[/green]")
+    finally:
+        if display:
+            rp("  Opening viewer...")
+            _display_scene(scene, scene_state)
 
-    if display:
-        rp("  Opening viewer...")
-        _display_scene(scene, scene_state)
 
-
-def test_structured(part_mesh, convex_meshes, display: bool):
-    rp("\n[bold cyan]=== STRUCTURED ARRANGEMENT ===[/bold cyan]")
+def test_structured(part_mesh, convex_meshes, stable_pose_R: np.ndarray, pose_idx: int, prob: float, display: bool):
+    rp(f"\n[bold cyan]=== STRUCTURED ARRANGEMENT (pose {pose_idx}, prob={prob:.3f}) ===[/bold cyan]")
     scene = MujocoBinScene(
         part_mesh, convex_meshes,
-        n_parts=1,          # ignored -grid capacity overrides
+        n_parts=1,           # ignored - grid capacity overrides
         render=False,
         arrangement="structured",
+        stable_pose_R=stable_pose_R,
     )
-    scene.simulate()        # should be a no-op
+    scene.simulate()         # should be a no-op
     scene_state = scene.extract_scene_state()
-    _check_scene(scene, scene_state, "structured")
-    rp(f"[green]  PASS -structured ({len(scene_state)} parts, physics skipped)[/green]")
+    try:
+        _check_scene(scene, scene_state, "structured")
+        rp(f"[green]  PASS - structured pose {pose_idx} ({len(scene_state)} parts, physics skipped)[/green]")
+    finally:
+        if display:
+            rp("  Opening viewer...")
+            _display_scene(scene, scene_state)
 
-    if display:
-        rp("  Opening viewer...")
-        _display_scene(scene, scene_state)
 
-
-# -- Entry point --------------------------------------------------------------─
+# -- Entry point ---------------------------------------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Bin scene generation tests")
+    parser.add_argument(
+        "--mesh",
+        type=str,
+        default=None,
+        help="Path to STL mesh file (skips file dialog)",
+    )
     parser.add_argument(
         "--arrangement",
         choices=["random", "structured", "both"],
@@ -139,7 +148,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     init_open3d()
-    part_mesh, convex_meshes = load_part()
+    part_mesh, convex_meshes = load_part(mesh_path=args.mesh)
+
+    # Enumerate all stable poses once; structured tests iterate over them.
+    stable_poses = MujocoBinScene.get_stable_poses(part_mesh)
+    rp(f"\nFound {len(stable_poses)} stable pose(s) for this part:")
+    for i, (_, p) in enumerate(stable_poses):
+        rp(f"  pose {i}: probability = {p:.4f}")
 
     passed = []
     failed = []
@@ -156,7 +171,9 @@ if __name__ == "__main__":
         run("random", test_random, part_mesh, convex_meshes, args.n_parts, args.display)
 
     if args.arrangement in ("structured", "both"):
-        run("structured", test_structured, part_mesh, convex_meshes, args.display)
+        for i, (R_stable, prob) in enumerate(stable_poses):
+            run(f"structured_pose_{i}", test_structured,
+                part_mesh, convex_meshes, R_stable, i, prob, args.display)
 
     rp(f"\n{'-'*40}")
     rp(f"Results: {len(passed)} passed, {len(failed)} failed")

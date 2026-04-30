@@ -19,9 +19,10 @@ from geometry.geom_utils import O3DSceneObject, camera_view_matrix
 
 class MeshSamplingApp:
 
-    def __init__(self, headless=False):
+    def __init__(self, headless=False, mesh_path=None):
         self.headless = headless
         
+        self.mesh_path = Path(mesh_path) if mesh_path is not None else None
         self.stages = {
             Stage.IMPORT_MESH: ImportMeshStage(self),
             Stage.RAYCAST: RaycastStage(self),
@@ -78,6 +79,10 @@ class MeshSamplingApp:
             y=(self.window_height - self.pb_panel_size[1])>>1
             self.progress_panel.frame = gui.Rect(x, y, self.pb_panel_size[0], self.pb_panel_size[1])
             self.window.add_child(self.progress_panel)
+
+        # Pre-seed the mesh path so headless callers skip the file dialog.
+        if self.mesh_path is not None:
+            self.stages[Stage.IMPORT_MESH].file_path = self.mesh_path
 
         self._restart()
 
@@ -311,13 +316,21 @@ class MeshSamplingApp:
                 continue
 
 if __name__ == "__main__":
-    # gui.Application.instance.initialize()
-    # app = MeshSamplingApp()
-    # gui.Application.instance.run()
-    try: 
-        gui.Application.instance.initialize()
-        app = MeshSamplingApp()
-        gui.Application.instance.run()
-    except Exception as e:
-        print(f"[FATAL] Unhandled exception: {e}")
-        exit()
+    import argparse
+    parser = argparse.ArgumentParser(description="Mesh Sampling App")
+    parser.add_argument("--mesh", type=str, default=None, help="Path to STL mesh file (enables headless mode)")
+    parser.add_argument("--headless", action="store_true", help="Run without GUI")
+    args = parser.parse_args()
+
+    if args.headless or args.mesh:
+        app = MeshSamplingApp(headless=True, mesh_path=args.mesh)
+        app.stages[Stage.IMPORT_MESH]._run_worker()
+        app._express_sampling_worker()
+    else:
+        try:
+            gui.Application.instance.initialize()
+            app = MeshSamplingApp()
+            gui.Application.instance.run()
+        except Exception as e:
+            print(f"[FATAL] Unhandled exception: {e}")
+            exit()

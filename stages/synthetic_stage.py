@@ -158,9 +158,9 @@ class SyntheticStage(BaseStage):
         self.worker_step += 1
         self.app.update_progress(self.worker_step/TOTAL_STEPS, f"Generating synthetic scene...")
 
-        cam_pos = np.zeros(3)
-        look_at = np.asarray([0,0,1.5])
-        T_cam = camera_view_matrix(cam_pos, look_at)
+        cam_pos = np.asarray([0.0, 0.0, self.mj_scene.camera_distance])  # above bin
+        look_at = np.asarray([0.0, 0.0, 0.0])                           # bin floor centre
+        T_cam = camera_view_matrix(cam_pos, look_at, up=np.array([0.0, 1.0, 0.0]))
 
         self.app._reframe()
 
