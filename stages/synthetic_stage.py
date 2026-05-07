@@ -142,7 +142,7 @@ class SyntheticStage(BaseStage):
 
         part_mesh = o3d_to_trimesh(self.app.target_mesh)
         self.mj_scene = MujocoBinScene(part_mesh, self.app.convex_meshes, n_parts=self.num_targets, render=self.rendering_flag, arrangement=self.arrangement)
-        self.mj_scene.simulate(realtime=self.rendering_flag)
+        self.mj_scene.simulate()
         self.mj_scene.verify_parts_in_bin()
         scene_state = self.mj_scene.extract_scene_state()
         self.o3d_scene = self.mj_scene.mujoco_scene_to_o3d(scene_state)

@@ -19,6 +19,7 @@ from pathlib import Path
 
 JITTER_DEG = [3,3,3]
 HOPPER_INWARD_OFFSET = 0.02   # hopper walls inset this far inside the bin wall plane
+HOPPER_TOP_Z = 100            # hopper walls extend to this z; generous upper bound
 
 
 @dataclass
@@ -137,7 +138,7 @@ class MujocoBinScene:
         # as a hopper that guides falling parts into the bin during random simulation.
         # They are disabled via contype/conaffinity after settling in simulate().
         wall_top = 2 * self.hh - self.bin_dim[3]       # z where bin walls end
-        hopper_top = self.camera_distance               # generous upper bound
+        hopper_top = HOPPER_TOP_Z      # generous upper bound
         hopper_half_h = (hopper_top - wall_top) / 2
         hopper_center_z = wall_top + hopper_half_h
         t = self.bin_dim[3]                             # wall thickness alias
@@ -159,6 +160,17 @@ class MujocoBinScene:
             hgeom.mass  = 0.0
             hgeom.rgba  = [0.0, 0.0, 0.0, 0.0]  # invisible
             self._hopper_geom_names.append(name)
+
+        # Infinite safety floor — catches parts that escape the bin during physics.
+        # Placed one camera_distance below the bin floor so it never interferes with
+        # normal in-bin contact, but stops runaway parts from falling to infinity.
+        sf = bin_body.add_geom()
+        sf.name = "safety_floor"
+        sf.type = mujoco.mjtGeom.mjGEOM_PLANE
+        sf.pos  = [0, 0, -self.camera_distance]
+        sf.size = [0, 0, 0.1]   # infinite extent; 0.1 is grid spacing (visual only)
+        sf.mass = 0.0
+        sf.rgba = [0.5, 0.5, 0.5, 0.0]  # invisible
 
         return combined
     
@@ -237,6 +249,97 @@ class MujocoBinScene:
     def _find_stable_pose(self) -> np.ndarray:
         """Return 3x3 rotation matrix for the most probable stable pose."""
         return self.get_stable_poses(self.part_mesh)[0][0]
+
+    def _compute_valid_stable_poses(self) -> list:
+        """
+        Filter stable poses to those whose z-extent fits within 0.9 × bin_height.
+        Returns list of (R_3x3, prob, lz) — private 3-tuple.
+        Falls back to the minimum-lz pose if all exceed the threshold.
+        """
+        bin_height = 2 * self.hh
+        threshold  = 0.9 * bin_height
+        verts      = np.asarray(self.part_mesh.vertices)
+
+        valid = []
+        for R_stable, prob in self.get_stable_poses(self.part_mesh):
+            rotated = (R_stable @ verts.T).T
+            lz = float(rotated[:, 2].max() - rotated[:, 2].min())
+            if lz <= threshold:
+                valid.append((R_stable, prob, lz))
+
+        if not valid:
+            all_with_lz = sorted(
+                [(R_s, p, float((R_s @ verts.T).T[:, 2].max() - (R_s @ verts.T).T[:, 2].min()))
+                 for R_s, p in self.get_stable_poses(self.part_mesh)],
+                key=lambda x: x[2],
+            )
+            print(f"[WARNING] No stable pose fits in bin height {bin_height:.3f} m. "
+                  f"Using minimum-lz pose ({all_with_lz[0][2]:.3f} m).")
+            valid = [all_with_lz[0]]
+
+        return valid
+
+    def _compute_max_tilted_height(self, valid_poses: list) -> float:
+        """
+        Compute the worst-case height a part can achieve in any constrained orientation.
+        Used for layer spacing in random spawning to ensure parts don't overlap.
+        Returns max height across all valid stable poses at their respective theta_max.
+        """
+        max_h = 0.0
+        verts   = np.asarray(self.part_mesh.vertices)
+        clearance = 0.9 * 2 * self.hh
+
+        for R_stable, _, lz in valid_poses:
+            rotated = (R_stable @ verts.T).T
+            lx = float(rotated[:, 0].max() - rotated[:, 0].min())
+            ly = float(rotated[:, 1].max() - rotated[:, 1].min())
+
+            if max(lx, ly, lz) <= clearance:
+                h = max(lx, ly, lz)
+            else:
+                diag      = np.sqrt(lx ** 2 + ly ** 2)
+                theta_max = np.arcsin(np.clip((clearance - lz) / diag, 0.0, 1.0))
+                h = lz + max(lx, ly) * np.sin(theta_max)
+
+            max_h = max(max_h, float(h))
+
+        return max_h
+
+    def _sample_constrained_rotation(self, valid_poses: list) -> np.ndarray:
+        """
+        Sample a random rotation constrained so the part z-extent stays within
+        0.9 × bin_height.  Decomposed as: unrestricted yaw around world-Z, then
+        a tilt of at most theta_max away from world-Z (cone sampling).
+
+        theta_max derivation (conservative):
+            lz + diag·sin(θ) ≤ 0.9·bin_height
+            θ_max = arcsin(clip((clearance − lz) / diag, 0, 1))
+        where diag = sqrt(lx² + ly²) is the AABB footprint diagonal.
+        """
+        probs = np.array([p for _, p, _ in valid_poses], dtype=float)
+        probs /= probs.sum()
+        idx = np.random.choice(len(valid_poses), p=probs)
+        R_stable, _, lz = valid_poses[idx]
+
+        verts   = np.asarray(self.part_mesh.vertices)
+        rotated = (R_stable @ verts.T).T
+        lx = float(rotated[:, 0].max() - rotated[:, 0].min())
+        ly = float(rotated[:, 1].max() - rotated[:, 1].min())
+
+        clearance = 0.9 * 2 * self.hh
+
+        if max(lx, ly, lz) <= clearance:
+            theta_max = np.pi / 2          # any orientation fits — full hemisphere
+        else:
+            diag      = np.sqrt(lx ** 2 + ly ** 2)
+            theta_max = np.arcsin(np.clip((clearance - lz) / diag, 0.0, 1.0))
+
+        R_yaw  = R.from_euler('z', np.random.uniform(0.0, 2 * np.pi)).as_matrix()
+        phi    = np.random.uniform(0.0, 2 * np.pi)
+        theta  = np.random.uniform(0.0, theta_max)
+        R_tilt = R.from_rotvec(np.array([np.cos(phi), np.sin(phi), 0.0]) * theta).as_matrix()
+
+        return R_tilt @ R_yaw @ R_stable
 
     def _compute_structured_grid(self, R_stable):
         """
@@ -344,7 +447,7 @@ class MujocoBinScene:
         """Trimesh of bin floor/walls + hopper extensions for spawn-time collision checks."""
         t = self.bin_dim[3]
         wall_top  = 2 * self.hh - t
-        hopper_half_h   = (self.camera_distance - wall_top) / 2
+        hopper_half_h   = (HOPPER_TOP_Z - wall_top) / 2
         hopper_center_z =  wall_top + hopper_half_h
         box_defs = [
             # floor
@@ -374,6 +477,8 @@ class MujocoBinScene:
         radius = self.part_mesh.bounding_sphere.primitive.radius
         batch_size = min(10, int((2 * self.hx) // (2 * radius)) * int((2 * self.hy) // (2 * radius)))
         valid_poses = np.zeros((self.n_parts, 7))
+        valid_poses_for_rotation = self._compute_valid_stable_poses()
+        max_tilted_height = self._compute_max_tilted_height(valid_poses_for_rotation)
         for i in range(self.n_parts):
             success = False
             candidate_trimesh = copy.deepcopy(self.part_mesh)
@@ -382,11 +487,12 @@ class MujocoBinScene:
                 x = np.random.uniform(-self.hx + radius*2, self.hx - radius*2)
                 y = np.random.uniform(-self.hy + radius*2, self.hy - radius*2)
                 # Bin floor at z=0, gravity -Z. Stack layers upward from floor.
-                z = max(radius * 2, 0.08) + layer * (2.5 * radius) + np.random.uniform(0, radius * 0.5)
+                # Layer spacing uses max_tilted_height so parts have adequate clearance.
+                z = max(max_tilted_height, 0.08) + layer * (2.5 * max_tilted_height) + np.random.uniform(0, max_tilted_height * 0.5)
                 pos = np.asarray([x, y, z])
                 T = np.eye(4)
                 T[:3, 3] = pos
-                T[:3, :3] = R.random().as_matrix()
+                T[:3, :3] = self._sample_constrained_rotation(valid_poses_for_rotation)
                 T = self.bin_transform @ T
                 quat = R.from_matrix(T[:3, :3]).as_quat(scalar_first=True)
                 is_collision, _, _ = collision_manager.in_collision_single(candidate_trimesh, transform=T, return_names=True, return_data=True)
@@ -436,12 +542,13 @@ class MujocoBinScene:
 
         if self.arrangement == "structured":
             mujoco.mj_forward(self.model, self.data)  # populate xpos/xquat without dynamics
+            return
 
         if self.render_flag and self.viewer is None:
             self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
             self.viewer.cam.distance = self.camera_distance
             self.viewer.cam.azimuth = 90
-            self.viewer.cam.elevation = 30
+            self.viewer.cam.elevation = -30
             self.viewer.cam.lookat[:] = [0, 0, self.hh * 0.5]  # centre of bin interior
 
     def is_settled(self) -> bool:
@@ -454,9 +561,11 @@ class MujocoBinScene:
         self._stable_count = self._stable_count + 1 if all_slow else 0
         return self._stable_count >= self.stable_steps
 
-    def simulate(self, realtime=False):
+    def simulate(self):
         if self.arrangement == "structured":
+            print("[INFO] Structured arrangement: skipping simulation and settling")
             return  # poses are final; mj_forward already called in generate_scene
+        input("Press Enter to start simulation...")
         steps = int(self.settle_time / self.model.opt.timestep)
 
         # Phase 1: settle with hopper walls active
@@ -700,7 +809,7 @@ if __name__ == "__main__":
         scene = MujocoBinScene(
             part_mesh, convex_meshes,
             n_parts=args.n_parts,
-            render=True,
+            render=args.display,
             arrangement="random",
         )
         scene.simulate()
@@ -714,7 +823,7 @@ if __name__ == "__main__":
             scene = MujocoBinScene(
                 part_mesh, convex_meshes,
                 n_parts=1,           # ignored - grid capacity overrides
-                render=True,
+                render=args.display,
                 arrangement="structured",
                 stable_pose_R=R_stable,
             )

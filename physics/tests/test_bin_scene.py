@@ -8,6 +8,9 @@ Usage:
   python physics/tests/test_bin_scene.py --mesh path/to/part.stl --arrangement both --display
   python physics/tests/test_bin_scene.py --arrangement structured
   python physics/tests/test_bin_scene.py --arrangement random --n_parts 15 --display
+  python physics/tests/test_bin_scene.py --shape cuboid_long --arrangement random --n_parts 10
+  python physics/tests/test_bin_scene.py --shape cuboid_flat --arrangement both --n_parts 8
+  python physics/tests/test_bin_scene.py --shape cube --arrangement random --n_parts 15
 """
 
 import sys
@@ -18,15 +21,48 @@ import copy
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import numpy as np
-# import open3d as o3d
-# import trimesh
+import open3d as o3d
+import trimesh
+import mujoco
 from trimesh.collision import CollisionManager
 from rich import print as rp
-# from pathlib import Path
 from scipy.spatial.transform import Rotation as R
 
 from geometry.geom_utils import o3d_to_trimesh, init_open3d
 from physics.mujoco_bin_scene import MujocoBinScene, load_part, _display_scene
+
+
+# -- Synthetic mesh generator --------------------------------------------------
+
+def generate_test_mesh(shape: str, bin_dim=(0.76, 0.585, 0.25, 0.005)):
+    """
+    Return (part_mesh: trimesh.Trimesh, convex_meshes: list[o3d.TriangleMesh])
+    for a synthetic box shape — no STL file required.
+
+    Dimensions are expressed as multiples of bin_dim so shapes stay proportionate
+    to whatever bin is configured.  Default bin_dim matches MujocoBinScene default.
+
+    Shapes:
+      cube        — small cube; max extent < bin_height → exercises spherical code path
+      cuboid_long — longest dim > bin_height → exercises constrained tilt
+      cuboid_flat — wide and flat; stable pose is almost always floor-facing
+    """
+    bw, bl, bh = bin_dim[0], bin_dim[1], bin_dim[2]
+    shapes = {
+        "cube":        [0.30 * bh,  0.30 * bh,  0.30 * bh],
+        "cuboid_long": [0.50 * bw,  0.10 * bh,  0.10 * bh],
+        "cuboid_flat": [0.35 * bw,  0.25 * bl,  0.08 * bh],
+    }
+    if shape not in shapes:
+        raise ValueError(f"Unknown shape {shape!r}. Choose from: {list(shapes)}")
+
+    tri_mesh = trimesh.creation.box(extents=shapes[shape])   # centred at origin
+    o3d_mesh = o3d.geometry.TriangleMesh(
+        vertices=o3d.utility.Vector3dVector(tri_mesh.vertices),
+        triangles=o3d.utility.Vector3iVector(tri_mesh.faces),
+    )
+    o3d_mesh.compute_vertex_normals()
+    return tri_mesh, [o3d_mesh]
 
 
 
@@ -118,6 +154,45 @@ def test_structured(part_mesh, convex_meshes, stable_pose_R: np.ndarray, pose_id
             _display_scene(scene, scene_state)
 
 
+def test_constrained_rotation(part_mesh, convex_meshes, n_parts: int, display: bool):
+    rp("\n[bold cyan]=== CONSTRAINED ROTATION TEST ===[/bold cyan]")
+    scene = MujocoBinScene(
+        part_mesh, convex_meshes,
+        n_parts=n_parts,
+        render=False,
+        arrangement="random",
+    )
+    # Random mode does not call mj_forward in generate_scene; populate xquat now
+    # so we can check spawn orientations before physics runs.
+    mujoco.mj_forward(scene.model, scene.data)
+
+    z_limit = 0.9 * 2 * scene.hh * 1.05   # 5 % float tolerance
+    verts   = np.asarray(part_mesh.vertices)
+    violations = []
+    for obj in scene.scene_objects:
+        bid   = mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_BODY, obj.body_name)
+        R_mat = R.from_quat(scene.data.xquat[bid], scalar_first=True).as_matrix()
+        sv    = (R_mat @ verts.T).T
+        lz    = float(sv[:, 2].max() - sv[:, 2].min())
+        if lz > z_limit:
+            violations.append((obj.body_name, lz))
+
+    assert not violations, (
+        f"{len(violations)} part(s) exceed z-extent limit {z_limit:.4f} m: "
+        + ", ".join(f"{name}={lz:.4f}" for name, lz in violations[:5])
+    )
+    rp(f"  All {len(scene.scene_objects)} spawned parts satisfy z-extent <= {z_limit:.4f} m")
+
+    scene.simulate()
+    result = scene.verify_parts_in_bin()
+    rp(f"[green]  PASS - constrained rotation ({len(scene.scene_objects)} parts, "
+       f"{result['n_in']} in bin)[/green]")
+
+    if display:
+        rp("  Opening viewer...")
+        _display_scene(scene, scene.extract_scene_state())
+
+
 # -- Entry point ---------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -145,10 +220,20 @@ if __name__ == "__main__":
         action="store_true",
         help="Open Open3D viewer after each test",
     )
+    parser.add_argument(
+        "--shape",
+        choices=["stl", "cube", "cuboid_long", "cuboid_flat"],
+        default="stl",
+        help="Mesh source: 'stl' requires --mesh; others generate synthetic box shapes",
+    )
     args = parser.parse_args()
 
     init_open3d()
-    part_mesh, convex_meshes = load_part(mesh_path=args.mesh)
+    if args.shape == "stl":
+        part_mesh, convex_meshes = load_part(mesh_path=args.mesh)
+    else:
+        rp(f"[bold]Generating synthetic mesh: {args.shape}[/bold]")
+        part_mesh, convex_meshes = generate_test_mesh(args.shape)
 
     # Enumerate all stable poses once; structured tests iterate over them.
     stable_poses = MujocoBinScene.get_stable_poses(part_mesh)
@@ -169,6 +254,8 @@ if __name__ == "__main__":
 
     if args.arrangement in ("random", "both"):
         run("random", test_random, part_mesh, convex_meshes, args.n_parts, args.display)
+        run("constrained_rotation", test_constrained_rotation,
+            part_mesh, convex_meshes, args.n_parts, args.display)
 
     if args.arrangement in ("structured", "both"):
         for i, (R_stable, prob) in enumerate(stable_poses):
