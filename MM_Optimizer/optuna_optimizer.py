@@ -366,47 +366,6 @@ def _select_pareto_winner(study: optuna.Study) -> optuna.trial.FrozenTrial:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Visualization export
-# ─────────────────────────────────────────────────────────────────────────────
-
-def export_plots(study: optuna.Study, part_name: str, ts: int) -> str:
-    """Export all Optuna visualization plots to a timestamped folder."""
-    try:
-        import optuna.visualization as vis
-    except ImportError:
-        log.warning("optuna.visualization not available — skipping plot export.")
-        return ""
-
-    folder = os.path.join(RESULTS_DIR, f"optuna_plots_{part_name}_{ts}")
-    os.makedirs(folder, exist_ok=True)
-
-    target_cov  = lambda t: t.values[0]
-    target_time = lambda t: t.values[1]
-
-    plots = {
-        "pareto_front":                  (vis.plot_pareto_front,         dict(study=study)),
-        "optimization_history_coverage": (vis.plot_optimization_history, dict(study=study, target=target_cov,  target_name="coverage_loss")),
-        "optimization_history_time":     (vis.plot_optimization_history, dict(study=study, target=target_time, target_name="mean_time")),
-        "param_importances_coverage":    (vis.plot_param_importances,    dict(study=study, target=target_cov,  target_name="coverage_loss")),
-        "param_importances_time":        (vis.plot_param_importances,    dict(study=study, target=target_time, target_name="mean_time")),
-        "parallel_coordinate_coverage":  (vis.plot_parallel_coordinate,  dict(study=study, target=target_cov,  target_name="coverage_loss")),
-        "parallel_coordinate_time":      (vis.plot_parallel_coordinate,  dict(study=study, target=target_time, target_name="mean_time")),
-        "hypervolume_history":           (vis.plot_hypervolume_history,  dict(study=study, reference_point=[SC.SCORE_COV_NORM, SC.SCORE_TIME_NORM])),
-        "timeline":                      (vis.plot_timeline,             dict(study=study)),
-        "slice_coverage":                (vis.plot_slice,                dict(study=study, target=target_cov,  target_name="coverage_loss")),
-    }
-    for name, (fn, kwargs) in plots.items():
-        try:
-            fig = fn(**kwargs)
-            fig.write_html(os.path.join(folder, f"{name}.html"))
-        except Exception as e:
-            log.warning(f"  Plot '{name}' failed: {e}")
-
-    log.info(f"Plots exported → {folder}/")
-    return folder
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # OptunaOptimizer
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -744,7 +703,6 @@ class OptunaOptimizer:
             log.info(f"  cache         = {cache_stats}")
 
         ts = int(time.time())
-        export_plots(self._study, self.opt.part_name, ts)
         self._log_result_json(final_result, ts=ts)
         return final_result
 
