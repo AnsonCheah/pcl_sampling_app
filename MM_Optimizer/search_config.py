@@ -210,6 +210,9 @@ OPTUNA_TIME_INITIAL_CAP = 5.0  # seconds; replaces float("inf") at study start
 # Coverage prune floor: prune if running_cov < this after 3+ scenes (step ≥ 2, 0-indexed).
 OPTUNA_COV_PRUNE_FLOOR = 0.10
 
+# NSGA-II sampler settings (replaces TPESampler)
+OPTUNA_NSGA_POPULATION_SIZE = 100   # 18D needs larger population than default 50
+
 # Optuna integer/float bounds — derived from existing phase tables so
 # suggest_params functions never hard-code numbers.
 REFSTEP_BOUNDS           = (1, 20)   # MechMind hard limit: integer 1–20 for both refStep and referredStep

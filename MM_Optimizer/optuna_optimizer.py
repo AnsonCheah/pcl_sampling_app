@@ -1,28 +1,29 @@
 """
-optuna_optimizer.py — Fully Joint Multivariate TPE optimizer for MechVision pose estimation
----------------------------------------------------------------------------------------------
+optuna_optimizer.py — Fully Joint NSGA-II optimizer for MechVision pose estimation
+------------------------------------------------------------------------------------
 Replaces all three staged studies (Stage 1a/1b/2) with a single joint study covering
-all 16–18 coarse+fine parameters at once using multivariate TPE.
+all 16–18 coarse+fine parameters at once using multi-objective NSGA-II.
 
 Architecture
 ------------
 - All params (refStep, distQ, coarse remaining, fine) suggested in one `suggest_params_joint`
   call per trial. No stage isolation between coarse and fine.
-- The 30-trial refStep×distQ grid is preserved as enqueued warm-start trials (with default
-  fine params) so `_best_mean_time` is seeded early and initial coverage diversity is ensured.
+- referredStep uses fixed bounds [1, REFSTEP_BOUNDS[1]]; the constraint referredStep ≤ refStep
+  is enforced via NSGAIISampler(constraints_func=_referredstep_constraint) + an early-return
+  guard in _objective_joint that prevents MechVision blowup without relying on dynamic bounds.
 - Edge-only params (filterCandidatePoseByAxis, angleThreshold) are conditionally suggested
-  only when coarse_mode=1 (edge). group=True ensures separate joint models for surface vs edge
-  trials, preventing missing-value noise from contaminating either model.
-- Multi-round: same study extended by calling study.optimize() again in round 1+. TPE's
-  accumulated density model is preserved across rounds — no new study creation needed.
+  only when coarse_mode=1 (edge).
+- Multi-round: same study extended by calling study.optimize() again in round 1+.
 
 Key design decisions
 --------------------
-- TPESampler(multivariate=True, group=True, n_startup_trials=20): joint kernel with automatic
-  parameter grouping for conditional suggests.
-- create_study(directions=["minimize","minimize"]): multi-objective (coverage_loss, mean_time).
+- NSGAIISampler(population_size=100, constraints_func=_referredstep_constraint): population-
+  based search handles multi-modal landscape (surface vs edge regimes) and mixed types
+  (int/float/bool/categorical) natively via genetic crossover.
+- create_study(directions=["maximize","minimize"]): multi-objective (coverage, mean_time).
   Winner selected from Pareto front: max coverage first, min time as tiebreaker.
-- Two-level pruning: explicit time guard + coverage floor (trial.report not supported in MOO).
+- Three-level pruning: (0) referredStep guard (early-return, no MV call),
+  (1) time guard, (2) coverage floor — trial.report not supported in MOO.
 - Scoring (pruning signal only): raw_score = mean_time/SCORE_TIME_NORM + (1-cov)*SCORE_COV_NORM.
   Multi-objective objective returns (cov_loss, mean_time) tuple — not the scalarized score.
 - Phases 0 (mesh analysis warm-start), 1 (regime gate), and 4 (symmetry) are unchanged and
@@ -103,7 +104,7 @@ def suggest_params_joint(
     angleQuantification = trial.suggest_categorical("angleQuantification", SC.OPTUNA_ANGLQ_CHOICES)
     pairs_i             = trial.suggest_int(  "pairs_idx",  0, len(pairs_candidates) - 1)
     voteRatio           = trial.suggest_float("maxVoteRatio", vlo, vhi)
-    referredStep        = trial.suggest_int("referredStep", rlo, refStep)
+    referredStep        = trial.suggest_int("referredStep", rlo, hi_ref)
     useDistNMS          = trial.suggest_categorical("useDistNMS", [True, False])
     outputNum           = trial.suggest_int("outputNum", olo, ohi)
     min_vox             = trial.suggest_float("minVoxelLength_mm", min_lo, min_hi)
@@ -314,6 +315,20 @@ def _build_warm_joint(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# NSGA-II constraint function
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _referredstep_constraint(trial: optuna.trial.FrozenTrial) -> List[float]:
+    """NSGA-II constraints_func: returns [violation] where >0 means infeasible.
+
+    Violation = referredStep - refStep when referredStep > refStep, else 0.
+    The value is written by _objective_joint's early-return guard before the
+    trial completes, so it is available on the FrozenTrial passed here.
+    """
+    return [float(trial.user_attrs.get("constraint_violation", 0.0))]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Budget audit callback
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -336,8 +351,8 @@ def _budget_audit_callback(
         time_p = sum(1 for r in reasons if r.startswith("time"))
         best_str = ""
         if study.best_trials:
-            best = min(study.best_trials, key=lambda t: (t.values[0], t.values[1]))
-            best_str = (f"  best=({1-best.values[0]:.3f}cov, "
+            best = max(study.best_trials, key=lambda t: (t.values[0], -t.values[1]))
+            best_str = (f"  best=({best.values[0]:.3f}cov, "
                         f"{best.values[1]:.2f}s)")
         log.info(f"  [budget] trial={trial.number:3d}  complete={n_complete}  "
                  f"pruned={n_pruned} (cov:{cov_p} median:{med_p} time:{time_p})"
@@ -352,17 +367,20 @@ def _select_pareto_winner(study: optuna.Study) -> optuna.trial.FrozenTrial:
     """Select winner from Pareto front: max coverage first, then min time."""
     pareto = study.best_trials
     if not pareto:
-        # Fallback: best complete trial by scalarized score
+        # Fallback: best complete trial by scalarized score.
+        # Prefer feasible trials (no constraint violation) over sentinel infeasible ones.
         complete = [t for t in study.trials
                     if t.state == optuna.trial.TrialState.COMPLETE]
         if not complete:
             raise RuntimeError("No complete trials in study — all were pruned.")
-        log.warning("Pareto front is empty — falling back to best scalarized score.")
-        return min(complete,
-                   key=lambda t: (t.values[0] * SC.SCORE_COV_NORM
-                                  + t.values[1] / SC.SCORE_TIME_NORM))
-    # values = (cov_loss, mean_time); sort by cov_loss first (lower=higher cov), then time
-    return min(pareto, key=lambda t: (t.values[0], t.values[1]))
+        feasible = [t for t in complete
+                    if t.user_attrs.get("constraint_violation", 0.0) <= 0.0]
+        pool = feasible if feasible else complete
+        log.warning(f"Pareto front empty — fallback (feasible={len(feasible)}/{len(complete)})")
+        return max(pool,
+                   key=lambda t: t.values[0] - t.values[1] / SC.SCORE_TIME_NORM)
+    # values = (coverage, mean_time); sort by coverage first (higher=better), then time
+    return max(pareto, key=lambda t: (t.values[0], -t.values[1]))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -370,10 +388,10 @@ def _select_pareto_winner(study: optuna.Study) -> optuna.trial.FrozenTrial:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class OptunaOptimizer:
-    """Fully joint multivariate TPE optimizer for MechVision pose estimation.
+    """Fully joint NSGA-II optimizer for MechVision pose estimation.
 
     Replaces Phases 2–3–5–6 of the hierarchical coordinate descent with a
-    single joint multi-objective TPE study. Phases 0, 1, and 4 are unchanged.
+    single joint multi-objective NSGA-II study. Phases 0, 1, and 4 are unchanged.
 
     Parameters
     ----------
@@ -480,19 +498,19 @@ class OptunaOptimizer:
     # ─────────────────────────────────────────────────────────────────────
 
     def _create_study_joint(self, name: str, storage_suffix: str = "") -> optuna.Study:
-        sampler = optuna.samplers.TPESampler(
-            multivariate=True,
-            group=True,
-            n_startup_trials=SC.OPTUNA_N_STARTUP_JOINT,
+        sampler = optuna.samplers.NSGAIISampler(
+            population_size=SC.OPTUNA_NSGA_POPULATION_SIZE,
             seed=self._seed,
+            constraints_func=_referredstep_constraint,
         )
         # trial.report/should_prune are not supported in multi-objective mode;
         # pruning is handled explicitly via time guard + coverage floor in _objective_joint.
+        # NSGA-II enforces referredStep ≤ refStep via constraints_func + objective guard.
         storage = None
         if self._storage_path and storage_suffix:
             storage = f"sqlite:///{self._storage_path}{storage_suffix}.db"
         return optuna.create_study(
-            directions     = ["minimize", "minimize"],
+            directions     = ["maximize", "minimize"],
             sampler        = sampler,
             storage        = storage,
             study_name     = name,
@@ -511,12 +529,20 @@ class OptunaOptimizer:
     ) -> Tuple[float, float]:
         """Scene-by-scene evaluation with three-level pruning.
 
-        Returns (coverage_loss, mean_time) for multi-objective optimization.
+        Returns (coverage, mean_time) for multi-objective optimization.
         Pruning uses a scalarized running_score so trial.report() receives a scalar.
         """
         p        = suggest_params_joint(trial, regime, self._pairs_candidates,
                                         self._voxel_bounds)
         coarse_p, fine_p = _split_joint_params(p)
+
+        # Level 0: referredStep feasibility guard.
+        # NSGA-II uses fixed bounds (1–20) for referredStep, so it can suggest
+        # referredStep > refStep. Guard here prevents MechVision blowup (5–10 min/scene).
+        if p["referredStep"] > p["refStep"]:
+            trial.set_user_attr("constraint_violation",
+                                float(p["referredStep"] - p["refStep"]))
+            return (0.0, SC.OPTUNA_TIME_INITIAL_CAP)
 
         ang        = SC.ANG_THRESH_REGIME_GATE
         all_scenes = self.opt._sample_scenes(SC.M_FULL)
@@ -550,14 +576,14 @@ class OptunaOptimizer:
         if final_cov > 0.0:
             self._best_mean_time = min(self._best_mean_time, final_time)
 
-        return (1.0 - final_cov, final_time)
+        return (final_cov, final_time)
 
     # ─────────────────────────────────────────────────────────────────────
     # Main run loop
     # ─────────────────────────────────────────────────────────────────────
 
     def run(self) -> Optional[EvalResult]:
-        """Execute full optimization: Phase 1 → joint TPE study (multi-round) → Phase 4."""
+        """Execute full optimization: Phase 1 → joint NSGA-II study (multi-round) → Phase 4."""
         t0 = time.time()
         log.info(f"\n{'='*60}")
         log.info(f"OptunaOptimizer: part={self.opt.part_name}  "
@@ -594,7 +620,7 @@ class OptunaOptimizer:
 
         # ── Joint study ───────────────────────────────────────────────────
         log.info("=" * 60)
-        log.info("JOINT STUDY — fully joint coarse+fine multivariate TPE (multi-objective)")
+        log.info("JOINT STUDY — fully joint coarse+fine NSGA-II (multi-objective)")
         self._best_mean_time = SC.OPTUNA_TIME_INITIAL_CAP
 
         self._study = self._create_study_joint(
@@ -606,7 +632,7 @@ class OptunaOptimizer:
                 self._pairs_candidates, self._voxel_bounds,
             )
             self._study.enqueue_trial(warm_p)
-            log.info("Enqueued geometry warm-start trial (TPE explores all 16 params jointly)")
+            log.info("Enqueued geometry warm-start trial (feasible seed for NSGA-II population)")
         else:
             log.info(f"Resumed study: {len(self._study.trials)} prior trials")
 
@@ -638,9 +664,10 @@ class OptunaOptimizer:
                 break
 
             winner      = _select_pareto_winner(self._study)
-            round_score = winner.values[0] + winner.values[1]
+            round_score = ((1.0 - winner.values[0]) * SC.SCORE_COV_NORM
+                           + winner.values[1] / SC.SCORE_TIME_NORM)
             log.info(f"  Round {round_idx} best: "
-                     f"cov={1-winner.values[0]:.3f}  "
+                     f"cov={winner.values[0]:.3f}  "
                      f"time={winner.values[1]:.3f}s  "
                      f"score={round_score:.3f}  "
                      f"Pareto front size={len(self._study.best_trials)}")

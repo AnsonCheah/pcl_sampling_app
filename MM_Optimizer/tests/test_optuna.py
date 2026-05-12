@@ -67,7 +67,7 @@ _REGIME_C     = {"coarse_mode": 1.0, "fine_mode": 0.0, "needs_edge": True,  "id"
 
 def _make_study_multi():
     return optuna.create_study(
-        directions=["minimize", "minimize"],
+        directions=["maximize", "minimize"],
         sampler=optuna.samplers.RandomSampler(seed=0),
     )
 
@@ -103,8 +103,10 @@ def test_suggest_params_joint_surface():
     vlo, vhi = SC.OPTUNA_VOTERATIO_BOUNDS
     assert vlo <= p["maxVoteRatio"] <= vhi
 
-    assert p["refStep"] >= p["referredStep"], \
-        f"refStep={p['refStep']} < referredStep={p['referredStep']}"
+    # referredStep now uses fixed bounds (not dynamic upper=refStep).
+    # The constraint referredStep ≤ refStep is enforced by the objective guard, not here.
+    assert lo <= p["referredStep"] <= hi, \
+        f"referredStep={p['referredStep']} out of fixed bounds [{lo},{hi}]"
 
     assert isinstance(p["useDistanceNMS"], bool)
 
@@ -225,20 +227,20 @@ def test_pareto_winner_selection():
     study = _make_study_multi()
     # Inject artificial completed trials with known values
     configs = [
-        (0.05, 1.0),   # 95% cov, 1.0s  ← should win (max cov)
-        (0.05, 0.5),   # 95% cov, 0.5s  ← also 95% but faster: should win
-        (0.10, 0.3),   # 90% cov, 0.3s  ← Pareto non-dom (lower cov, faster)
-        (0.20, 0.2),   # 80% cov, 0.2s
+        (0.95, 1.0),   # 95% cov, 1.0s
+        (0.95, 0.5),   # 95% cov, 0.5s  ← should win (max cov, min time tiebreaker)
+        (0.90, 0.3),   # 90% cov, 0.3s
+        (0.80, 0.2),   # 80% cov, 0.2s
     ]
-    for cov_loss, t in configs:
+    for cov, t in configs:
         study.add_trial(optuna.trial.create_trial(
             params={}, distributions={},
-            values=[cov_loss, t],
+            values=[cov, t],
         ))
 
     winner = _select_pareto_winner(study)
-    # Best coverage is 0.05; among tied (0.05,1.0) and (0.05,0.5), pick min time
-    assert winner.values[0] == 0.05, f"Expected cov_loss=0.05, got {winner.values[0]}"
+    # Best coverage is 0.95; among tied (0.95,1.0) and (0.95,0.5), pick min time
+    assert winner.values[0] == 0.95, f"Expected cov=0.95, got {winner.values[0]}"
     assert winner.values[1] == 0.5,  f"Expected time=0.5 (faster), got {winner.values[1]}"
     log.info("PASS: test_pareto_winner_selection")
 
@@ -255,10 +257,10 @@ def test_pareto_winner_fallback():
     # Add one complete trial
     study.add_trial(optuna.trial.create_trial(
         params={}, distributions={},
-        values=[0.15, 0.8],
+        values=[0.85, 0.8],
     ))
     winner = _select_pareto_winner(study)
-    assert winner.values == [0.15, 0.8]
+    assert winner.values == [0.85, 0.8]
     log.info("PASS: test_pareto_winner_fallback")
 
 
