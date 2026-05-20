@@ -17,6 +17,8 @@ MM_Optimizer/Auto_CADMATCH_Tuner/
 MM_Optimizer/CAD_Match/resource/
 MM_Optimizer/results/
 MM_Optimizer/backup_task_records.json
+*/.msoln
+*.vis
 
 # input output formats
 *.stl
