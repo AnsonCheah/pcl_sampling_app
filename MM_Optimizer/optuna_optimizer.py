@@ -423,6 +423,8 @@ class OptunaOptimizer:
         n_rounds:       Optional[int] = None,
         seed:           int = 42,
         storage_path:   Optional[str] = None,
+        pos_thresh_k:     float = 0.01,
+        adaptive_thresh:  bool  = True,
     ):
         self.opt = Optimizer(
             part_name    = part_name,
@@ -452,6 +454,16 @@ class OptunaOptimizer:
             ws.minVoxelLength_mm * 6.0,
             max(0.5, ws.maxVoxelLength_mm * 0.1),
             ws.maxVoxelLength_mm * 6.0,
+        )
+        # Adaptive study threshold: clip(0.01 × longest_extent, 2mm, 5mm).
+        # Looser than POS_THRESH_TIGHT during the study so NSGA-II gets a
+        # gradient signal on flat/long parts where coarse matching lands
+        # 2–5mm from GT but fine can still converge. Final re-eval always
+        # uses POS_THRESH_TIGHT (2mm).
+        self._pos_thresh_study: float = (
+            float(np.clip(pos_thresh_k * ws.longest_extent_m,
+                          SC.POS_THRESH_TIGHT, SC.POS_THRESH_LOOSE))
+            if adaptive_thresh else SC.POS_THRESH_TIGHT
         )
         self._study: Optional[optuna.Study] = None
 
@@ -551,7 +563,7 @@ class OptunaOptimizer:
 
         for step, scene in enumerate(all_scenes):
             res = self.opt.evaluate_config(
-                coarse_p, fine_p, [scene], SC.POS_THRESH_TIGHT, ang)
+                coarse_p, fine_p, [scene], self._pos_thresh_study, ang)
 
             total_cov  += res.coverage
             total_time += res.mean_time
@@ -589,7 +601,9 @@ class OptunaOptimizer:
         log.info(f"OptunaOptimizer: part={self.opt.part_name}  "
                  f"n_trials_joint={self.n_trials_joint}  n_rounds={self.n_rounds}  "
                  f"seed={self._seed}  M_FULL={SC.M_FULL}  "
-                 f"cache={'ON' if self.opt.cache else 'OFF'}")
+                 f"cache={'ON' if self.opt.cache else 'OFF'}  "
+                 f"pos_thresh_study={self._pos_thresh_study*1e3:.1f}mm  "
+                 f"pos_thresh_final={SC.POS_THRESH_TIGHT*1e3:.1f}mm")
 
         # ── Phase 1: regime gate ──────────────────────────────────────────
         passing = self.opt.phase1_regime_gate()
@@ -770,6 +784,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--storage",        default=None,
                    help="SQLite path prefix (e.g. MM_Optimizer/results/optuna); "
                         "creates {prefix}_{part}_joint.db")
+    p.add_argument("--no_adaptive_thresh", dest="adaptive_thresh", action="store_false",
+                   help="Disable adaptive study threshold; use fixed POS_THRESH_TIGHT=2mm.")
+    p.set_defaults(adaptive_thresh=True)
+    p.add_argument("--pos_thresh_k",   type=float, default=0.01,
+                   help="k for adaptive study threshold: clip(k × longest_OBB_m, 2mm, 5mm). "
+                        "Only used when adaptive_thresh is enabled (default: 0.01).")
     return p
 
 
@@ -795,10 +815,10 @@ def main() -> None:
         SC.M_FULL  = len(scene_groups)
         SC.M_SMALL = max(1, len(scene_groups) // 2)
 
-    model_path = os.path.join(MM_MODEL_ROOT, f"{args.part}_surface",
-                              f"{args.part}_surface.ply")
+    model_path = os.path.join(_ROOT, "output", "reference_pcd", args.part,
+                              f"{args.part}_surface", f"{args.part}_surface.ply")
     if not os.path.exists(model_path):
-        log.error(f"Reference model not found: {model_path}")
+        log.error(f"Reference model not found: {model_path} — re-run the sampling pipeline to generate it.")
         sys.exit(1)
     pcd = load_reference_pcd(model_path)
     ws  = analyze_mesh(pcd)
@@ -834,6 +854,8 @@ def main() -> None:
         n_rounds       = args.n_rounds,
         seed           = args.seed,
         storage_path   = storage_path,
+        pos_thresh_k    = args.pos_thresh_k,
+        adaptive_thresh = args.adaptive_thresh,
     )
 
     try:
@@ -842,7 +864,7 @@ def main() -> None:
             log.error("Optimization did not converge.")
             sys.exit(1)
         if args.export_best:
-            out = opt.export_best(result, prefix="optuna_")
+            out = opt.export_best(result, prefix="NSGAII_")
             log.info(f"Best config exported → {out}")
         log.info("Done.")
     finally:

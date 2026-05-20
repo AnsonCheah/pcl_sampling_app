@@ -1225,10 +1225,10 @@ def main():
         log.info(f"M_FULL auto-set to {SC.M_FULL}, M_SMALL to {SC.M_SMALL}")
 
     # Phase 0 — mesh analysis
-    model_path = os.path.join(MM_MODEL_ROOT, f"{args.part}_surface",
-                              f"{args.part}_surface.ply")
+    model_path = os.path.join(_ROOT, "output", "reference_pcd", args.part,
+                              f"{args.part}_surface", f"{args.part}_surface.ply")
     if not os.path.exists(model_path):
-        log.error(f"Reference model not found: {model_path}")
+        log.error(f"Reference model not found: {model_path} — re-run the sampling pipeline to generate it.")
         sys.exit(1)
     pcd = load_reference_pcd(model_path)
     ws  = analyze_mesh(pcd)

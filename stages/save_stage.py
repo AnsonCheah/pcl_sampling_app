@@ -1,4 +1,5 @@
 import json
+import open3d as o3d
 import open3d.visualization.gui as gui
 from enums import Stage
 from pathlib import Path
@@ -102,6 +103,11 @@ class SaveStage(BaseStage):
 
                 surface_pcd = self.app.down_pcd_surface if self.app.down_pcd_surface is not None else self.app.down_pcd
                 self._save_cloud_bundle(surface_pcd, base_path / f"{stem}_surface", stem, "surface")
+
+                if self.app.target_mesh is not None:
+                    stl_path = base_path / f"{stem}.stl"
+                    o3d.io.write_triangle_mesh(str(stl_path), self.app.target_mesh)
+                    print(f"[INFO] Saved mesh to {stl_path}")
 
                 if self.app.down_pcd_edge is not None:
                     self._save_cloud_bundle(self.app.down_pcd_edge, base_path / f"{stem}_edge", stem, "edge")

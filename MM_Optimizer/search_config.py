@@ -80,7 +80,7 @@ PHASE2A_DISTQ_VALUES   = [0.5, 0.75, 1.0, 1.5, 2.0, 3.0]
 PHASE2B_PARAMS = {
     # Order is intentional: follows MechVision coarse matching pipeline
     "referredStep":                 {"candidates": [3, 2, 1],                   "edge_only": False},  # scene sub-sampling — coarser/faster first
-    "angleQuantification":          {"candidates": [180, 135, 90, 60, 45, 30],  "edge_only": False},  # Hough angle bins — coarser/faster first
+    "angleQuantification":          {"candidates": [180, 120, 90, 60],          "edge_only": False},  # Hough angle bins — coarser/faster first
     "maxNumOfPointPairsPerFeature": {"candidates": None,                        "edge_only": False},  # voting density, warm-relative
     "maxVoteRatio":                 {"candidates": [0.5, 0.6, 0.7, 0.8, 0.9],   "edge_only": False},  # Hough threshold — after voting stable
     "useDistanceNMS":               {"candidates": [True, False],               "edge_only": False},  # NMS candidate filter
@@ -235,3 +235,6 @@ OPTUNA_DEVCAP_BOUNDS     = (int(min(PHASE3_PARAMS["deviationCorrectionCapacity"]
 OPTUNA_OPAPP_CHOICES     = PHASE3_PARAMS["operationApproach"]
 OPTUNA_DEVCAP_CHOICES    = PHASE3_PARAMS["deviationCorrectionCapacity"]
 OPTUNA_SCORELV_CHOICES   = PHASE3_PARAMS["scoreLevel"]
+
+# 360.0 = disabled (MechVision convention); included so NSGA-II can choose "no rotation"
+OPTUNA_ANGLE_STEP_SYM_CHOICES = [30.0, 45.0, 60.0, 90.0, 120.0, 180.0, 360.0]

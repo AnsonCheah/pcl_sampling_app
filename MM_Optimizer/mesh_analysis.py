@@ -39,9 +39,10 @@ class WarmStart:
     maxVoxelLength_mm: float = 15.0
 
     # Geometry diagnostics (logged but not directly used as params)
-    diameter_m:      float = 0.0
-    surface_area_m2: float = 0.0
-    flatness_ratio:  float = 1.0
+    diameter_m:       float = 0.0
+    longest_extent_m: float = 0.0   # largest OBB axis (m); used for adaptive pos threshold
+    surface_area_m2:  float = 0.0
+    flatness_ratio:   float = 1.0
     normal_concentration: float = 0.0
 
     # Regime preference
@@ -89,16 +90,13 @@ def analyze_mesh(ref_pcd: o3d.geometry.PointCloud,
     # ------------------------------------------------------------------ #
     #  Regime hint: surface vs edge                                        #
     # ------------------------------------------------------------------ #
-    pts     = np.asarray(ref_pcd.points)
     normals = np.asarray(ref_pcd.normals) if ref_pcd.has_normals() else None
 
-    bb = np.sort(ref_pcd.get_axis_aligned_bounding_box().get_extent())
-    ws.flatness_ratio = float(bb[2] / bb[0]) if bb[0] > 1e-9 else 1.0
+    obb_ext = np.sort(ref_pcd.get_minimal_oriented_bounding_box().extent)
+    ws.longest_extent_m = float(obb_ext[2])
+    ws.flatness_ratio   = float(obb_ext[2] / obb_ext[0]) if obb_ext[0] > 1e-9 else 1.0
 
     if normals is not None and len(normals) > 0:
-        # Dominant normal direction via PCA on normals
-        cov_n = np.cov(normals.T)
-        eigvals = np.linalg.eigvalsh(cov_n)
         dominant_n = normals[np.argmax(np.abs(normals @ normals[0]))]
         dominant_n = dominant_n / (np.linalg.norm(dominant_n) + 1e-9)
         ws.normal_concentration = float(
@@ -110,38 +108,49 @@ def analyze_mesh(ref_pcd: o3d.geometry.PointCloud,
     ws.prefer_edge = (ws.normal_concentration > 0.50) or (ws.flatness_ratio > 5.0)
 
     # ------------------------------------------------------------------ #
-    #  Symmetry hint via eigenvalue analysis of point cloud               #
+    #  Symmetry hint — 180° rotation overlap (2-fold)                    #
     # ------------------------------------------------------------------ #
-    if len(pts) >= 10:
-        cov_pts = np.cov(pts.T)
-        eigvals_pts = np.sort(np.linalg.eigvalsh(cov_pts))   # ascending
-        # Rotationally symmetric around one axis: two eigenvalues are nearly equal
-        if eigvals_pts[0] > 1e-12 and eigvals_pts[2] > 1e-12:
-            ratio_lo_mid = eigvals_pts[0] / eigvals_pts[1]
-            ratio_mid_hi = eigvals_pts[1] / eigvals_pts[2]
-            # Axial symmetry: lo ≈ mid (two small equal eigen → symmetric around long axis)
-            if ratio_lo_mid > 0.80:
-                ws.sym_order = 2        # at least 2-fold; can be higher
-                ws.sym_axis  = _dominant_axis(pts)
-            # Flat symmetry: mid ≈ hi (two large equal eigen → flat object)
-            elif ratio_mid_hi > 0.85:
-                ws.sym_order = 2
-                ws.sym_axis  = _minor_axis(eigvals_pts, cov_pts)
+    sym_axis_label = _check_rotation_symmetry(ref_pcd)
+    if sym_axis_label is not None:
+        ws.sym_order = 2
+        ws.sym_axis  = sym_axis_label
 
     return ws
 
 
-def _dominant_axis(pts: np.ndarray) -> str:
-    """Return 'x', 'y', or 'z' for the axis with greatest spread."""
-    spread = pts.max(axis=0) - pts.min(axis=0)
-    return ['x', 'y', 'z'][int(np.argmax(spread))]
+def _chamfer_distance(a: np.ndarray, b: np.ndarray) -> float:
+    """Mean nearest-neighbour distance (bidirectional) using KD-tree."""
+    from scipy.spatial import KDTree
+    d_ab = KDTree(b).query(a)[0].mean()
+    d_ba = KDTree(a).query(b)[0].mean()
+    return float((d_ab + d_ba) / 2)
 
 
-def _minor_axis(eigvals: np.ndarray, cov: np.ndarray) -> str:
-    """Return the axis label for the smallest eigenvector of cov."""
-    _, eigvecs = np.linalg.eigh(cov)
-    minor_vec = eigvecs[:, 0]  # smallest eigenvalue column
-    return ['x', 'y', 'z'][int(np.argmax(np.abs(minor_vec)))]
+def _check_rotation_symmetry(pcd: "o3d.geometry.PointCloud",
+                              threshold_m: float = 0.005) -> Optional[str]:
+    """Return OBB axis label ('x','y','z') if 180° 2-fold symmetry detected, else None.
+
+    Uses Rodrigues 180° rotation on each OBB principal axis; low Chamfer
+    distance to the original indicates the part maps onto itself under that
+    rotation. threshold_m=5mm is conservative — parts with small asymmetric
+    features (tabs, holes on one side) will exceed it.
+    """
+    pts = np.asarray(pcd.points)
+    if len(pts) < 10:
+        return None
+    centroid = pts.mean(axis=0)
+    centered = pts - centroid
+
+    obb = pcd.get_minimal_oriented_bounding_box()
+    axes = obb.R.T  # rows are principal axes
+
+    for i, axis in enumerate(axes):
+        # 180° Rodrigues: R*v = 2*(v·axis)*axis - v
+        rotated = 2 * (centered @ axis)[:, None] * axis - centered
+        d = _chamfer_distance(centered, rotated)
+        if d < threshold_m:
+            return ['x', 'y', 'z'][i]
+    return None
 
 
 def load_reference_pcd(model_path: str) -> o3d.geometry.PointCloud:
@@ -156,18 +165,25 @@ def load_reference_pcd(model_path: str) -> o3d.geometry.PointCloud:
 
 
 if __name__ == "__main__":
+    import argparse
     import logging
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    model_path = os.path.join(
-        _ROOT, "MM_Optimizer", "CAD_Match", "resource", "3d_matching",
-        "25333MB000_surface", "25333MB000_surface.ply"
-    )
-    pcd = load_reference_pcd(model_path)
+    parser = argparse.ArgumentParser(description="Print WarmStart for a reference PLY model.")
+    parser.add_argument("ply_path", nargs="?",
+                        default=os.path.join(
+                            _ROOT, "MM_Optimizer", "CAD_Match", "resource", "3d_matching",
+                            "25333MB000_surface", "25333MB000_surface.ply"),
+                        help="Path to the surface PLY model (default: 25333MB000_surface)")
+    args = parser.parse_args()
+
+    pcd = load_reference_pcd(args.ply_path)
     ws  = analyze_mesh(pcd)
 
-    print("\n--- WarmStart for 25333MB000 ---")
+    part = os.path.splitext(os.path.basename(args.ply_path))[0]
+    print(f"\n--- WarmStart for {part} ---")
     print(f"  diameter         = {ws.diameter_m*1e3:.1f} mm")
+    print(f"  longest_extent   = {ws.longest_extent_m*1e3:.1f} mm")
     print(f"  surface_area     = {ws.surface_area_m2*1e6:.0f} mm²")
     print(f"  flatness_ratio   = {ws.flatness_ratio:.2f}")
     print(f"  normal_conc      = {ws.normal_concentration:.2f}")
