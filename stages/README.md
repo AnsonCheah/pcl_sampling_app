@@ -1,0 +1,75 @@
+# stages
+
+GUI panels and pipeline orchestration. Calls into `sensor/`, `physics/`, and `geometry/` — implements none of their domain logic.
+
+## Pipeline
+
+Six stages run in sequence. All share `app` as their only communication channel.
+
+| Stage enum | Class | Heavy work |
+|------------|-------|------------|
+| `IMPORT_MESH` | `ImportMeshStage` | STL loading + convex decomposition (daemon thread) |
+| `RAYCAST` | `RaycastStage` | Fibonacci-sphere multi-view raycasting |
+| `CROP` | `CropStage` | Box-select UI, mask-based point removal |
+| `DOWNSAMPLE` | `DownsampleStage` | Uniform or adaptive voxel downsampling |
+| `SAVE` | `SaveStage` | PLY export with geocenter + GT pose comments |
+| `SYNTHETIC` | `SyntheticStage` | MuJoCo bin sim + structured-light noise chain |
+
+## `BaseStage`
+
+All stages extend `BaseStage`:
+
+```python
+class BaseStage(ABC):
+    def __init__(self, app):
+        self.app = app            # central state object
+        self.widgets = []         # UI controls owned by this stage
+        self.panel = ...          # built by build_panel()
+        self.worker_thread = None
+
+    @abstractmethod
+    def build_panel(self): ...    # return None in headless mode
+    @abstractmethod
+    def _refresh_ui(self): ...    # called on scene change
+    @abstractmethod
+    def worker(self): ...         # heavy computation (runs in background thread)
+    @abstractmethod
+    def reset(self): ...          # clear state, revert to prior stage
+```
+
+Running a worker: `stage._run_worker()` spawns `worker()` in a background thread.
+
+## `app` state attributes
+
+Key attributes written and read between stages:
+
+| Attribute | Written by | Read by |
+|-----------|------------|---------|
+| `app.target_mesh` | `ImportMeshStage` | `RaycastStage`, `SyntheticStage` |
+| `app.convex_meshes` | `ImportMeshStage` | `SyntheticStage` |
+| `app.raw_pcd` | `RaycastStage` | `CropStage` |
+| `app.down_pcd` | `DownsampleStage` | `SaveStage`, `SyntheticStage` |
+| `app.synthetic_scenes` | `SyntheticStage` | `SaveStage` |
+
+Stages never call each other's methods directly. All handoffs go through `app`.
+
+## Headless mode
+
+Every stage checks `self.app.headless` at the top of `build_panel()` and `_refresh_ui()` and returns early. `worker()` runs identically headless or GUI.
+
+```python
+app = MeshSamplingApp(headless=True, mesh_path="part.STL")
+app.stages[Stage.IMPORT_MESH]._run_worker()
+app.stages[Stage.SYNTHETIC].num_targets = 6
+app.stages[Stage.SYNTHETIC]._run_worker()
+```
+
+## Threading rules
+
+- **Never touch Open3D GUI from `worker()`**: O3D GUI is not thread-safe. Route all GUI mutations through `self.app.main_thread(lambda: ...)`.
+- **`SyntheticStage` must join `decompose_thread`** before constructing `MujocoBinScene`. The convex decomposition from `ImportMeshStage` runs in a daemon thread and may still be running when `SyntheticStage` starts.
+
+## Constraints
+
+- **Stages orchestrate, never implement**: domain logic (sensor physics, MuJoCo setup, geometry math) belongs in `sensor/`, `physics/`, `geometry/`. If domain logic appears in a stage file, it is in the wrong place.
+- **`SyntheticStage` is the integration point**: it is the only stage that calls both `physics/` and `sensor/`. The noise call sequence there is intentional — do not reorder.
