@@ -22,6 +22,7 @@ class RaycastStage(BaseStage):
         self.res_width = 1920
         self.res_height = 1200
         self.point_counts = None
+        self.point_count_tolerance = 0.5
 
     def build_panel(self):
         if self.app.headless:
@@ -111,8 +112,10 @@ class RaycastStage(BaseStage):
             if not self.app.headless:
                 self.app.update_progress((view_index + 1) / self.num_views)
         self.app.point_count_mean = self.point_count_mean = int(np.mean(self.point_counts))
-        self.app.point_count_range = self.point_count_range = (int(min(self.point_counts * 0.8)), int(max(self.point_counts * 1.2)))
-
+        print(f"[RAYCAST] Point count per view: mean={self.point_count_mean}, min={np.min(self.point_counts)}, max={np.max(self.point_counts)}")
+        self.app.point_count_range = self.point_count_range = (int(np.min(self.point_counts * (1-self.point_count_tolerance))), 
+                                                               int(np.max(self.point_counts * (1+self.point_count_tolerance))))
+        print(f"[RAYCAST] Point count range with tolerance {self.point_count_tolerance*100}%: {self.point_count_range}")
         if not all_points:
             logging.warning(f"No points generated from mesh")
             return

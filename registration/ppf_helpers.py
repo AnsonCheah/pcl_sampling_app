@@ -33,7 +33,6 @@ DEFAULTS = dict(
 def compute_model_diameter(pcd: o3d.geometry.PointCloud) -> float:
     """Approximate diameter as the longest axis of the oriented bounding box."""
     obb  = pcd.get_minimal_oriented_bounding_box()
-    print(float(np.max(obb.extent)))
     return float(np.max(obb.extent))
 
 

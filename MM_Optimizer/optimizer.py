@@ -72,12 +72,15 @@ OPTIMIZER_UTILS_PATH = os.path.join(_DIR, "optimizer_utils.py")
 
 @dataclass
 class EvalResult:
-    score:      float           # lower = better  (1-cov)*1e6 + mean_time
-    coverage:   float           # mean fraction of instances detected across M scenes
-    mean_time:  float           # mean coarse+fine cycle time (s)
-    per_scene:  List[dict] = field(default_factory=list)  # per-scene diagnostics
-    n_scenes:   int = 0
-    config:     dict = field(default_factory=dict)
+    score:           float           # lower=better  mean_time/SCORE_TIME_NORM + (1-cov)*SCORE_COV_NORM
+    coverage:        float           # mean fraction of instances detected across M scenes
+    mean_time:       float           # mean coarse+fine cycle time (s)
+    per_scene:       List[dict] = field(default_factory=list)  # per-scene diagnostics
+    n_scenes:        int   = 0
+    config:          dict  = field(default_factory=dict)
+    score_quality:   float = 0.0    # 1 - score/SCORE_WORST_CASE ∈ [0,1]; higher=better
+    score_time_term: float = 0.0    # mean_time / SCORE_TIME_NORM
+    score_cov_term:  float = 0.0    # (1 - coverage) * SCORE_COV_NORM
 
     def soft_score(self) -> float:
         """Mean position error of passing instances — tiebreaker in Phase 5."""
@@ -301,6 +304,10 @@ class Optimizer:
                 coarse.angleThreshold = (str(v), "double", "")
             elif k == "outputNum":
                 coarse.outputNum = (str(v), "double", "")
+            elif k == "minVoxelLength":
+                coarse.minVoxelLength = (str(v), "double", "m")
+            elif k == "maxVoxelLength":
+                coarse.maxVoxelLength = (str(v), "double", "m")
 
         fine = FineMatchingLite(
             name="Fine_Match_Synthetics",
@@ -434,13 +441,23 @@ class Optimizer:
             per_scene.append(s)
 
         coverage  = float(np.mean([s["instance_coverage"] for s in per_scene]))
-        mean_time = np.mean([s["coarse_time_s"] + s["fine_time_s"]
-                             for s in per_scene])
-        score     = (1.0 - coverage) * 1e6 + float(mean_time)
+        mean_time = float(np.mean([s["coarse_time_s"] + s["fine_time_s"]
+                                   for s in per_scene]))
+        _t    = mean_time / SC.SCORE_TIME_NORM
+        _c    = (1.0 - coverage) * SC.SCORE_COV_NORM
+        score = _t + _c
 
-        er = EvalResult(score=score, coverage=coverage, mean_time=float(mean_time),
-                        per_scene=per_scene, n_scenes=len(per_scene),
-                        config=combined)
+        er = EvalResult(
+            score           = score,
+            coverage        = coverage,
+            mean_time       = mean_time,
+            per_scene       = per_scene,
+            n_scenes        = len(per_scene),
+            config          = combined,
+            score_quality   = 1.0 - score / SC.SCORE_WORST_CASE,
+            score_time_term = _t,
+            score_cov_term  = _c,
+        )
 
         if use_cache:
             self.cache.put(key, asdict(er))
@@ -486,9 +503,15 @@ class Optimizer:
                           f"cov={r.coverage:.2f} score={r.score:.1f}")
                 pass1_results.append((r, i))
 
-            # Top-K survivors by score
+            # Top-K survivors by score; early-exit if top-1 already meets target
             pass1_results.sort(key=lambda x: x[0].score)
-            survivors = pass1_results[:SC.K_SURVIVORS]
+            if pass1_results[0][0].coverage >= SC.TARGET_COVERAGE:
+                survivors = pass1_results[:1]
+                log.info(f"[{label}] early-exit: top-1 cov="
+                         f"{pass1_results[0][0].coverage:.2f} >= TARGET"
+                         f" — skipping costlier candidates")
+            else:
+                survivors = pass1_results[:SC.K_SURVIVORS]
             log.info(f"[{label}] two-pass: {n_candidates} → {len(survivors)} survivors")
             coarse_variants_p2 = [coarse_variants[i] for _, i in survivors]
             fine_variants_p2   = [fine_variants[i]   for _, i in survivors]
@@ -537,7 +560,7 @@ class Optimizer:
     def _default_coarse(self) -> dict:
         return {
             "registrationMode":              0.0,
-            "refStep":                       self.ws.refStep,
+            "refStep":                       SC.REFSTEP_BOUNDS[1] // 2,
             "distQuantification":            self.ws.distQuantification,
             "angleQuantification":           self.ws.angleQuantification,
             "maxNumOfPointPairsPerFeature":  self.ws.maxNumOfPointPairsPerFeature,
@@ -657,15 +680,33 @@ class Optimizer:
                 return best_result
 
             # ---- Phase 2b: Remaining params ----
-            for param_name, candidates, is_edge_only in SC.PHASE2B_PARAMS:
+            for param_name, param in SC.PHASE2B_PARAMS.items():
+                candidates   = param["candidates"]
+                is_edge_only = param["edge_only"]
                 if is_edge_only and regime["coarse_mode"] != 1.0:
                     continue
+
+                # refStep >= referredStep: filter candidates to those <= locked refStep
+                if param_name == "referredStep":
+                    locked_refstep = coarse.get("refStep", float("inf"))
+                    candidates = [c for c in candidates if c <= locked_refstep]
+                    if not candidates:
+                        continue
 
                 # Expand runtime-computed candidates
                 if candidates is None and param_name == "maxNumOfPointPairsPerFeature":
                     warm_pairs = self.ws.maxNumOfPointPairsPerFeature
                     candidates = [max(1, int(warm_pairs * s))
                                   for s in SC.PHASE2B_PAIRS_SCALES]
+
+                # Joint pair sweep — min/max must be set together to keep min < max
+                if param_name == "voxelLengthRange":
+                    best_param = self._sweep_voxel_range(coarse, fine, ang_thresh=ang)
+                    if best_param.score < best_result.score:
+                        best_result = best_param
+                        coarse = copy.deepcopy(best_param.config["coarse"])
+                        improved = True
+                    continue
 
                 # Boolean sweep: skip two-pass (only 2 options)
                 if len(candidates) <= 2:
@@ -697,10 +738,8 @@ class Optimizer:
         distQ is MechVision's unitless factor — swept independently of refStep.
         Grid size = len(REFSTEP_SCALES) × len(DISTQ_VALUES).
         """
-        warm_step = self.ws.refStep
         coarse_variants, fine_variants = [], []
-        for scale in SC.PHASE2A_REFSTEP_SCALES:
-            ref = max(1, int(warm_step * scale))
+        for ref in SC.PHASE2A_REFSTEP_VALUES:
             for distq in SC.PHASE2A_DISTQ_VALUES:
                 cp   = copy.deepcopy(coarse)
                 cp["refStep"]            = ref
@@ -715,6 +754,24 @@ class Optimizer:
                  f"distQ={best.config['coarse']['distQuantification']:.2f}  "
                  f"cov={best.coverage:.2f}")
         return best
+
+    def _sweep_voxel_range(self, coarse, fine,
+                           ang_thresh=SC.ANG_THRESH_TIGHT) -> EvalResult:
+        """Sweep voxelLengthRange as geometry-derived (min, max) pairs.
+
+        Uses PHASE2B_VOXEL_SCALES × warm voxel lengths, preserving the
+        1:4 min:max ratio at every scale so min < max is always guaranteed.
+        """
+        coarse_variants, fine_variants = [], []
+        for scale in SC.PHASE2B_VOXEL_SCALES:
+            cp = copy.deepcopy(coarse)
+            cp["minVoxelLength"] = max(0.1, round(self.ws.minVoxelLength_mm * scale, 2))
+            cp["maxVoxelLength"] = max(0.2, round(self.ws.maxVoxelLength_mm * scale, 2))
+            coarse_variants.append(cp)
+            fine_variants.append(copy.deepcopy(fine))
+        return self.evaluate_phase_sweep(coarse_variants, fine_variants,
+                                         ang_thresh=ang_thresh,
+                                         label="2b-voxelLengthRange")
 
     def _sweep_param(self, param_name, candidates, coarse, fine,
                      is_coarse=True, label="",
@@ -782,7 +839,7 @@ class Optimizer:
                                         SC.POS_THRESH_TIGHT, ang)
         log.info(f"  Phase 3 baseline: cov={best_res.coverage:.2f}")
 
-        for param_name, candidates in SC.PHASE3_PARAMS:
+        for param_name, candidates in SC.PHASE3_PARAMS.items():
             if param_name == "operationApproach":
                 candidates = approach_candidates
 
@@ -877,9 +934,9 @@ class Optimizer:
         log.info("PHASE 5 — Joint Refinement")
 
         # Build candidate grid over Phase 5 params
-        vote_ratios   = SC.PHASE5_PARAMS[0][1]   # maxVoteRatio
-        output_nums   = SC.PHASE5_PARAMS[1][1]   # outputNum
-        referred_stps = SC.PHASE5_PARAMS[2][1]   # referredStep
+        vote_ratios   = SC.PHASE5_PARAMS["maxVoteRatio"]
+        output_nums   = SC.PHASE5_PARAMS["outputNum"]
+        referred_stps = SC.PHASE5_PARAMS["referredStep"]
 
         coarse_v, fine_v = [], []
         for vr in vote_ratios:
@@ -933,7 +990,7 @@ class Optimizer:
             fp = copy.deepcopy(seed_result.config["fine"])
 
             # -- refStep  (distQuantification follows via locked ratio) --
-            best_ref  = cp.get("refStep", self.ws.refStep)
+            best_ref  = cp.get("refStep", SC.REFSTEP_BOUNDS[1] // 2)
             best_dist_q = cp.get("distQuantification", self.ws.distQuantification)
             ratio = best_dist_q / best_ref if best_ref > 0 else 1.0
             ref_candidates = list(range(max(1, best_ref - SC.PHASE6_REFSTEP_DELTA),
@@ -1003,8 +1060,7 @@ class Optimizer:
                  f"M={len(self.scene_groups)} scenes  N={n_per} inst/scene  "
                  f"cache={'ON' if self.cache else 'OFF'}  "
                  f"two_pass={'ON' if self.use_two_pass else 'OFF'}")
-        log.info(f"Warm start: refStep={self.ws.refStep}  "
-                 f"distQ={self.ws.distQuantification:.1f}  "
+        log.info(f"Warm start: distQ={self.ws.distQuantification:.1f}  "
                  f"prefer_edge={self.ws.prefer_edge}")
 
         # ── Phase 1 ──────────────────────────────────────────────────────
@@ -1072,9 +1128,9 @@ class Optimizer:
     # Export
     # ─────────────────────────────────────────────────────────────────────
 
-    def export_best(self, result: EvalResult) -> str:
+    def export_best(self, result: EvalResult, prefix:str="", suffix:str="") -> str:
         """Write best config to YAML-style JSON for production use."""
-        out_path = os.path.join(RESULTS_DIR, f"best_config_{self.part_name}.json")
+        out_path = os.path.join(RESULTS_DIR, f"{prefix}best_config_{self.part_name}{suffix}.json")
         payload  = {
             "part_name":  self.part_name,
             "coverage":   result.coverage,
@@ -1131,7 +1187,7 @@ def _build_arg_parser():
     p.add_argument("--dry_run",     action="store_true", help="No MechVision calls")
     p.add_argument("--no_cache",    action="store_true", help="Disable EvalCache")
     p.add_argument("--no_two_pass", action="store_true", help="Disable two-pass")
-    p.add_argument("--export_best", action="store_true", help="Write best config JSON")
+    p.add_argument("--export_best", default=True, action="store_true", help="Write best config JSON")
     p.add_argument("--seed",        type=int, default=42, help="Random seed")
     return p
 
@@ -1169,15 +1225,14 @@ def main():
         log.info(f"M_FULL auto-set to {SC.M_FULL}, M_SMALL to {SC.M_SMALL}")
 
     # Phase 0 — mesh analysis
-    model_path = os.path.join(MM_MODEL_ROOT, f"{args.part}_surface",
-                              f"{args.part}_surface.ply")
+    model_path = os.path.join(_ROOT, "output", "reference_pcd", args.part,
+                              f"{args.part}_surface", f"{args.part}_surface.ply")
     if not os.path.exists(model_path):
-        log.error(f"Reference model not found: {model_path}")
+        log.error(f"Reference model not found: {model_path} — re-run the sampling pipeline to generate it.")
         sys.exit(1)
     pcd = load_reference_pcd(model_path)
     ws  = analyze_mesh(pcd)
-    log.info(f"Warm start: D={ws.diameter_m*1e3:.1f}mm  refStep={ws.refStep}  "
-             f"prefer_edge={ws.prefer_edge}")
+    log.info(f"Warm start: D={ws.diameter_m*1e3:.1f}mm  prefer_edge={ws.prefer_edge}")
 
     if args.dry_run:
         log.info("DRY RUN — no MechVision calls")
@@ -1210,7 +1265,7 @@ def main():
     try:
         result = opt.run()
         if result and args.export_best:
-            opt.export_best(result)
+            opt.export_best(result, prefix="CD_")
     finally:
         opt.cleanup()
         if client:

@@ -42,6 +42,7 @@ from scipy.ndimage import (
     binary_erosion,
     gaussian_filter,
     label as connected_components,
+    uniform_filter,
 )
 import time
 import sys
@@ -372,26 +373,24 @@ def _local_depth_gap(
 ) -> np.ndarray:
     """
     Estimate the depth gap between objects i and j at each (row, col) position
-    in the shared boundary zone. Uses a 5×5 window median of each object's
-    depth to robustly estimate local depth for potentially-background pixels.
+    in the shared boundary zone.
+
+    Uses a 5×5 window mean (via uniform_filter) of each object's depth to
+    estimate local depth.  Mean vs. median: within a smooth depth surface the
+    5×5 spread is negligible, so the approximation is valid and avoids
+    per-pixel Python loops.
     """
-    H, W  = depth_img.shape
-    gap   = np.zeros(len(rows), dtype=np.float32)
-
-    for k, (r, c) in enumerate(zip(rows, cols)):
-        r0, r1 = max(0, r-2), min(H, r+3)
-        c0, c1 = max(0, c-2), min(W, c+3)
-        patch_d = depth_img[r0:r1, c0:c1]
-        patch_i = mask_i[r0:r1, c0:c1]
-        patch_j = mask_j[r0:r1, c0:c1]
-
-        zi = patch_d[patch_i & np.isfinite(patch_d)]
-        zj = patch_d[patch_j & np.isfinite(patch_d)]
-
-        if len(zi) and len(zj):
-            gap[k] = float(np.median(zi)) - float(np.median(zj))
-
-    return gap
+    d = np.where(np.isfinite(depth_img), depth_img, 0.0)
+    wi = mask_i.astype(np.float64)
+    wj = mask_j.astype(np.float64)
+    # Weighted sums over 5×5 neighbourhood
+    sum_di = uniform_filter(d * wi, size=5, mode="constant")
+    cnt_i  = uniform_filter(wi,     size=5, mode="constant")
+    sum_dj = uniform_filter(d * wj, size=5, mode="constant")
+    cnt_j  = uniform_filter(wj,     size=5, mode="constant")
+    mean_i = np.where(cnt_i > 1e-6, sum_di / (cnt_i + 1e-12), 0.0)
+    mean_j = np.where(cnt_j > 1e-6, sum_dj / (cnt_j + 1e-12), 0.0)
+    return (mean_i[rows, cols] - mean_j[rows, cols]).astype(np.float32)
 
 
 def _resolve_conflicts(masks: dict[int, np.ndarray]) -> dict[int, np.ndarray]:
@@ -440,6 +439,7 @@ def build_perturbed_masks(
     apply_confusion:     bool  = True,
     apply_occlusion_loss: bool = True,
     apply_boundary_noise: bool = True,
+    resolve_conflicts:   bool  = False,
     seed:                int   = 0,
 ) -> tuple[dict[int, np.ndarray], np.ndarray]:
     """
@@ -463,11 +463,17 @@ def build_perturbed_masks(
     boundary_noise_px      : spatial correlation length of boundary threshold noise
                              (pixels). Matches network receptive field. Typical: 4-12 px.
     apply_*                : toggle each error model independently.
+    resolve_conflicts      : if True, run _resolve_conflicts() so every pixel
+                             belongs to at most one instance (single-label output).
+                             Default False — masks may overlap, matching the
+                             per-instance binary-mask output of a real network.
     seed                   : RNG seed for reproducibility.
 
     Returns
     -------
     masks   : {geom_id: (H, W) bool} — perturbed instance masks in image space.
+              When resolve_conflicts=False (default), masks may overlap at
+              shared boundary zones.
     geom_img: (H, W) int32 — canonical geom_id image (before perturbation).
     """
     rng      = np.random.default_rng(seed)
@@ -511,8 +517,10 @@ def build_perturbed_masks(
             for g, m in masks.items()
         }
 
-    # Resolve conflicts from overlapping masks, then drop empty masks
-    masks = _resolve_conflicts(masks)
+    # Optionally resolve conflicts (single-label); default keeps overlaps so that
+    # each instance mask is independent — matching real segmentation network output.
+    if resolve_conflicts:
+        masks = _resolve_conflicts(masks)
     masks = {g: m for g, m in masks.items() if m.any()}
 
     return masks, geom_img
@@ -524,12 +532,17 @@ def segment_point_cloud(
     pixel_idx: np.ndarray,
     verbose: bool = False,
     **kwargs,
-) -> np.ndarray:
+) -> dict[int, np.ndarray]:
     """
-    Assign instance labels to a point cloud using perturbed 2D masks.
+    Assign per-instance boolean masks to a point cloud using perturbed 2D masks.
 
     This is the main entry point. It calls build_perturbed_masks() and
-    back-projects the resulting label map to 3D via pixel_idx.
+    back-projects each per-instance mask to 3D via pixel_idx.
+
+    A real 2D segmentation network outputs one independent binary mask per
+    instance — masks CAN overlap at shared boundary pixels (a pixel predicted
+    as belonging to two adjacent instances appears in both masks). This function
+    replicates that behaviour by default (resolve_conflicts=False in kwargs).
 
     Parameters
     ----------
@@ -538,42 +551,46 @@ def segment_point_cloud(
     pixel_idx : (N,) flat pixel index for each point.
                   For canonical points: render["pixel_idx"][keep_mask]
                   For injected points (flying pixels, outliers): use -1.
-                  Injected points with pixel_idx == -1 are assigned label -1.
+                  Injected points (pixel_idx == -1) are False in all masks.
     **kwargs  : forwarded to build_perturbed_masks()
-                  (erosion_px, dilation_px, confusion_depth_sigma, etc.)
+                  (erosion_px, dilation_px, confusion_depth_sigma,
+                   resolve_conflicts, etc.)
 
     Returns
     -------
-    labels : (N,) int32
-               ≥ 0  : geom_id / instance label
-                -1  : unassigned (background, masked out, or injected point)
+    instance_masks : dict[int, np.ndarray]
+        {geom_id: (N,) bool} — one boolean mask per instance.
+        A point may be True in multiple masks (overlap at boundaries).
+        Points with pixel_idx == -1 are False in every mask.
 
     Notes
     -----
-    The returned labels use the original geom_ids from the render dict.
-    If you need consecutive 0-based instance indices, remap:
-        uid = {g: i for i, g in enumerate(sorted(set(labels[labels>=0])))}
-        labels = np.array([uid.get(l, -1) for l in labels])
+    To extract points for a single instance:
+        inst_pts = points[instance_masks[inst_id]]
+
+    To get the set of active instance ids:
+        active_ids = list(instance_masks.keys())
     """
     start = time.time()
     masks, _ = build_perturbed_masks(render, **kwargs)
 
-    H, W  = render["res"]
-    label_img = np.full(H * W, -1, dtype=np.int32)
-    for g, m in masks.items():
-        label_img[m.ravel()] = g
+    N     = len(points)
+    pidx  = np.asarray(pixel_idx)
+    valid = pidx >= 0
 
-    N      = len(points)
-    labels = np.full(N, -1, dtype=np.int32)
-    valid  = pixel_idx >= 0
-    labels[valid] = label_img[pixel_idx[valid]]
+    instance_masks: dict[int, np.ndarray] = {}
+    for g, m in masks.items():
+        label_flat = m.ravel()
+        arr        = np.zeros(N, dtype=bool)
+        arr[valid] = label_flat[pidx[valid]]
+        instance_masks[g] = arr
 
     if verbose: rp(f"{sys._getframe().f_code.co_name} took {np.round(time.time() - start, 6)}s")
-    return labels
+    return instance_masks
 
 
 def segmentation_stats(
-    labels_perturbed: np.ndarray,
+    labels_perturbed: "dict[int, np.ndarray] | np.ndarray",
     labels_canonical: np.ndarray,
 ) -> dict:
     """
@@ -581,6 +598,15 @@ def segmentation_stats(
     to canonical geom_id labels.
 
     Useful for calibrating parameters against a target sensor/network pair.
+
+    Parameters
+    ----------
+    labels_perturbed : dict[int, (N,) bool] or (N,) int32
+        Perturbed segmentation.  Dict format ``{geom_id: bool_mask}`` as
+        returned by ``segment_point_cloud()``.  Int32 flat-label array is
+        accepted for backward compatibility.
+    labels_canonical : (N,) int32
+        Canonical geom_id labels (ground truth).
 
     Returns
     -------
@@ -597,24 +623,50 @@ def segmentation_stats(
 
     ious, bl_fracs, conf_fracs = [], [], []
 
-    for g in inst_ids:
-        canon = labels_canonical == g
-        pert  = labels_perturbed  == g
+    if isinstance(labels_perturbed, dict):
+        N = len(labels_canonical)
+        # Which points appear in at least one mask
+        any_assigned = np.zeros(N, bool)
+        for mask in labels_perturbed.values():
+            any_assigned |= mask
 
-        inter = (canon & pert).sum()
-        union = (canon | pert).sum()
-        ious.append(inter / (union + 1e-12))
+        for g in inst_ids:
+            canon = labels_canonical == g
+            pert  = labels_perturbed.get(g, np.zeros(N, bool))
 
-        # Boundary loss: canonical points for this instance now unassigned
-        bl = (canon & (labels_perturbed == -1)).sum()
-        bl_fracs.append(bl / (canon.sum() + 1e-12))
+            inter = (canon & pert).sum()
+            union = (canon | pert).sum()
+            ious.append(inter / (union + 1e-12))
 
-        # Confusion: canonical points assigned to a different instance
-        conf = (canon & (labels_perturbed >= 0) & ~pert).sum()
-        conf_fracs.append(conf / (canon.sum() + 1e-12))
+            # Boundary loss: canonical points for this instance absent from all masks
+            bl = (canon & ~any_assigned).sum()
+            bl_fracs.append(bl / (canon.sum() + 1e-12))
 
-    unassigned_frac = ((labels_canonical >= 0) & (labels_perturbed == -1)).sum() / \
-                      ((labels_canonical >= 0).sum() + 1e-12)
+            # Confusion: canonical points of this instance present in a different mask
+            conf = (canon & ~pert & any_assigned).sum()
+            conf_fracs.append(conf / (canon.sum() + 1e-12))
+
+        unassigned_frac = ((labels_canonical >= 0) & ~any_assigned).sum() / \
+                          ((labels_canonical >= 0).sum() + 1e-12)
+    else:
+        for g in inst_ids:
+            canon = labels_canonical == g
+            pert  = labels_perturbed  == g
+
+            inter = (canon & pert).sum()
+            union = (canon | pert).sum()
+            ious.append(inter / (union + 1e-12))
+
+            # Boundary loss: canonical points for this instance now unassigned
+            bl = (canon & (labels_perturbed == -1)).sum()
+            bl_fracs.append(bl / (canon.sum() + 1e-12))
+
+            # Confusion: canonical points assigned to a different instance
+            conf = (canon & (labels_perturbed >= 0) & ~pert).sum()
+            conf_fracs.append(conf / (canon.sum() + 1e-12))
+
+        unassigned_frac = ((labels_canonical >= 0) & (labels_perturbed == -1)).sum() / \
+                          ((labels_canonical >= 0).sum() + 1e-12)
 
     return {
         "n_instances":             len(inst_ids),

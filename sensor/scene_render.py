@@ -82,15 +82,24 @@ render dict fields
     res              (H,W)   image resolution tuple
 """
 
+import copy
 import numpy as np
 from scipy.spatial import cKDTree
-from scipy.ndimage import gaussian_filter, maximum_filter
+from scipy.ndimage import gaussian_filter, maximum_filter, label as _ndimage_label
 from geometry.geom_utils import estimate_normals
 import time
 import open3d as o3d
 import sys
 from rich import print as rp
 # import cupy as cp
+
+# Per-point keys in the render dict: arrays that must be indexed by a keep mask.
+# All other keys (scalars, image buffers, metadata) are passed through unchanged.
+_PER_POINT_KEYS = frozenset({
+    "points", "normals", "geom_ids", "t_hit",
+    "ray_origins", "ray_dirs", "proj_dirs", "proj_dist",
+    "cos_cam", "cos_proj", "snr_proxy", "pixel_idx",
+})
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SECTION 1 — Canonical renderer
@@ -112,10 +121,12 @@ def scene_render(meshes:dict, T_cam, look_at, fov, res_width, res_height,
     """
     start = time.time()
     scene = o3d.t.geometry.RaycastingScene()
-    for _, mesh_data in meshes.items(): 
-        mesh = mesh_data.geom
-        mesh.transform(mesh_data.T_gt)
-        mesh_data.id = scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh))
+    for _, mesh_data in meshes.items():
+        # Deep-copy the mesh before transforming so mesh_data.geom is never mutated.
+        # Without this, repeated scene_render calls accumulate T_gt on the same object.
+        mesh_copy = copy.deepcopy(mesh_data.geom)
+        mesh_copy.transform(mesh_data.T_gt)
+        mesh_data.id = scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh_copy))
 
     rays    = scene.create_rays_pinhole(
         fov_deg=fov, center=look_at, eye=T_cam[:3, 3],
@@ -219,13 +230,8 @@ def make_full_depth_image(render):
 
 def compute_edge_strength(depth_img):
     """Sobel magnitude, NaN→far, normalised [0,1] by 99th pct."""
-    d = depth_img.copy().astype(np.float64)
-    far = float(np.nanmax(d)) * 10.0 if not np.all(np.isnan(d)) else 1e6
-    d[np.isnan(d)] = far
-    gx = np.zeros_like(d); gy = np.zeros_like(d)
-    gx[1:-1,1:-1] = ((d[:-2,2:]-d[:-2,:-2]) + 2*(d[1:-1,2:]-d[1:-1,:-2]) + (d[2:,2:]-d[2:,:-2])) / 8.
-    gy[1:-1,1:-1] = ((d[2:,:-2]-d[:-2,:-2]) + 2*(d[2:,1:-1]-d[:-2,1:-1]) + (d[2:,2:]-d[:-2,2:])) / 8.
-    mag = np.sqrt(gx**2 + gy**2)
+    gx, gy = compute_depth_gradient(depth_img)
+    mag = np.sqrt(gx.astype(np.float64) ** 2 + gy.astype(np.float64) ** 2).astype(np.float32)
     hi  = np.percentile(mag[mag > 0], 99) if np.any(mag > 0) else 1.0
     return (mag / (hi + 1e-12)).clip(0, 1).astype(np.float32)
 
@@ -271,6 +277,73 @@ def _specular_keep(normals, ray_dirs, proj_dirs, roughness):
     return lobe > 0.01
 
 
+def _specular_keep_anisotropic(normals, ray_dirs, proj_dirs,
+                               alpha_t, alpha_b, brush_dir, anisotropy, roughness):
+    """
+    Anisotropic specular keep-mask using Ward BRDF  (N,) bool.
+
+    Models brushed / milled / rolled surfaces with directional micro-grooves:
+      alpha_t = roughness along brush direction  (tight, small — e.g. 0.10)
+      alpha_b = roughness across brush direction (loose, large — e.g. 0.40)
+
+    anisotropy blends Ward anisotropic with Ward isotropic:
+      0.0 → delegates to existing _specular_keep() (no regression)
+      1.0 → full Ward anisotropic
+
+    Physical model
+    ──────────────
+    Ward spherical-Gaussian in the half-angle H domain:
+        lobe_aniso = exp(-tan²θ_h · (cos²φ_h/α_t² + sin²φ_h/α_b²))
+    where θ_h = elevation of H above n, φ_h = azimuth of H in the (t, b)
+    surface tangent frame.  Normalisation constants are dropped — only the
+    relative per-point keep probability matters.
+    """
+    if anisotropy == 0.:
+        return _specular_keep(normals, ray_dirs, proj_dirs, roughness)
+
+    N      = len(normals)
+    v_cam  = -ray_dirs
+    v_proj = -proj_dirs
+
+    H = v_cam + v_proj
+    H /= np.linalg.norm(H, axis=1, keepdims=True) + 1e-12
+
+    n_dot_h  = np.einsum("ij,ij->i", normals, H).clip(0., 1.)
+    tan_h_sq = np.maximum(0., 1. - n_dot_h ** 2) / (n_dot_h ** 2 + 1e-6)
+
+    # ── Tangent frame ──────────────────────────────────────────────────────────
+    if brush_dir is None:
+        brush_world = np.broadcast_to(np.array([1., 0., 0.]), (N, 3)).copy()
+    else:
+        brush_world = np.broadcast_to(np.asarray(brush_dir, np.float64), (N, 3)).copy()
+
+    dot_nb = np.einsum("ij,ij->i", normals, brush_world)
+    t      = brush_world - dot_nb[:, None] * normals
+    t_norm = np.linalg.norm(t, axis=1, keepdims=True)
+    # Fallback: brush direction is parallel to normal → use world Y
+    fallback = np.cross(normals, np.broadcast_to([0., 1., 0.], (N, 3)))
+    fallback /= np.linalg.norm(fallback, axis=1, keepdims=True) + 1e-12
+    t = np.where(t_norm > 1e-6, t / (t_norm + 1e-12), fallback)
+    b = np.cross(normals, t)
+    b /= np.linalg.norm(b, axis=1, keepdims=True) + 1e-12
+
+    h_t = np.einsum("ij,ij->i", H, t)
+    h_b = np.einsum("ij,ij->i", H, b)
+
+    # Ward anisotropic lobe
+    exp_aniso  = -tan_h_sq * (h_t ** 2 / (alpha_t ** 2 + 1e-12)
+                              + h_b ** 2 / (alpha_b ** 2 + 1e-12))
+    lobe_aniso = np.exp(exp_aniso)
+
+    # Ward isotropic baseline (for blending)
+    alpha_iso = (alpha_t + alpha_b) / 2.
+    lobe_iso  = np.exp(-tan_h_sq / (alpha_iso ** 2 + 1e-12))
+
+    lobe = (1. - anisotropy) * lobe_iso + anisotropy * lobe_aniso
+    r    = np.broadcast_to(np.asarray(roughness, np.float64), N).copy()
+    return (1. - r) * lobe + r > 0.01     # same diffuse floor as _specular_keep
+
+
 def _grazing_keep(cos_cam, cos_proj, cam_thr, proj_thr, steepness, rng):
     """Soft sigmoid grazing dropout. p_keep = sigmoid((cos−thr)/steepness)."""
     def _s(c, t): return rng.random(len(c)) < 1. / (1. + np.exp(-(c-t) / (steepness+1e-12)))
@@ -314,8 +387,10 @@ def compute_dropout_mask(render, roughness=0.4,
                          cam_grazing_thresh=0.25, proj_grazing_thresh=0.25,
                          grazing_steepness=0.10, pepper_base_rate=0.04,
                          albedo_per_geom_id=None, default_albedo=0.7,
-                         density_cos_ref=None, seed=0,
-                         verbose=False):
+                         density_cos_ref=None,
+                         anisotropy=0.0, alpha_t=0.10, alpha_b=0.40,
+                         brush_dir=None,
+                         seed=0, verbose=False):
     """
     Removes physically unreturnable points
     Boolean keep-mask  (N,)  for render["points"].
@@ -323,6 +398,8 @@ def compute_dropout_mask(render, roughness=0.4,
     Four effects in order:
       1. Specular    — bidirectional GGX: reflect v_proj off n, check v_cam.
                        Diffuse floor (= roughness) prevents Lambertian dropout.
+                       When anisotropy > 0, Ward anisotropic BRDF is used instead,
+                       modelling brushed / milled / rolled metal micro-grooves.
       2. Grazing     — sigmoid on both cos_cam and cos_proj.
       3. Albedo/SNR  — dark materials absorb projected light → high dropout.
       4. Density     — oblique surfaces get probabilistically thinned (optional).
@@ -335,6 +412,11 @@ def compute_dropout_mask(render, roughness=0.4,
                           anodized Al ~0.15, black rubber ~0.03.
     default_albedo      : fallback for unspecified geom_ids.
     density_cos_ref     : enable density thinning; typical 0.7 (≈45° half-angle).
+    anisotropy          : 0 = isotropic GGX (default, no change), 1 = full Ward
+                          anisotropic. Set > 0 for brushed/milled metal parts.
+    alpha_t             : Ward roughness along brush direction. Typical 0.05–0.20.
+    alpha_b             : Ward roughness across brush direction. Typical 0.30–0.60.
+    brush_dir           : (3,) world-space brush direction. None → horizontal [1,0,0].
     """
     start = time.time()
     rng    = np.random.default_rng(seed)
@@ -348,9 +430,16 @@ def compute_dropout_mask(render, roughness=0.4,
         raw = render["cos_cam"] * render["cos_proj"] / (render["proj_dist"]**2 + 1e-12)
         snr = (raw - raw.min()) / (raw.max() - raw.min() + 1e-12)
 
+    if anisotropy > 0.:
+        specular_mask = _specular_keep_anisotropic(
+            render["normals"], render["ray_dirs"], render["proj_dirs"],
+            alpha_t, alpha_b, brush_dir, anisotropy, roughness)
+    else:
+        specular_mask = _specular_keep(render["normals"], render["ray_dirs"],
+                                       render["proj_dirs"], roughness)
+
     mask = (
-        _specular_keep(render["normals"], render["ray_dirs"],
-                       render["proj_dirs"], roughness)
+        specular_mask
         & _grazing_keep(render["cos_cam"], render["cos_proj"],
                         cam_grazing_thresh, proj_grazing_thresh,
                         grazing_steepness, rng)
@@ -362,6 +451,158 @@ def compute_dropout_mask(render, roughness=0.4,
     if verbose: rp(f"{sys._getframe().f_code.co_name} took {np.round(time.time() - start, 6)}s")
 
     return mask
+
+
+def add_projector_nonuniformity(render, proj_fpn_sigma=0.05, proj_fpn_scale=20.0,
+                                seed=0, verbose=False):
+    """
+    Projector illumination non-uniformity (projector-side FPN).
+
+    DMD / LCD projector pixels have individual gain variation (~2–8 % for typical
+    industrial projectors), causing spatially non-uniform fringe contrast across
+    the field. This is DISTINCT from camera FPN (sensor-side, per camera pixel):
+    - Camera FPN: same sensor pixel always reads the same bias, regardless of
+      what scene point it sees.
+    - Projector FPN: same projector pixel always illuminates with the same gain,
+      regardless of which camera pixel captures the return. The same scene point
+      viewed from two different camera poses has the same projector gain but
+      different camera FPN.
+
+    Model
+    ─────
+    3D Perlin noise evaluated at the unit projector direction vector
+    (proj_dirs) parameterises the projector's angular image space. The gain
+    G ∈ [1 − σ, 1 + σ] is multiplied into snr_proxy before dropout. At σ = 0.05
+    this produces a ±5 % intensity variation, typical for an industrial DMD.
+
+    Returns a shallow copy of render with snr_proxy modulated.
+
+    Parameters
+    ----------
+    proj_fpn_sigma : 1σ gain variation (fractional). Typical: 0.03–0.08.
+    proj_fpn_scale : Perlin scale in projector direction space. Higher → finer
+                     non-uniformity pattern. Typical: 10–30.
+    """
+    start = time.time()
+    # proj_dirs are unit vectors from projector to each surface point.
+    # They parameterise projector image space: each unique direction maps to one
+    # projector pixel. Scale by proj_fpn_scale to control spatial frequency.
+    field = _Perlin3D(seed=seed + 2000)(render["proj_dirs"], scale=proj_fpn_scale)
+    # Normalise to [-1, 1] then apply gain variation
+    field  = field / (np.abs(field).max() + 1e-12)
+    gain   = 1.0 + proj_fpn_sigma * field          # gain ∈ [1-σ, 1+σ]
+    out    = dict(render)
+    out["snr_proxy"] = np.clip(render["snr_proxy"] * gain, 0., 1.)
+    if verbose: rp(f"{sys._getframe().f_code.co_name} took {np.round(time.time() - start, 6)}s")
+    return out
+
+
+def add_specular_patch_missing(render, keep, roughness=0.25,
+                               specular_threshold=0.05, min_patch_area_px=20,
+                               patch_dropout_rate=0.1, seed=0, verbose=False):
+    """
+    Coherent specular patch missing.
+
+    Real structured-light sensors exhibit contiguous missing regions — not
+    scattered per-point dropout — when the specular lobe of a smooth surface
+    sweeps away from the camera. The GGX NDF D(H) is low across the whole
+    connected patch simultaneously, so the entire region falls below the
+    sensor's detection threshold together.
+
+    This is DISTINCT from the per-point specular dropout in compute_dropout_mask:
+    - compute_dropout_mask: stochastic per-point dropout scaled by lobe alignment.
+    - add_specular_patch_missing: finds connected image-space regions where D(H)
+      is uniformly low and drops the entire patch at once (coherent failure).
+
+    Algorithm
+    ─────────
+    1. For each visible point: compute GGX Trowbridge-Reitz NDF D(H) where
+       H = normalize(v_cam + v_proj).  Low D → specular lobe points away.
+    2. Project D values to image space; threshold to find dark candidate pixels.
+    3. scipy.ndimage.label to find connected dark regions.
+    4. For each region with area ≥ min_patch_area_px: drop with patch_dropout_rate.
+
+    Default parameters sit midway between matte plastic (roughness ≈ 0.4) and
+    brushed metal (roughness ≈ 0.15) for a generic industrial SL camera.
+
+    Parameters
+    ----------
+    roughness           : GGX roughness parameter (α). Lower → sharper lobe →
+                          more coherent dark patches.  Default 0.25.
+    specular_threshold  : Normalised NDF threshold below which a pixel is
+                          classified as 'specular dark'. Default 0.15.
+    min_patch_area_px   : Minimum connected-component area (pixels) to trigger
+                          dropout.  Smaller patches are ignored. Default 20.
+    patch_dropout_rate  : Probability that a qualifying dark patch is fully
+                          dropped.  Default 0.6.
+    """
+    start = time.time()
+    rng   = np.random.default_rng(seed)
+
+    # ── GGX NDF D(H) for ALL visible points (dense image → coherent patches) ─────
+    # Using ALL visible points (not just the post-dropout kept subset) is essential:
+    # kept points are sparse (~5% image fill), so their connected components are
+    # single pixels.  The specular dark patch is a property of surface geometry,
+    # not of which points survived previous dropout stages.
+    v_cam_all  = -render["ray_dirs"]
+    v_proj_all = -render["proj_dirs"]
+    nrm_all    = render["normals"]
+    pidx_all   = render["pixel_idx"]
+
+    H_all  = v_cam_all + v_proj_all
+    H_norm = np.linalg.norm(H_all, axis=1, keepdims=True)
+    H_all  = np.where(H_norm > 1e-12, H_all / (H_norm + 1e-12), nrm_all)
+    ndoth  = np.abs(np.einsum("ij,ij->i", nrm_all, H_all)).clip(0., 1.)
+
+    # GGX Trowbridge-Reitz NDF, normalised by its own peak at ndoth=1.
+    # D_norm = alpha^4 / (ndoth^2*(alpha^2-1) + 1)^2  where alpha = roughness (GGX α).
+    # At ndoth=1 (face-on): D_norm=1.0 → always lit, never dark.
+    # At ndoth=0.707 (45° tilt), roughness=0.25: D_norm≈0.014 << 0.15 → dark.
+    # Note: alpha = roughness directly (NOT roughness²).  Squaring twice would
+    # give α=0.0625 for roughness=0.25, making D_norm≈0.10 even face-on — wrong.
+    alpha     = roughness + 1e-6                         # GGX α = roughness ∈ (0,1]
+    denom     = ndoth ** 2 * (alpha ** 2 - 1.0) + 1.0
+    D_norm    = alpha ** 4 / (denom ** 2 + 1e-12)       # ∈ (0, 1]
+
+    # ── Project D_norm to image space (dense) ─────────────────────────────────
+    H_img, W_img = render["res"]
+    D_flat           = np.zeros(H_img * W_img, np.float32)
+    D_flat[pidx_all] = D_norm.astype(np.float32)
+    D_img            = D_flat.reshape(H_img, W_img)
+
+    lit_flat           = np.zeros(H_img * W_img, bool)
+    lit_flat[pidx_all] = True
+    lit_img            = lit_flat.reshape(H_img, W_img)
+
+    # Pixels where the GGX lobe is weak (D_norm below threshold) are candidates
+    # for coherent patch dropout.  specular_threshold=0.15 means the lobe has
+    # dropped to <15 % of peak — empirically the point where SL decoders fail.
+    dark_img = lit_img & (D_img < specular_threshold)
+
+    if not dark_img.any():
+        if verbose: rp(f"{sys._getframe().f_code.co_name} took {np.round(time.time() - start, 6)}s")
+        return keep.copy()
+
+    # ── Connected components → patch dropout ──────────────────────────────────
+    labeled, n_comp = _ndimage_label(dark_img)
+
+    # pixel → global index in render["points"] (all visible, not just kept)
+    pix2global = np.full(H_img * W_img, -1, np.int32)
+    pix2global[render["pixel_idx"]] = np.arange(len(render["points"]), dtype=np.int32)
+
+    updated_keep = keep.copy()
+    for comp_id in range(1, n_comp + 1):
+        comp_flat = (labeled.ravel() == comp_id)
+        if comp_flat.sum() < min_patch_area_px:
+            continue
+        if rng.random() >= patch_dropout_rate:
+            continue
+        gi = pix2global[comp_flat]
+        gi = gi[gi >= 0]           # filter background pixels (should be none here)
+        updated_keep[gi] = False
+
+    if verbose: rp(f"{sys._getframe().f_code.co_name} took {np.round(time.time() - start, 6)}s")
+    return updated_keep
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -602,13 +843,8 @@ def subset_render(render, keep_mask, verbose=False):
     Now also propagates snr_proxy.
     """
     start = time.time()
-    PER_POINT = frozenset({
-        "points","normals","geom_ids","t_hit",
-        "ray_origins","ray_dirs","proj_dirs","proj_dist",
-        "cos_cam","cos_proj","snr_proxy","pixel_idx",
-    })
     if verbose: rp(f"{sys._getframe().f_code.co_name} took {np.round(time.time() - start, 6)}s")
-    return {k: (v[keep_mask] if k in PER_POINT else v) for k,v in render.items()}
+    return {k: (v[keep_mask] if k in _PER_POINT_KEYS else v) for k, v in render.items()}
 
 
 def add_multipath_outliers(render, fringe_period=0.003, rate=0.01,
@@ -653,22 +889,26 @@ def add_multipath_outliers(render, fringe_period=0.003, rate=0.01,
     concave = (lap_n > concavity_thresh) & np.isfinite(depth)
     pix2pt  = np.full(H*W, -1, np.int32)
     pix2pt[render["pixel_idx"]] = np.arange(len(render["points"]), dtype=np.int32)
-    out_pts, out_nrm = [], []
-    for row, col in np.argwhere(concave):
-        pt = pix2pt[row*W+col]
-        if pt < 0 or rng.random() > rate * lap_n[row, col]:
-            continue
-        k    = int(rng.integers(1, max_order+1))
-        sign = +1 if rng.random() < 0.75 else -1   # 75 % behind surface
-        eps  = rng.normal(0., fringe_period * phase_sigma_rel)
-        t_new = render["t_hit"][pt] + sign*k*fringe_period + eps
-        if t_new <= 0: continue
-        out_pts.append(render["ray_origins"][pt] + t_new * render["ray_dirs"][pt])
-        out_nrm.append(render["normals"][pt])
-    if not out_pts:
-        return np.empty((0,3)), np.empty((0,3))
+    concave_rc = np.argwhere(concave)
+    if not len(concave_rc):
+        return np.empty((0, 3)), np.empty((0, 3))
+    rows_c, cols_c = concave_rc.T
+    pt_c  = pix2pt[rows_c * W + cols_c]
+    valid = pt_c >= 0
+    rows_c, cols_c, pt_c = rows_c[valid], cols_c[valid], pt_c[valid]
+    p_spawn = rate * lap_n[rows_c, cols_c]
+    spawn   = rng.random(len(pt_c)) < p_spawn
+    pt_c    = pt_c[spawn]
+    if not len(pt_c):
+        return np.empty((0, 3)), np.empty((0, 3))
+    k    = rng.integers(1, max_order + 1, len(pt_c))
+    sign = np.where(rng.random(len(pt_c)) < 0.75, 1, -1)   # 75 % behind surface
+    eps  = rng.normal(0., fringe_period * phase_sigma_rel, len(pt_c))
+    t_new = render["t_hit"][pt_c] + sign * k * fringe_period + eps
+    ok = t_new > 0
     if verbose: rp(f"{sys._getframe().f_code.co_name} took {np.round(time.time() - start, 6)}s")
-    return np.vstack(out_pts), np.vstack(out_nrm)
+    return (render["ray_origins"][pt_c[ok]] + t_new[ok, None] * render["ray_dirs"][pt_c[ok]],
+            render["normals"][pt_c[ok]].copy())
 
 
 def add_pepper_noise(render, rate=0.005, depth_sigma_rel=0.05, seed=0,
