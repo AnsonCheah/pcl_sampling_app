@@ -387,11 +387,14 @@ def _select_pareto_winner(study: optuna.Study) -> optuna.trial.FrozenTrial:
 # OptunaOptimizer
 # ─────────────────────────────────────────────────────────────────────────────
 
+SAMPLER_CHOICES = ("nsgaii", "tpe")
+
+
 class OptunaOptimizer:
-    """Fully joint NSGA-II optimizer for MechVision pose estimation.
+    """Fully joint Optuna optimizer for MechVision pose estimation.
 
     Replaces Phases 2–3–5–6 of the hierarchical coordinate descent with a
-    single joint multi-objective NSGA-II study. Phases 0, 1, and 4 are unchanged.
+    single joint multi-objective study. Phases 0, 1, and 4 are unchanged.
 
     Parameters
     ----------
@@ -408,6 +411,11 @@ class OptunaOptimizer:
     storage_path   : SQLite DB prefix for crash-resume, e.g. "results/optuna".
                      DB created as {prefix}_{part}_joint.db.
                      None = in-memory study (no persistence).
+    sampler        : Joint-study sampler — "nsgaii" (default) or "tpe".
+                     Both samplers run multi-objective (coverage, mean_time).
+                     "nsgaii" enforces referredStep ≤ refStep via constraints_func;
+                     "tpe" uses multivariate=True, group=True to handle the
+                     conditional edge-only params.
     """
 
     def __init__(
@@ -425,7 +433,12 @@ class OptunaOptimizer:
         storage_path:   Optional[str] = None,
         pos_thresh_k:     float = 0.01,
         adaptive_thresh:  bool  = True,
+        sampler:          str   = "nsgaii",
     ):
+        if sampler not in SAMPLER_CHOICES:
+            raise ValueError(
+                f"sampler={sampler!r} not in {SAMPLER_CHOICES}")
+        self._sampler = sampler
         self.opt = Optimizer(
             part_name    = part_name,
             client       = client,
@@ -510,14 +523,25 @@ class OptunaOptimizer:
     # ─────────────────────────────────────────────────────────────────────
 
     def _create_study_joint(self, name: str, storage_suffix: str = "") -> optuna.Study:
-        sampler = optuna.samplers.NSGAIISampler(
-            population_size=SC.OPTUNA_NSGA_POPULATION_SIZE,
-            seed=self._seed,
-            constraints_func=_referredstep_constraint,
-        )
+        if self._sampler == "nsgaii":
+            sampler = optuna.samplers.NSGAIISampler(
+                population_size=SC.OPTUNA_NSGA_POPULATION_SIZE,
+                seed=self._seed,
+                constraints_func=_referredstep_constraint,
+            )
+        elif self._sampler == "tpe":
+            sampler = optuna.samplers.TPESampler(
+                multivariate=True,
+                group=True,
+                n_startup_trials=SC.OPTUNA_N_STARTUP_JOINT,
+                seed=self._seed,
+            )
+        else:
+            raise ValueError(f"Unknown sampler: {self._sampler!r}")
         # trial.report/should_prune are not supported in multi-objective mode;
         # pruning is handled explicitly via time guard + coverage floor in _objective_joint.
-        # NSGA-II enforces referredStep ≤ refStep via constraints_func + objective guard.
+        # NSGA-II enforces referredStep ≤ refStep via constraints_func + objective guard;
+        # TPE ignores the constraint_violation user-attr (it is harmless metadata).
         storage = None
         if self._storage_path and storage_suffix:
             storage = f"sqlite:///{self._storage_path}{storage_suffix}.db"
@@ -790,6 +814,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--pos_thresh_k",   type=float, default=0.01,
                    help="k for adaptive study threshold: clip(k × longest_OBB_m, 2mm, 5mm). "
                         "Only used when adaptive_thresh is enabled (default: 0.01).")
+    p.add_argument("--sampler",        choices=list(SAMPLER_CHOICES), default="nsgaii",
+                   help="Optuna sampler for the joint study (default: nsgaii)")
     return p
 
 
@@ -856,6 +882,7 @@ def main() -> None:
         storage_path   = storage_path,
         pos_thresh_k    = args.pos_thresh_k,
         adaptive_thresh = args.adaptive_thresh,
+        sampler         = args.sampler,
     )
 
     try:
@@ -864,7 +891,7 @@ def main() -> None:
             log.error("Optimization did not converge.")
             sys.exit(1)
         if args.export_best:
-            out = opt.export_best(result, prefix="NSGAII_")
+            out = opt.export_best(result, prefix=f"{args.sampler.upper()}_")
             log.info(f"Best config exported → {out}")
         log.info("Done.")
     finally:
