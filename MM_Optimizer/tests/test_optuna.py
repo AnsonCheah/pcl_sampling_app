@@ -38,11 +38,14 @@ from mm_adapter.mm_adapter        import MechVisionClient
 from MM_Optimizer.mesh_analysis   import analyze_mesh, load_reference_pcd
 from MM_Optimizer.optimizer       import PROJ_NAME, MM_MODEL_ROOT
 from MM_Optimizer.optimizer_utils import list_synthetic_scenes
+from MM_Optimizer.mesh_analysis import WarmStart
 from MM_Optimizer.optuna_optimizer import (
     OptunaOptimizer,
+    SAMPLER_CHOICES,
     suggest_params_joint,
     _split_joint_params,
     _build_warm_joint,
+    _referredstep_constraint,
     _select_pareto_winner,
 )
 import MM_Optimizer.search_config as SC
@@ -320,6 +323,69 @@ def test_default_coarse_remaining_keys():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Sampler dispatch
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_optimizer_for_factory(sampler: str) -> OptunaOptimizer:
+    """Build an OptunaOptimizer with a synthetic WarmStart — no model/scene files."""
+    ws = WarmStart()
+    ws.maxNumOfPointPairsPerFeature = 5000
+    ws.minVoxelLength_mm = 1.0
+    ws.maxVoxelLength_mm = 15.0
+    ws.longest_extent_m  = 0.3
+    return OptunaOptimizer(
+        part_name=PART, client=None, project_id=-1,
+        scene_groups=[[]], warm_start=ws, dry_run=True, sampler=sampler)
+
+
+def test_sampler_factory_nsgaii():
+    """sampler='nsgaii' → NSGAIISampler with the referredStep constraint hooked up."""
+    opt = _make_optimizer_for_factory("nsgaii")
+    try:
+        study = opt._create_study_joint("smoke_nsgaii")
+        assert isinstance(study.sampler, optuna.samplers.NSGAIISampler), \
+            f"expected NSGAIISampler, got {type(study.sampler).__name__}"
+        assert study.sampler._constraints_func is _referredstep_constraint, \
+            "NSGA-II sampler must have _referredstep_constraint wired"
+        assert study.directions == [
+            optuna.study.StudyDirection.MAXIMIZE,
+            optuna.study.StudyDirection.MINIMIZE,
+        ]
+    finally:
+        opt.cleanup()
+    log.info("PASS: test_sampler_factory_nsgaii")
+
+
+def test_sampler_factory_tpe():
+    """sampler='tpe' → TPESampler with multivariate=True, group=True."""
+    opt = _make_optimizer_for_factory("tpe")
+    try:
+        study = opt._create_study_joint("smoke_tpe")
+        assert isinstance(study.sampler, optuna.samplers.TPESampler), \
+            f"expected TPESampler, got {type(study.sampler).__name__}"
+        assert study.sampler._multivariate is True, "TPE must be multivariate"
+        assert study.sampler._group is True,        "TPE must use group=True"
+        assert study.directions == [
+            optuna.study.StudyDirection.MAXIMIZE,
+            optuna.study.StudyDirection.MINIMIZE,
+        ]
+    finally:
+        opt.cleanup()
+    log.info("PASS: test_sampler_factory_tpe")
+
+
+def test_sampler_invalid():
+    """Unknown sampler name → ValueError at construction time."""
+    try:
+        _make_optimizer_for_factory("cmaes")
+    except ValueError as e:
+        assert "cmaes" in str(e)
+        log.info("PASS: test_sampler_invalid")
+        return
+    raise AssertionError("OptunaOptimizer should reject sampler='cmaes'")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Dry-run integration tests
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -515,6 +581,11 @@ if __name__ == "__main__":
     test_pareto_winner_fallback()
     test_default_fine_keys()
     test_default_coarse_remaining_keys()
+
+    print("\n--- Sampler dispatch ---")
+    test_sampler_factory_nsgaii()
+    test_sampler_factory_tpe()
+    test_sampler_invalid()
 
     print("\n--- Dry-run integration tests ---")
     test_dry_run_joint_study()
