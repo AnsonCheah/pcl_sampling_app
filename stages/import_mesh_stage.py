@@ -13,6 +13,7 @@ from geometry.geom_utils import o3d_to_trimesh
 class ImportMeshStage(BaseStage):
     def __init__(self, app):
         self.name = Stage.IMPORT_MESH.name
+        self.file_path = None  # may be pre-set by caller to skip the dialog
         super().__init__(app)
 
     def build_panel(self):
@@ -88,7 +89,12 @@ class ImportMeshStage(BaseStage):
     # Worker
     # ===============================
     def _on_worker_start(self):
-        self.file_path = self._open_stl_dialog()
+        if not self.file_path:
+            if self.app.headless:
+                raw = input("Enter path to STL file: ").strip().strip('"').strip("'")
+                self.file_path = Path(raw) if raw else None
+            else:
+                self.file_path = self._open_stl_dialog()
         if not self.file_path:
             self.enable_widgets()
             return

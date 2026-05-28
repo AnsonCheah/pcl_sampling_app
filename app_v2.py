@@ -19,9 +19,10 @@ from geometry.geom_utils import O3DSceneObject, camera_view_matrix
 
 class MeshSamplingApp:
 
-    def __init__(self, headless=False):
+    def __init__(self, headless=False, mesh_path=None):
         self.headless = headless
         
+        self.mesh_path = Path(mesh_path) if mesh_path is not None else None
         self.stages = {
             Stage.IMPORT_MESH: ImportMeshStage(self),
             Stage.RAYCAST: RaycastStage(self),
@@ -79,12 +80,18 @@ class MeshSamplingApp:
             self.progress_panel.frame = gui.Rect(x, y, self.pb_panel_size[0], self.pb_panel_size[1])
             self.window.add_child(self.progress_panel)
 
+        # Pre-seed the mesh path so headless callers skip the file dialog.
+        if self.mesh_path is not None:
+            self.stages[Stage.IMPORT_MESH].file_path = self.mesh_path
+
         self._restart()
 
     def _restart(self):
         self.target_mesh = None
         self.raw_pcd = None
         self.down_pcd = None
+        self.down_pcd_surface = None
+        self.down_pcd_edge = None
         self.visible_target_pcd = None
         self.occluders_pcd = None
         self.mesh_basename = None
@@ -92,7 +99,7 @@ class MeshSamplingApp:
         self.synthetic_targets = {}
         self.synthetic_scenes = {}
         self.feature_pcd = None
-        self.flat_pcd = None
+        self.pcd_flat = None
         self.output_pcd_path = None
         self.geocenter = np.eye(4)
         self.point_count_mean = None
@@ -147,7 +154,6 @@ class MeshSamplingApp:
                 distance = 1.0 * np.linalg.norm(bbox.get_extent())
                 if distance < 1e-6:
                     return
-                # distance = (radius / np.tan(np.deg2rad(fov_deg) / 2.0)) * margin
                 cam_pos = look_at + np.array([distance, distance, distance])
                 T_cam = camera_view_matrix(cam_pos, look_at)
                 up = T_cam[:3, 1]
@@ -310,13 +316,21 @@ class MeshSamplingApp:
                 continue
 
 if __name__ == "__main__":
-    # gui.Application.instance.initialize()
-    # app = MeshSamplingApp()
-    # gui.Application.instance.run()
-    try: 
-        gui.Application.instance.initialize()
-        app = MeshSamplingApp()
-        gui.Application.instance.run()
-    except Exception as e:
-        print(f"[FATAL] Unhandled exception: {e}")
-        exit()
+    import argparse
+    parser = argparse.ArgumentParser(description="Mesh Sampling App")
+    parser.add_argument("--mesh", type=str, default=None, help="Path to STL mesh file (enables headless mode)")
+    parser.add_argument("--headless", action="store_true", help="Run without GUI")
+    args = parser.parse_args()
+
+    if args.headless or args.mesh:
+        app = MeshSamplingApp(headless=True, mesh_path=args.mesh)
+        app.stages[Stage.IMPORT_MESH]._run_worker()
+        app._express_sampling_worker()
+    else:
+        try:
+            gui.Application.instance.initialize()
+            app = MeshSamplingApp()
+            gui.Application.instance.run()
+        except Exception as e:
+            print(f"[FATAL] Unhandled exception: {e}")
+            exit()
