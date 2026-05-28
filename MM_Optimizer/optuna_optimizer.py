@@ -245,7 +245,7 @@ def _expand_winner_params(
 # Warm-start builders
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_warm_joint(
+def build_warm_joint(
     coarse_dict: dict,
     fine_dict: dict,
     regime: dict,
@@ -425,6 +425,7 @@ class OptunaOptimizer:
         storage_path:   Optional[str] = None,
         pos_thresh_k:     float = 0.01,
         adaptive_thresh:  bool  = True,
+        extra_warm_coarse_fine: Optional[List[Tuple[dict, dict]]] = None,
     ):
         self.opt = Optimizer(
             part_name    = part_name,
@@ -466,6 +467,7 @@ class OptunaOptimizer:
             if adaptive_thresh else SC.POS_THRESH_TIGHT
         )
         self._study: Optional[optuna.Study] = None
+        self._extra_warm_coarse_fine: List[Tuple[dict, dict]] = extra_warm_coarse_fine or []
 
     # ─────────────────────────────────────────────────────────────────────
     # Default param helpers
@@ -641,12 +643,20 @@ class OptunaOptimizer:
             f"{part}_joint", f"_{part}_joint")
 
         if not self._study.trials:
-            warm_p = _build_warm_joint(
+            warm_p = build_warm_joint(
                 _geom_coarse, _geom_fine, best_regime,
                 self._pairs_candidates, self._voxel_bounds,
             )
             self._study.enqueue_trial(warm_p)
             log.info("Enqueued geometry warm-start trial (feasible seed for NSGA-II population)")
+
+            for _extra_coarse, _extra_fine in self._extra_warm_coarse_fine:
+                _extra_p = build_warm_joint(
+                    _extra_coarse, _extra_fine, best_regime,
+                    self._pairs_candidates, self._voxel_bounds,
+                )
+                self._study.enqueue_trial(_extra_p)
+                log.info("Enqueued LLM warm-start trial")
         else:
             log.info(f"Resumed study: {len(self._study.trials)} prior trials")
 

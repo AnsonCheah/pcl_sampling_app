@@ -8,15 +8,11 @@ with ~300 lines using only grpcio + stdlib.
 Dependencies: grpcio
 Python: 3.6+
 """
-import time
-start = time.time()
 import json
 import logging
 import math
-# from rich import print as rp
-# import numpy as np
+import time
 import grpc
-print(f"import time {time.time() - start}")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -284,7 +280,6 @@ class MechVisionClient(object):
 # Standalone test
 # ---------------------------------------------------------------------------
 
-print(f"time before main: {time.time() - start}")
 if __name__ == "__main__":
     from mm_dataclasses import *
     from pathlib import Path
