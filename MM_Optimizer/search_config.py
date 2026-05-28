@@ -144,6 +144,33 @@ SYM_AMBIGUOUS_FRAC_THRESHOLD = 0.25   # fraction of ang errors near target to co
 SYM_ANGLE_TOL_DEG            = 20.0   # ±tolerance around 360/n target
 
 # ---------------------------------------------------------------------------
+# Symmetry classification (mesh_analysis._classify_symmetry)
+# ---------------------------------------------------------------------------
+
+# Chamfer distance threshold as a fraction of model diameter.
+# 0.5% is tight for clean CAD mesh (no sensor noise) and loose enough for
+# minor mesh sampling artefacts. Tunable — log chamfer values and adjust if
+# false positives arise in practice.
+# 2% of diameter gives a noise floor ~3-5× above sampling noise (~1-3mm for 5000 points)
+# while staying well below the asymmetric Chamfer signal (~10-50% of diameter).
+SYM_CHAMFER_THRESH_FRAC = 0.02    # 2% of diameter
+
+# Absolute minimum threshold (mm→m) so small parts (<150mm) aren't starved of margin.
+SYM_CHAMFER_THRESH_MIN_M = 0.003  # 3mm minimum
+
+# N-fold orders to test, coarse-to-fine (highest order found first).
+# Only divisors of 360 make sense for industrial parts.
+SYM_NFOLD_CANDIDATES = [6, 4, 3, 2]
+
+# Inertia eigenvalue ratio thresholds for SO2/SO3 candidate proposal.
+# SO3: all three eigenvalues within 5% of each other.
+# SO2: two eigenvalues within 5% of each other (one degenerate axis).
+# Slightly lenient (1.15) to handle sampling noise on sphere/disc point clouds.
+# An elongated cylinder has max/min eigenvalue ratio ~5x, well above 1.15.
+SYM_SO3_EIGEN_RATIO = 1.15
+SYM_SO2_EIGEN_RATIO = 1.10
+
+# ---------------------------------------------------------------------------
 # Phase 5 — Joint refinement (coarse re-sweep with fine locked)
 # ---------------------------------------------------------------------------
 
