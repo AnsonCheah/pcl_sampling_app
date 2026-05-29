@@ -21,6 +21,12 @@ JITTER_DEG = [3,3,3]
 HOPPER_INWARD_OFFSET = 0.02   # hopper walls inset this far inside the bin wall plane
 HOPPER_TOP_Z = 100            # hopper walls extend to this z; generous upper bound
 
+# Dynamic bin sizing (random arrangement only, when fill_rate is provided)
+BIN_XY_SCALE_FACTOR  = 10.0   # bin side ≈ BIN_XY_SCALE_FACTOR × bounding-sphere radius
+BIN_LAYER_MARGIN     = 1.5    # 50% headroom on stack height
+PACKING_FACTOR       = 0.6   # random packing efficiency for MOBB volumes
+PART_TO_BIN_OVERSIZE = 0.5    # part_diameter > this × max bin extent → use static max bin
+
 
 @dataclass
 class SceneObject:
@@ -28,7 +34,7 @@ class SceneObject:
     body_name: str
 
 class MujocoBinScene:
-    def __init__(self, part_mesh, part_convex_meshes, n_parts=1, bin_dim=(0.76, 0.585, 0.25, 0.005), settle_time=10.0, render=True, arrangement: str = "random", stable_pose_R: np.ndarray = None):
+    def __init__(self, part_mesh, part_convex_meshes, n_parts: int = None, fill_rate: float = None, bin_dim=(0.76, 0.585, 0.25, 0.005), settle_time=10.0, render=True, arrangement: str = "random", stable_pose_R: np.ndarray = None):
         self.timestep = 0.002
         self.lvel_threshold = 0.03
         self.avel_threshold = 0.5
@@ -53,6 +59,10 @@ class MujocoBinScene:
         self.viewer = None
         self.arrangement = arrangement
         self.stable_pose_R = stable_pose_R  # optional forced stable orientation for structured mode
+        self._cached_valid_poses = None     # populated when fill_rate triggers dynamic sizing
+
+        if n_parts is None and fill_rate is None:
+            raise ValueError("MujocoBinScene requires either n_parts or fill_rate")
 
         self.spec = mujoco.MjSpec()
         self.spec.option.timestep = self.timestep
@@ -69,7 +79,18 @@ class MujocoBinScene:
 
         self.world = self.spec.worldbody
 
+        # ── Dynamic bin sizing: only when fill_rate is given for random mode ──
+        if fill_rate is not None and arrangement == "random":
+            if n_parts is not None:
+                rp(f"[WARN] Both n_parts={n_parts} and fill_rate={fill_rate} provided; fill_rate wins")
+            # Bootstrap self.hh with the max bin so _compute_valid_stable_poses
+            # has a generous clearance; _compute_dynamic_bin then overrides bin_dim.
+            self.hh = bin_dim[2] / 2
+            self._cached_valid_poses = self._compute_valid_stable_poses()
+            bin_dim, n_parts = self._compute_dynamic_bin(fill_rate, bin_dim, self._cached_valid_poses)
+
         self.bin_dim = bin_dim
+        self.n_parts = n_parts
         self.hx = self.bin_dim[0] / 2
         self.hy = self.bin_dim[1] / 2
         self.hh = self.bin_dim[2] / 2
@@ -279,15 +300,21 @@ class MujocoBinScene:
 
         return valid
 
-    def _compute_max_tilted_height(self, valid_poses: list) -> float:
+    def _compute_max_tilted_height(self, valid_poses: list, clearance: float = None) -> tuple:
         """
         Compute the worst-case height a part can achieve in any constrained orientation.
         Used for layer spacing in random spawning to ensure parts don't overlap.
-        Returns max height across all valid stable poses at their respective theta_max.
+
+        Returns (max_h, max_footprint_area) across all valid stable poses at their
+        respective theta_max. `clearance` defaults to 0.9 × current bin height; pass
+        an explicit value when computing layer stats before self.hh is finalised
+        (e.g. during dynamic bin sizing).
         """
         max_h = 0.0
+        max_footprint = 0.0
         verts   = np.asarray(self.part_mesh.vertices)
-        clearance = 0.9 * 2 * self.hh
+        if clearance is None:
+            clearance = 0.9 * 2 * self.hh
 
         for R_stable, _, lz in valid_poses:
             rotated = (R_stable @ verts.T).T
@@ -302,8 +329,66 @@ class MujocoBinScene:
                 h = lz + max(lx, ly) * np.sin(theta_max)
 
             max_h = max(max_h, float(h))
+            max_footprint = max(max_footprint, lx * ly)
 
-        return max_h
+        return max_h, max_footprint
+
+    def _compute_dynamic_bin(self, fill_rate: float, max_bin_dim: tuple, valid_poses: list) -> tuple:
+        """
+        Size the bin to the part. Returns ((bin_w, bin_l, bin_h, wall_t), n_parts).
+
+        Volume basis: the part's MOBB (minimum oriented bounding box). Mesh volume
+        under-counts a part's settled footprint (non-convex parts and elongated parts
+        leave gaps between neighbours that the mesh doesn't see). MOBB is a much better
+        proxy for the box each part actually claims in a pile.
+
+        Bin shape policy: bin_h is sized ONCE from the fill=1.0 pile geometry (capped
+        at the max bin) and reused for ALL fill rates — so the 5 fill_rate scenes for a
+        given part share the same bin, with only n_parts varying. fill_rate is then
+        interpreted as fraction of the physical-max capacity for that bin (fill=1.0 =
+        random-packed bin). Visual MOBB-volume ratio ≈ fill_rate × PACKING_FACTOR.
+
+        Oversized parts (2r > PART_TO_BIN_OVERSIZE × max XY extent) fall back to
+        the full max bin so very large parts behave like the legacy fixed-bin path.
+        """
+        r_sphere = float(self.part_mesh.bounding_sphere.primitive.radius)
+        mobb_vol = max(float(self.part_mesh.bounding_box_oriented.volume), 1e-9)
+
+        if 2 * r_sphere > PART_TO_BIN_OVERSIZE * max(max_bin_dim[0], max_bin_dim[1]):
+            n_at_max = int(np.floor(max_bin_dim[0] * max_bin_dim[1] * max_bin_dim[2]
+                                    * PACKING_FACTOR / mobb_vol))
+            n_parts  = max(1, int(round(fill_rate * max(n_at_max, 1))))
+            rp(f"[INFO] Oversize part (2r={2*r_sphere:.3f} m > "
+               f"{PART_TO_BIN_OVERSIZE}*{max(max_bin_dim[0], max_bin_dim[1]):.3f} m); "
+               f"using max bin. n_parts={n_parts}")
+            return tuple(max_bin_dim), n_parts
+
+        bin_w = float(min(BIN_XY_SCALE_FACTOR * r_sphere, max_bin_dim[0]))
+        bin_l = float(min(BIN_XY_SCALE_FACTOR * r_sphere, max_bin_dim[1]))
+
+        h_layer, footprint = self._compute_max_tilted_height(valid_poses, clearance=max_bin_dim[2])
+        footprint = max(footprint, 1e-9)
+
+        # Size bin_h once for the fill=1.0 pile. Stays constant across fill rates.
+        n_per_layer    = max(1, int(np.floor(bin_w * bin_l * PACKING_FACTOR / footprint)))
+        n_max_vol      = max(1, int(np.floor(PACKING_FACTOR * bin_w * bin_l * max_bin_dim[2] / mobb_vol)))
+        n_layers_full  = max(1, int(np.ceil(n_max_vol / n_per_layer)))
+        bin_h_target   = max(2 * h_layer, n_layers_full * h_layer * BIN_LAYER_MARGIN)
+        bin_h          = min(max_bin_dim[2], bin_h_target)
+
+        if bin_h_target > max_bin_dim[2]:
+            rp(f"[WARN] bin_h clipped: raw={bin_h_target:.3f} m -> {bin_h:.3f} m. "
+               f"Hopper extension walls will contain parts during phase-1 settling.")
+
+        # n_parts scales with fill_rate against the FINAL bin (visual fill ≈ fill × PACKING).
+        bin_vol = bin_w * bin_l * bin_h
+        n_parts = max(1, int(round(fill_rate * PACKING_FACTOR * bin_vol / mobb_vol)))
+
+        visual_fill = n_parts * mobb_vol / bin_vol
+        rp(f"[INFO] Dynamic bin ({bin_w:.3f}, {bin_l:.3f}, {bin_h:.3f}) m  "
+           f"n_parts={n_parts}  fill={fill_rate:.0%}  visual_mobb={visual_fill:.0%}  "
+           f"n_per_layer={n_per_layer}  mobb={mobb_vol:.2e}")
+        return (bin_w, bin_l, bin_h, max_bin_dim[3]), n_parts
 
     def _sample_constrained_rotation(self, valid_poses: list) -> np.ndarray:
         """
@@ -477,8 +562,8 @@ class MujocoBinScene:
         radius = self.part_mesh.bounding_sphere.primitive.radius
         batch_size = min(10, int((2 * self.hx) // (2 * radius)) * int((2 * self.hy) // (2 * radius)))
         valid_poses = np.zeros((self.n_parts, 7))
-        valid_poses_for_rotation = self._compute_valid_stable_poses()
-        max_tilted_height = self._compute_max_tilted_height(valid_poses_for_rotation)
+        valid_poses_for_rotation = self._cached_valid_poses if self._cached_valid_poses is not None else self._compute_valid_stable_poses()
+        max_tilted_height, _ = self._compute_max_tilted_height(valid_poses_for_rotation)
         for i in range(self.n_parts):
             success = False
             candidate_trimesh = copy.deepcopy(self.part_mesh)
@@ -565,7 +650,7 @@ class MujocoBinScene:
         if self.arrangement == "structured":
             print("[INFO] Structured arrangement: skipping simulation and settling")
             return  # poses are final; mj_forward already called in generate_scene
-        input("Press Enter to start simulation...")
+        # input("Press Enter to start simulation...")
         steps = int(self.settle_time / self.model.opt.timestep)
 
         # Phase 1: settle with hopper walls active
@@ -767,15 +852,45 @@ def _display_scene(scene, scene_state):
     vis.run()
     vis.destroy_window()
 
+def _build_primitive(name: str):
+    """Return (part_mesh, convex_meshes) for a reproducible trimesh primitive."""
+    if name == "sphere_small":
+        part_mesh = trimesh.creation.icosphere(radius=0.005, subdivisions=2)
+    elif name == "sphere_large":
+        part_mesh = trimesh.creation.icosphere(radius=0.05, subdivisions=2)
+    elif name == "rod":
+        part_mesh = trimesh.creation.cylinder(radius=0.005, height=0.20, sections=24)
+    elif name == "plate":
+        part_mesh = trimesh.creation.box(extents=(0.15, 0.10, 0.005))
+    elif name == "cube":
+        part_mesh = trimesh.creation.box(extents=(0.30, 0.30, 0.30))
+    else:
+        raise ValueError(f"unknown primitive '{name}'")
+    convex = o3d.geometry.TriangleMesh(
+        vertices=o3d.utility.Vector3dVector(np.asarray(part_mesh.vertices)),
+        triangles=o3d.utility.Vector3iVector(np.asarray(part_mesh.faces)),
+    )
+    rp(f"[PRIMITIVE {name}] verts={len(part_mesh.vertices)}  "
+       f"bounding_sphere_r={part_mesh.bounding_sphere.primitive.radius:.4f} m  "
+       f"volume={part_mesh.volume:.6e} m^3")
+    return part_mesh, [convex]
+
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Bin scene generation tests")
-    parser.add_argument(
+    src = parser.add_mutually_exclusive_group()
+    src.add_argument(
         "--mesh",
         type=str,
         default=None,
         help="Path to STL mesh file (skips file dialog)",
+    )
+    src.add_argument(
+        "--primitive",
+        choices=["sphere_small", "sphere_large", "rod", "plate", "cube"],
+        default=None,
+        help="Use a built-in trimesh primitive instead of loading an STL",
     )
     parser.add_argument(
         "--arrangement",
@@ -783,11 +898,19 @@ if __name__ == "__main__":
         default="both",
         help="Which arrangement to test (default: both)",
     )
-    parser.add_argument(
+    # Random-mode sizing: --fill_rate uses dynamic bin (default); --n_parts uses static max bin.
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--fill_rate",
+        type=float,
+        default=None,
+        help="Fill rate (0-1) for dynamic bin sizing in random mode. Default if --n_parts not set: 0.6",
+    )
+    mode.add_argument(
         "--n_parts",
         type=int,
-        default=10,
-        help="Number of parts for random mode (structured ignores this)",
+        default=None,
+        help="Number of parts for random mode with the static max bin (legacy path)",
     )
     parser.add_argument(
         "--display",
@@ -795,9 +918,14 @@ if __name__ == "__main__":
         help="Open Open3D viewer after each test",
     )
     args = parser.parse_args()
+    if args.fill_rate is None and args.n_parts is None:
+        args.fill_rate = 1   # default to dynamic bin sizing in random mode
 
     init_open3d()
-    part_mesh, convex_meshes = load_part(mesh_path=args.mesh)
+    if args.primitive is not None:
+        part_mesh, convex_meshes = _build_primitive(args.primitive)
+    else:
+        part_mesh, convex_meshes = load_part(mesh_path=args.mesh)
 
     # Enumerate all stable poses once; structured tests iterate over them.
     stable_poses = MujocoBinScene.get_stable_poses(part_mesh)
@@ -806,12 +934,15 @@ if __name__ == "__main__":
         rp(f"  pose {i}: probability = {p:.4f}")
 
     if args.arrangement in ("random", "both"):
+        use_fill = args.fill_rate is not None
         scene = MujocoBinScene(
             part_mesh, convex_meshes,
-            n_parts=args.n_parts,
-            render=args.display,
-            arrangement="random",
+            n_parts   = None             if use_fill else args.n_parts,
+            fill_rate = args.fill_rate   if use_fill else None,
+            render    = args.display,
+            arrangement = "random",
         )
+        rp(f"[RANDOM] bin_dim={scene.bin_dim}  n_parts={scene.n_parts}")
         scene.simulate()
         scene_state = scene.extract_scene_state()
         if args.display:

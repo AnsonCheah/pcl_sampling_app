@@ -42,7 +42,9 @@ class SyntheticStage(BaseStage):
         self.rendering_flag = False
         self.verbose = True
         self.o3d_scene = {}
-        self.arrangement = "random"  # headless callers may set before _run_worker()
+        self.arrangement = "random"     # headless callers may set before _run_worker()
+        self.generate_mode = "count"    # "count" or "fill_rate"; headless callers may override
+        self.fill_rate = 0.6            # used when generate_mode == "fill_rate"
 
     def build_panel(self):
         if self.app.headless:
@@ -52,6 +54,14 @@ class SyntheticStage(BaseStage):
         self.num_targets_slider = self.register_widget(gui.Slider(gui.Slider.INT))
         self.num_targets_slider.set_limits(2, 200)
         self.num_targets_slider.int_value = 6
+        self.fill_rate_slider = self.register_widget(gui.Slider(gui.Slider.INT))
+        self.fill_rate_slider.set_limits(20, 100)
+        self.fill_rate_slider.int_value = 60
+        self.fill_rate_slider.enabled = False
+        self.radio_mode = self.register_widget(gui.RadioButton(gui.RadioButton.HORIZ))
+        self.radio_mode.set_items(["By Part Count", "By Fill Rate"])
+        self.radio_mode.selected_index = 0
+        self.radio_mode.set_on_selection_changed(self._on_generate_mode_changed)
         self.arrangement_combo = self.register_widget(gui.Combobox())
         self.arrangement_combo.add_item("Random")
         self.arrangement_combo.add_item("Structured")
@@ -76,7 +86,9 @@ class SyntheticStage(BaseStage):
         v.add_child(gui.Label("Generate Synthetic Targets"))
         v.add_child(gui.Label(""))
         v.add_child(self.arrangement_combo)
+        v.add_child(self.radio_mode)
         v.add_child(self.num_targets_slider)
+        v.add_child(self.fill_rate_slider)
         v.add_child(self.btn_generate)
         v.add_child(self.btn_reset)
         v.add_child(self.combobox_targets)
@@ -94,7 +106,23 @@ class SyntheticStage(BaseStage):
         return v
 
     def _on_arrangement_changed(self, text, idx):
-        self.num_targets_slider.enabled = (text == "Random")
+        is_random = (text == "Random")
+        # In structured mode neither part-count nor fill-rate is meaningful: grid sets count.
+        if not is_random:
+            self.num_targets_slider.enabled = False
+            self.fill_rate_slider.enabled = False
+            return
+        # In random mode, exactly one of the two is active based on the mode radio.
+        by_fill = (self.radio_mode.selected_index == 1)
+        self.num_targets_slider.enabled = not by_fill
+        self.fill_rate_slider.enabled = by_fill
+
+    def _on_generate_mode_changed(self, idx):
+        is_random = (self.arrangement_combo.selected_text == "Random")
+        by_fill = (idx == 1)
+        self.num_targets_slider.enabled = is_random and not by_fill
+        self.fill_rate_slider.enabled = is_random and by_fill
+        self.generate_mode = "fill_rate" if by_fill else "count"
 
     def _refresh_ui(self):
         if self.app.headless:
@@ -119,6 +147,8 @@ class SyntheticStage(BaseStage):
             self.app.main_thread(lambda: self.app._clear_scene())
             self.num_targets = self.num_targets_slider.int_value
             self.arrangement = self.arrangement_combo.selected_text.lower()
+            self.generate_mode = "fill_rate" if self.radio_mode.selected_index == 1 else "count"
+            self.fill_rate = self.fill_rate_slider.int_value / 100.0
 
         def add_to_render_scene(name:str, geom):
             self.app.synthetic_scenes[name] = O3DSceneObject(geom)
@@ -141,7 +171,14 @@ class SyntheticStage(BaseStage):
             self.app.update_progress(self.worker_step/TOTAL_STEPS, message)
 
         part_mesh = o3d_to_trimesh(self.app.target_mesh)
-        self.mj_scene = MujocoBinScene(part_mesh, self.app.convex_meshes, n_parts=self.num_targets, render=self.rendering_flag, arrangement=self.arrangement)
+        use_fill = (self.generate_mode == "fill_rate" and self.arrangement == "random")
+        self.mj_scene = MujocoBinScene(
+            part_mesh, self.app.convex_meshes,
+            n_parts   = None             if use_fill else self.num_targets,
+            fill_rate = self.fill_rate   if use_fill else None,
+            render    = self.rendering_flag,
+            arrangement = self.arrangement,
+        )
         self.mj_scene.simulate()
         self.mj_scene.verify_parts_in_bin()
         scene_state = self.mj_scene.extract_scene_state()
