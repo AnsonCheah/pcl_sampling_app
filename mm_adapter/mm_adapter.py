@@ -307,6 +307,8 @@ if __name__ == "__main__":
     model_file_name    = (f"{MM_REF_PATH}_surface/{REF_NAME}_surface.ply", "string", "")
     geo_center_file    = (f"{MM_REF_PATH}_surface/geo_center.json", "string", "")
 
+    pickedpose = EasyCreatePoses(vectors=(f"[0.001, 1.002, 1.235, 1, 0, 0, 0]", "string", ""))
+
     scene  = EasyCreateStringList(strings=(f"{SYN_SCENE_PATH}/{REF_NAME}/scene_00000/", "string", ""))
     pre_seg_py = CalcResultsbyPython(
         name="Pre_Segmentation",
@@ -327,10 +329,11 @@ if __name__ == "__main__":
     )
 
     params_dict = {
-        scene.name: scene.to_step_params(),
-        pre_seg_py.name: pre_seg_py.to_step_params(),
-        coarse.name: coarse.to_step_params(),
-        fine.name:   fine.to_step_params(),
+        pickedpose.name:    pickedpose.to_step_params(),
+        scene.name:         scene.to_step_params(),
+        pre_seg_py.name:    pre_seg_py.to_step_params(),
+        coarse.name:        coarse.to_step_params(),
+        fine.name:          fine.to_step_params(),
     }
     param_start = time.time()
     client.set_params(project_id, params_dict)
