@@ -18,6 +18,16 @@ class _StepParams:
         return {f.name: getattr(self, f.name) for f in dc_fields(self) if f.name != "name"}
 
 @dataclass
+class EasyCreatePoses(_StepParams):
+    """Parameters for the Easy Create Poses vision step.
+    Used to inject the scene PLY file path into the Calc Result by Python step.
+    Vector in the format of [x, y, z, qw, qx, qy, qz], where position is in m and rotation is in quaternion
+    Ref: https://docs.mech-mind.net/en/suite-software-manual/1.8.2/vision-steps/easy-create-poses.html
+
+    """
+    name:       str   = "PickedPose"
+    vectors:    Param = ("", "string", "")   
+@dataclass
 class EasyCreateStringList(_StepParams):
     """Parameters for the Easy Create String List vision step.
     Used to inject the scene PLY file path into the Calc Result by Python step.
