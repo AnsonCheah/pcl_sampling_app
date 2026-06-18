@@ -24,16 +24,28 @@ from sensor.scene_render import (
 )
 from sensor.segment_instances import segment_point_cloud
 import copy
-from physics.mujoco_bin_scene import MujocoBinScene
+from physics.mujoco_bin_scene import MujocoBinScene, MAX_BIN_DIM
 import colorsys
 from rich import print as rp
 np.set_printoptions(precision=6, suppress=True)
 
+SCENE_FILL_RATE     = 0.6    # default fill rate (fraction of safe capacity)
+PACKING_FACTOR      = 0.6    # random-packing efficiency for part OBB volumes
+BIN_TOP_MARGIN_FRAC = 0.20   # reserve top 20% of bin height as spill headroom
+MIN_AUTO_PARTS      = 2      # never fewer than this
+MAX_AUTO_PARTS      = 500    # safety cap (tune): tiny parts otherwise explode the sim
+FILL_SLIDER_MIN, FILL_SLIDER_MAX   = 20, 100   # fill-rate slider range (percent)
+COUNT_SLIDER_MIN, COUNT_SLIDER_MAX = 2, 500    # override-count slider range (parts)
+
 class SyntheticStage(BaseStage):
     def __init__(self, app):
         self.name = Stage.SYNTHETIC.name
-        super().__init__(app)
+        # Set before super().__init__(): it calls build_panel(), which reads these.
         self.num_targets = 6
+        self.arrangement = "random"        # headless callers may set before _run_worker()
+        self.generate_mode = "fill_rate"   # "fill_rate" (auto-size to part) or "count" (manual override)
+        self.fill_rate = SCENE_FILL_RATE   # used when generate_mode == "fill_rate"
+        super().__init__(app)
         self.fov_deg = 41.11
         self.res_width = 1920
         self.res_height = 1200
@@ -42,21 +54,27 @@ class SyntheticStage(BaseStage):
         self.rendering_flag = False
         self.verbose = True
         self.o3d_scene = {}
-        self.arrangement = "random"  # headless callers may set before _run_worker()
 
     def build_panel(self):
         if self.app.headless:
             return
         v = gui.Vert(4)
 
-        self.num_targets_slider = self.register_widget(gui.Slider(gui.Slider.INT))
-        self.num_targets_slider.set_limits(2, 200)
-        self.num_targets_slider.int_value = 6
         self.arrangement_combo = self.register_widget(gui.Combobox())
         self.arrangement_combo.add_item("Random")
         self.arrangement_combo.add_item("Structured")
         self.arrangement_combo.selected_index = 0
         self.arrangement_combo.set_on_selection_changed(self._on_arrangement_changed)
+        # One slider, repurposed by the radio: fill-rate % (auto) or override count.
+        self.radio_mode = self.register_widget(gui.RadioButton(gui.RadioButton.HORIZ),
+                                               enabled_if=lambda: self._is_random())
+        self.radio_mode.set_items(["By Fill Rate", "Override Count"])
+        self.radio_mode.selected_index = 0
+        self.radio_mode.set_on_selection_changed(self._on_generate_mode_changed)
+        self.gen_label = gui.Label("Fill Rate (%)")   # plain label, not registered
+        self.gen_slider = self.register_widget(gui.Slider(gui.Slider.INT),
+                                               enabled_if=lambda: self._is_random())
+        self._apply_slider_mode(0)                     # init in fill-rate mode
         self.btn_generate = self.register_widget(gui.Button("Generate Synthetic Targets"))
         self.btn_generate.set_on_clicked(self.start)
         self.btn_reset = self.register_widget(gui.Button("Clear Synthetic Targets"), lambda: len(self.app.synthetic_targets)>0)
@@ -76,7 +94,9 @@ class SyntheticStage(BaseStage):
         v.add_child(gui.Label("Generate Synthetic Targets"))
         v.add_child(gui.Label(""))
         v.add_child(self.arrangement_combo)
-        v.add_child(self.num_targets_slider)
+        v.add_child(self.radio_mode)
+        v.add_child(self.gen_label)
+        v.add_child(self.gen_slider)
         v.add_child(self.btn_generate)
         v.add_child(self.btn_reset)
         v.add_child(self.combobox_targets)
@@ -93,8 +113,44 @@ class SyntheticStage(BaseStage):
         print("loaded synthetic panel")
         return v
 
+    def _is_random(self) -> bool:
+        return self.arrangement_combo.selected_text == "Random"
+
     def _on_arrangement_changed(self, text, idx):
-        self.num_targets_slider.enabled = (text == "Random")
+        # Predicates drive enable/disable; just re-evaluate them.
+        self.enable_widgets()
+
+    def _apply_slider_mode(self, idx: int):
+        """Repurpose the single slider: idx 0 = fill-rate %, idx 1 = override count."""
+        if idx == 0:
+            self.gen_label.text = "Fill Rate (%)"
+            self.gen_slider.set_limits(FILL_SLIDER_MIN, FILL_SLIDER_MAX)   # limits BEFORE value
+            self.gen_slider.int_value = int(round(self.fill_rate * 100))
+        else:
+            self.gen_label.text = "Override Count"
+            self.gen_slider.set_limits(COUNT_SLIDER_MIN, COUNT_SLIDER_MAX)
+            self.gen_slider.int_value = int(self.num_targets)
+
+    def _on_generate_mode_changed(self, idx: int):
+        # Persist the value from the mode being left, then repurpose the slider.
+        if idx == 0:                                   # leaving count -> fill
+            self.num_targets = int(self.gen_slider.int_value)
+        else:                                          # leaving fill -> count
+            self.fill_rate = self.gen_slider.int_value / 100.0
+        self.generate_mode = "fill_rate" if idx == 0 else "count"
+        self._apply_slider_mode(idx)
+        self.enable_widgets()
+
+    def _auto_part_count(self, part_mesh) -> int:
+        """Size the part count to the part so the fixed max-size bin reaches a
+        consistent volumetric fill across all parts, reserving BIN_TOP_MARGIN_FRAC
+        of the bin height as spill headroom. See module constants."""
+        bw, bl, bh, _ = MAX_BIN_DIM
+        usable_h = bh * (1.0 - BIN_TOP_MARGIN_FRAC)   # reserve top headroom to prevent spilling
+        bin_vol  = bw * bl * usable_h
+        mobb_vol = max(float(part_mesh.bounding_box_oriented.volume), 1e-9)
+        n = round(self.fill_rate * PACKING_FACTOR * bin_vol / mobb_vol)
+        return int(np.clip(n, MIN_AUTO_PARTS, MAX_AUTO_PARTS))
 
     def _refresh_ui(self):
         if self.app.headless:
@@ -117,8 +173,12 @@ class SyntheticStage(BaseStage):
         if not self.app.headless:
             self.app.show_progress("Simulating synthetic scene...")
             self.app.main_thread(lambda: self.app._clear_scene())
-            self.num_targets = self.num_targets_slider.int_value
             self.arrangement = self.arrangement_combo.selected_text.lower()
+            self.generate_mode = "fill_rate" if self.radio_mode.selected_index == 0 else "count"
+            if self.generate_mode == "fill_rate":
+                self.fill_rate = self.gen_slider.int_value / 100.0
+            else:
+                self.num_targets = int(self.gen_slider.int_value)
 
         def add_to_render_scene(name:str, geom):
             self.app.synthetic_scenes[name] = O3DSceneObject(geom)
@@ -141,6 +201,12 @@ class SyntheticStage(BaseStage):
             self.app.update_progress(self.worker_step/TOTAL_STEPS, message)
 
         part_mesh = o3d_to_trimesh(self.app.target_mesh)
+        # Fill-rate mode auto-sizes count to the part; structured ignores n_parts (grid sets it).
+        if self.generate_mode == "fill_rate" and self.arrangement == "random":
+            self.num_targets = self._auto_part_count(part_mesh)
+            rp(f"[AUTO-COUNT] fill={self.fill_rate:.0%} "
+               f"part OBB vol={part_mesh.bounding_box_oriented.volume:.2e} m³ "
+               f"-> n_parts={self.num_targets}")
         self.mj_scene = MujocoBinScene(part_mesh, self.app.convex_meshes, n_parts=self.num_targets, render=self.rendering_flag, arrangement=self.arrangement)
         self.mj_scene.simulate()
         self.mj_scene.verify_parts_in_bin()
