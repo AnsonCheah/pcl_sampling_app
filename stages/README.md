@@ -60,7 +60,8 @@ Every stage checks `self.app.headless` at the top of `build_panel()` and `_refre
 ```python
 app = MeshSamplingApp(headless=True, mesh_path="part.STL")
 app.stages[Stage.IMPORT_MESH]._run_worker()
-app.stages[Stage.SYNTHETIC].num_targets = 6
+# Default: auto-size count to ~60% volumetric fill (set generate_mode="count" to override).
+app.stages[Stage.SYNTHETIC].fill_rate = 0.6
 app.stages[Stage.SYNTHETIC]._run_worker()
 ```
 

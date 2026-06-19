@@ -26,7 +26,11 @@ print(f"Process took {time.time() - process_start}s")
 # o3d.visualization.draw_geometries([app.down_pcd], width=1080, height=720, zoom=1.0)
 
 
-app.stages[Stage.SYNTHETIC].num_targets = 6
+# Default: auto-size part count to ~60% volumetric fill of the bin (scales with part size).
+app.stages[Stage.SYNTHETIC].fill_rate = 0.6
+# To force an exact count instead, uncomment:
+# app.stages[Stage.SYNTHETIC].generate_mode = "count"
+# app.stages[Stage.SYNTHETIC].num_targets = 6
 app.stages[Stage.SYNTHETIC].rendering_flag = True
 app.stages[Stage.SYNTHETIC]._run_worker()
 rp([obj.geom for obj in app.stages[Stage.SYNTHETIC].o3d_scene.values()])

@@ -58,7 +58,11 @@ app.stages[Stage.IMPORT_MESH]._run_worker()
 app.stages[Stage.DOWNSAMPLE].use_adaptive = True
 app._express_sampling_worker()
 
-app.stages[Stage.SYNTHETIC].num_targets = 6
+# Default: auto-size part count to ~60% volumetric fill of the bin.
+app.stages[Stage.SYNTHETIC].fill_rate = 0.6
+# To force an exact count instead:
+#   app.stages[Stage.SYNTHETIC].generate_mode = "count"
+#   app.stages[Stage.SYNTHETIC].num_targets = 6
 app.stages[Stage.SYNTHETIC]._run_worker()
 ```
 
