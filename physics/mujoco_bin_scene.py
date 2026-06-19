@@ -19,7 +19,14 @@ from pathlib import Path
 
 JITTER_DEG = [3,3,3]
 HOPPER_INWARD_OFFSET = 0.02   # hopper walls inset this far inside the bin wall plane
-HOPPER_TOP_Z = 100            # hopper walls extend to this z; generous upper bound
+HOPPER_TOP_Z = 5            # hopper walls extend to this z; generous upper bound
+MAX_BIN_DIM = (0.76, 0.585, 0.25, 0.005)   # (width, length, height, wall_thickness) m — fixed bin size
+
+# Batched-release settling (random arrangement). Parts are released in waves just above the
+# growing pile so none free-falls from a great height (bounds impact velocity → no tunneling).
+PARKING_Z                = 10.0   # m — z of parked (not-yet-released) bodies (collisions off)
+BATCH_DROP_OFFSET        = 0.05   # m — gap between current pile top and a wave's spawn z
+BATCH_RELEASE_INTERVAL_S = 0.5   # s — fixed cadence between releases (no per-batch full settle)
 
 
 @dataclass
@@ -28,12 +35,18 @@ class SceneObject:
     body_name: str
 
 class MujocoBinScene:
-    def __init__(self, part_mesh, part_convex_meshes, n_parts=1, bin_dim=(0.76, 0.585, 0.25, 0.005), settle_time=10.0, render=True, arrangement: str = "random", stable_pose_R: np.ndarray = None):
-        self.timestep = 0.002
+    def __init__(self, part_mesh, part_convex_meshes, n_parts=1, bin_dim=MAX_BIN_DIM, settle_time=5.0, render=True, arrangement: str = "random", stable_pose_R: np.ndarray = None, timestep: float = 0.001):
+        # Timestep is the primary anti-tunneling lever: MuJoCo has no continuous collision
+        # detection, so per-step displacement (~vel_cap*dt) must stay under ~o_margin. With
+        # vel_cap=1.5 m/s and o_margin=1 mm the hard-safe bound is dt <= 6.7e-4; the stiff
+        # solver tolerates somewhat larger in practice (see the dt sweep in physics/tests).
+        self.timestep = timestep
         self.lvel_threshold = 0.03
         self.avel_threshold = 0.5
         self.stable_duration = 0.5
         self._stable_count = 0
+        self.vel_cap = 1.5            # m/s — per-step linear-velocity clamp (safeguard);
+        #                               at this cap v*dt = 0.75 mm < o_margin (1 mm).
         # self.rendering_flag = True
         self.verbose = True
         self.stable_steps = int(self.stable_duration / self.timestep)
@@ -54,16 +67,30 @@ class MujocoBinScene:
         self.arrangement = arrangement
         self.stable_pose_R = stable_pose_R  # optional forced stable orientation for structured mode
 
+        # Batched-release state (random arrangement) — populated by _generate_random_scene /
+        # _cache_body_topology; see release_batch() and simulate().
+        self._batch_of_body = []              # per-part batch index
+        self._body_ids = []                   # MuJoCo body id per part (compile order)
+        self._geom_ids_of_body = []           # geom ids per part
+        self._adr_of_body = []                # (qpos_adr, qvel_adr) of each part's freejoint
+        self._pile_top = 0.0                  # running top-of-settled-pile estimate (m)
+        self._h_layer = 0.0                   # cached worst-case tilted part height (m)
+        self._valid_poses_for_rotation = None # cached stable poses for constrained sampling
+
         self.spec = mujoco.MjSpec()
         self.spec.option.timestep = self.timestep
         self.spec.option.gravity = [0, 0, -9.81]
         self.spec.option.o_margin = 0.001
         self.spec.option.iterations = 200
+        self.spec.option.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST  # stable for stiff multi-contact
+        self.spec.option.cone = mujoco.mjtCone.mjCONE_ELLIPTIC                  # pile stability
+        self.spec.option.enableflags |= mujoco.mjtEnableBit.mjENBL_MULTICCD     # multi-point mesh contacts
         self.spec.memory = 3000*1024*1024
         default = self.spec.default.geom
         default.condim = 6
         default.friction = [1.5, 0.005, 0.0001]
-        default.solref= [0.002, 1]
+        default.solref = [max(0.002, 2 * self.timestep), 1]   # timeconst >= 2*dt (MuJoCo floor), stiff
+        default.solimp = [0.95, 0.99, 0.001, 0.5, 2] # high impedance -> less resting penetration
         default.contype = 1
         default.conaffinity = 1
 
@@ -471,42 +498,74 @@ class MujocoBinScene:
         return trimesh.util.concatenate(meshes)
 
     def _generate_random_scene(self):
+        """
+        Assign parts to batches and lay out their spawn poses for a batched release.
+
+        Batch 0 is placed near the bin floor via collision-aware sampling (so the first
+        wave starts low). Every later batch is parked at PARKING_Z with collisions disabled
+        (set in _cache_body_topology) and is teleported just above the growing pile by
+        release_batch() during simulate(). This bounds every part's fall distance to ~one
+        layer regardless of part size or count — eliminating the old layer-stacking height
+        creep that drove big parts to high-velocity, penetrating impacts.
+        """
         bin_ct = self._build_bin_collision_trimesh()
         collision_manager = CollisionManager()
         collision_manager.add_object("bin", bin_ct)
         radius = self.part_mesh.bounding_sphere.primitive.radius
-        batch_size = min(10, int((2 * self.hx) // (2 * radius)) * int((2 * self.hy) // (2 * radius)))
-        valid_poses = np.zeros((self.n_parts, 7))
+        # XY spawn inset: bounding-sphere radius (+ wall thickness) keeps the part inside the
+        # walls in ANY orientation. The old 2*radius was double this, which forced big parts to
+        # spawn at the bin centre and pile into a central tower.
+        margin = radius + self.bin_dim[3]
+        batch_size = max(1, min(10, int((2 * self.hx) // (2 * radius)) * int((2 * self.hy) // (2 * radius))))
+        n_batches  = int(np.ceil(self.n_parts / batch_size))
+
         valid_poses_for_rotation = self._compute_valid_stable_poses()
-        max_tilted_height = self._compute_max_tilted_height(valid_poses_for_rotation)
+        self._valid_poses_for_rotation = valid_poses_for_rotation
+        self._h_layer = self._compute_max_tilted_height(valid_poses_for_rotation)
+
+        valid_poses = np.zeros((self.n_parts, 7))
+        self._batch_of_body = [i // batch_size for i in range(self.n_parts)]
+
+        active_z_lo = max(self._h_layer, 0.3)
+        active_z_hi = active_z_lo + self._h_layer * 1.0
         for i in range(self.n_parts):
-            success = False
-            candidate_trimesh = copy.deepcopy(self.part_mesh)
-            for _ in range(200):
-                layer = i // batch_size
-                x = np.random.uniform(-self.hx + radius*2, self.hx - radius*2)
-                y = np.random.uniform(-self.hy + radius*2, self.hy - radius*2)
-                # Bin floor at z=0, gravity -Z. Stack layers upward from floor.
-                # Layer spacing uses max_tilted_height so parts have adequate clearance.
-                z = max(max_tilted_height, 0.08) + layer * (2.5 * max_tilted_height) + np.random.uniform(0, max_tilted_height * 0.5)
-                pos = np.asarray([x, y, z])
-                T = np.eye(4)
-                T[:3, 3] = pos
-                T[:3, :3] = self._sample_constrained_rotation(valid_poses_for_rotation)
-                T = self.bin_transform @ T
-                quat = R.from_matrix(T[:3, :3]).as_quat(scalar_first=True)
-                is_collision, _, _ = collision_manager.in_collision_single(candidate_trimesh, transform=T, return_names=True, return_data=True)
-                if is_collision:
-                    continue
-                valid_poses[i, :3] = pos
+            placed_active = False
+            if self._batch_of_body[i] == 0:
+                candidate_trimesh = copy.deepcopy(self.part_mesh)
+                for _ in range(200):
+                    x = np.random.uniform(-self.hx + margin, self.hx - margin)
+                    y = np.random.uniform(-self.hy + margin, self.hy - margin)
+                    z = np.random.uniform(active_z_lo, active_z_hi)
+                    pos = np.asarray([x, y, z])
+                    T = np.eye(4)
+                    T[:3, 3] = pos
+                    T[:3, :3] = self._sample_constrained_rotation(valid_poses_for_rotation)
+                    T = self.bin_transform @ T
+                    quat = R.from_matrix(T[:3, :3]).as_quat(scalar_first=True)
+                    is_collision, _, _ = collision_manager.in_collision_single(candidate_trimesh, transform=T, return_names=True, return_data=True)
+                    if is_collision:
+                        continue
+                    valid_poses[i, :3] = pos
+                    valid_poses[i, 3:] = quat
+                    collision_manager.add_object(f"part_{i}", candidate_trimesh, transform=T)
+                    placed_active = True
+                    break
+                if not placed_active:
+                    # Could not fit in batch 0 — demote to the last batch; release_batch()
+                    # will drop it onto the pile later.
+                    self._batch_of_body[i] = max(1, n_batches - 1)
+                    print(f"[WARNING] Could not place part {i} in batch 0; demoted to batch {self._batch_of_body[i]}")
+
+            if not placed_active:
+                # Park above the scene (random XY for visualization; collisions disabled later).
+                x = np.random.uniform(-self.hx + margin, self.hx - margin)
+                y = np.random.uniform(-self.hy + margin, self.hy - margin)
+                z = PARKING_Z + self._batch_of_body[i] * 0.2
+                R_mat = self._sample_constrained_rotation(valid_poses_for_rotation)
+                quat = R.from_matrix(R_mat).as_quat(scalar_first=True)
+                valid_poses[i, :3] = [x, y, z]
                 valid_poses[i, 3:] = quat
-                collision_manager.add_object(f"part_{i}", candidate_trimesh, transform=T)
-                success = True
-                print(f"Generated part {i+1}/{self.n_parts}")
-                break
-            if not success:
-                print(f"[WARNING] Could not place part {i} without intersection")
-        print(f"[INFO] Successfully placed {len(valid_poses)} parts")
+        print(f"[INFO] {self.n_parts} parts in {max(self._batch_of_body) + 1} batches (batch_size={batch_size})")
         self._spawn_bodies(valid_poses)
 
     def _generate_structured_scene(self):
@@ -530,6 +589,92 @@ class MujocoBinScene:
         # Static bodies — no freejoint; non-intersection guaranteed by grid pitch
         self._spawn_bodies(valid_poses, static=True)
 
+    def _cache_body_topology(self):
+        """
+        Cache per-part body id, geom ids, and freejoint (qpos_adr, qvel_adr); disable
+        collisions on parked (batch > 0) bodies so they wait in isolation until released.
+        Must run after self.spec.compile() and self.data = MjData(...).
+        """
+        self._body_ids = []
+        self._geom_ids_of_body = []
+        self._adr_of_body = []
+        for obj in self.scene_objects:
+            bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, obj.body_name)
+            if bid < 0:
+                raise RuntimeError(f"Body {obj.body_name} not found in compiled model")
+            self._body_ids.append(bid)
+            g_start = int(self.model.body_geomadr[bid])
+            g_count = int(self.model.body_geomnum[bid])
+            self._geom_ids_of_body.append(list(range(g_start, g_start + g_count)))
+            jnt  = int(self.model.body_jntadr[bid])
+            qadr = int(self.model.jnt_qposadr[jnt])
+            vadr = int(self.model.jnt_dofadr[jnt])
+            self._adr_of_body.append((qadr, vadr))
+
+        for i, batch in enumerate(self._batch_of_body):
+            if batch > 0:
+                for gid in self._geom_ids_of_body[i]:
+                    self.model.geom_contype[gid] = 0
+                    self.model.geom_conaffinity[gid] = 0
+
+    def release_batch(self, k: int):
+        """
+        Enable collisions for batch k and teleport its parts just above the pile, zeroing
+        their velocity. drop_z is measured from SETTLED parts only (linear speed below
+        threshold), so still-falling parts from the previous wave cannot inflate the spawn
+        height — this is what keeps the pipelined release from re-introducing height creep.
+        """
+        batch_indices = [i for i, b in enumerate(self._batch_of_body) if b == k]
+        if not batch_indices:
+            return
+
+        released_bids = [self._body_ids[i] for i, b in enumerate(self._batch_of_body) if b < k]
+        if released_bids:
+            cvel = self.data.cvel[released_bids]               # [ang(3), lin(3)] per body
+            lin  = np.linalg.norm(cvel[:, 3:], axis=1)
+            slow_bids = [bid for bid, sp in zip(released_bids, lin) if sp < self.lvel_threshold]
+            if slow_bids:
+                self._pile_top = max(self._pile_top, float(self.data.xpos[slow_bids, 2].max()))
+        else:
+            self._pile_top = max(self._pile_top, 2 * self.bin_dim[3])  # ~ bin floor + wall thickness
+
+        drop_z = self._pile_top + BATCH_DROP_OFFSET + self._h_layer * 0.5
+        radius = self.part_mesh.bounding_sphere.primitive.radius
+        margin = radius + self.bin_dim[3]   # see _generate_random_scene
+
+        # Place batch members collision-free w.r.t. each other (like batch 0): parts in the same
+        # batch share one drop band, so without this small parts — which pack up to 10 per batch —
+        # spawn already interpenetrating. Rejection-sample each pose against the ones already
+        # accepted this batch; fall back to the last candidate if a crowded batch leaves no gap.
+        cm = CollisionManager()
+        for i in batch_indices:
+            for gid in self._geom_ids_of_body[i]:
+                self.model.geom_contype[gid] = 1
+                self.model.geom_conaffinity[gid] = 1
+            x = y = z = None
+            R_mat = T = None
+            for _ in range(100):
+                cx = np.random.uniform(-self.hx + margin, self.hx - margin)
+                cy = np.random.uniform(-self.hy + margin, self.hy - margin)
+                cz = drop_z + np.random.uniform(0, self._h_layer * 0.3)
+                R_cand = self._sample_constrained_rotation(self._valid_poses_for_rotation)
+                T = np.eye(4)
+                T[:3, :3] = R_cand
+                T[:3, 3]  = [cx, cy, cz]
+                if cm.in_collision_single(self.part_mesh, transform=T):
+                    continue
+                x, y, z, R_mat = cx, cy, cz, R_cand
+                break
+            if R_mat is None:           # crowded — accept the last candidate unchecked (rare)
+                x, y, z, R_mat = cx, cy, cz, R_cand
+            cm.add_object(f"b{k}_{i}", self.part_mesh, transform=T)
+            quat = R.from_matrix(R_mat).as_quat(scalar_first=True)
+            qadr, vadr = self._adr_of_body[i]
+            self.data.qpos[qadr:qadr+3]   = [x, y, z]
+            self.data.qpos[qadr+3:qadr+7] = quat        # [w, x, y, z]
+            self.data.qvel[vadr:vadr+6]   = 0.0
+        mujoco.mj_forward(self.model, self.data)
+
     def generate_scene(self):
         self.part_counter = 0
         if self.arrangement == "structured":
@@ -544,6 +689,8 @@ class MujocoBinScene:
             mujoco.mj_forward(self.model, self.data)  # populate xpos/xquat without dynamics
             return
 
+        self._cache_body_topology()   # body/geom/freejoint addressing + park later batches
+
         if self.render_flag and self.viewer is None:
             self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
             self.viewer.cam.distance = self.camera_distance
@@ -551,8 +698,35 @@ class MujocoBinScene:
             self.viewer.cam.elevation = -30
             self.viewer.cam.lookat[:] = [0, 0, self.hh * 0.5]  # centre of bin interior
 
-    def is_settled(self) -> bool:
-        cvel = self.data.cvel[1:]  # skip worldbody, shape: (nbody-1, 6)
+    def _clamp_velocities(self):
+        """
+        Clamp each free body's LINEAR speed to vel_cap — a cheap per-step anti-tunneling
+        safeguard (one small vector op per part vs. the full mj_step solve). Angular velocity
+        is left untouched. No-op for parked bodies, whose qvel is held at zero each step.
+        """
+        if self.vel_cap is None:
+            return
+        qvel = self.data.qvel
+        for _, vadr in self._adr_of_body:
+            v  = qvel[vadr:vadr+3]
+            sp = float(np.linalg.norm(v))
+            if sp > self.vel_cap:
+                v *= self.vel_cap / sp
+
+    def is_settled(self, body_id_subset=None) -> bool:
+        """
+        body_id_subset: optional iterable of body IDs to consider. When set, only those
+        bodies' velocities count toward the settle check (used by batched release so parked
+        and not-yet-released bodies are ignored).
+        """
+        if body_id_subset is not None:
+            ids = list(body_id_subset)
+            if not ids:
+                self._stable_count += 1
+                return self._stable_count >= self.stable_steps
+            cvel = self.data.cvel[ids]
+        else:
+            cvel = self.data.cvel[1:]  # skip worldbody, shape: (nbody-1, 6)
         ang_speeds = np.linalg.norm(cvel[:, :3], axis=1)
         lin_speeds = np.linalg.norm(cvel[:, 3:], axis=1)
         max_lin = lin_speeds.max() if len(lin_speeds) else 0.0
@@ -565,22 +739,63 @@ class MujocoBinScene:
         if self.arrangement == "structured":
             print("[INFO] Structured arrangement: skipping simulation and settling")
             return  # poses are final; mj_forward already called in generate_scene
-        input("Press Enter to start simulation...")
-        steps = int(self.settle_time / self.model.opt.timestep)
 
-        # Phase 1: settle with hopper walls active
-        for i in range(steps):
-            print(f"[t={self.data.time:.2f}s] step={i}/{steps}") if i%int(1.0 / self.model.opt.timestep)==0 else None
-            step_start = time.time()
-            mujoco.mj_step(self.model, self.data)
-            if self.viewer is not None: self.viewer.sync()
-            if self.is_settled():
-                print(f"[t={self.data.time:.2f}s] Phase-1 settled at step {i}")
-                break
-            if self.render_flag:
-                elapsed = time.time() - step_start
-                remaining = max(0, self.model.opt.timestep - elapsed)
-                time.sleep(remaining)
+        n_batches = (max(self._batch_of_body) + 1) if self._batch_of_body else 1
+
+        # Snapshot parking qpos so parked (not-yet-released) bodies can be held in place each
+        # step: contype=0 disables collisions, not gravity, so without this they free-fall.
+        parking_qpos = {}
+        for i, b in enumerate(self._batch_of_body):
+            if b > 0:
+                qadr, _ = self._adr_of_body[i]
+                parking_qpos[i] = self.data.qpos[qadr:qadr+7].copy()
+
+        def freeze_parked(parked_ids):
+            for i in parked_ids:
+                qadr, vadr = self._adr_of_body[i]
+                self.data.qpos[qadr:qadr+7] = parking_qpos[i]
+                self.data.qvel[vadr:vadr+6] = 0.0
+
+        def run(max_steps, label, body_subset=None, parked_ids=(), check_settle=True):
+            self._stable_count = 0
+            tick = max(1, int(1.0 / self.model.opt.timestep))
+            for i in range(max_steps):
+                if i % tick == 0:
+                    print(f"[t={self.data.time:.2f}s] {label} step={i}/{max_steps}")
+                step_start = time.time()
+                mujoco.mj_step(self.model, self.data)
+                self._clamp_velocities()
+                if parked_ids:
+                    freeze_parked(parked_ids)
+                if self.viewer is not None: self.viewer.sync()
+                if check_settle and self.is_settled(body_id_subset=body_subset):
+                    print(f"[t={self.data.time:.2f}s] {label} settled at step {i}")
+                    return
+                if self.render_flag:
+                    elapsed = time.time() - step_start
+                    remaining = max(0, self.model.opt.timestep - elapsed)
+                    time.sleep(remaining)
+
+        interval_steps = int(BATCH_RELEASE_INTERVAL_S / self.model.opt.timestep)
+        released_ids = [self._body_ids[i] for i, b in enumerate(self._batch_of_body) if b == 0]
+
+        # Batch 0 is already near the floor — step the fixed interval to let it begin settling.
+        parked_now = [i for i, b in enumerate(self._batch_of_body) if b > 0]
+        run(interval_steps, "batch-0", body_subset=released_ids, parked_ids=parked_now, check_settle=False)
+
+        # Pipelined release: drop each wave just above the pile and step a fixed interval — do
+        # NOT wait for full settle between waves (the speed fix). drop_z tracks only settled
+        # parts (see release_batch) so fall height stays bounded even while the pile is moving.
+        for k in range(1, n_batches):
+            self.release_batch(k)
+            for i in [idx for idx, b in enumerate(self._batch_of_body) if b == k]:
+                parking_qpos.pop(i, None)
+            released_ids.extend(self._body_ids[i] for i, b in enumerate(self._batch_of_body) if b == k)
+            parked_now = [i for i, b in enumerate(self._batch_of_body) if b > k]
+            run(interval_steps, f"batch-{k}", body_subset=released_ids, parked_ids=parked_now, check_settle=False)
+
+        # Final full settle over all released bodies (hopper still active).
+        run(int(self.settle_time / self.model.opt.timestep), "phase-1-final", body_subset=None)
 
         # Disable hopper extensions so parts leaning on them can fall flat.
         for name in self._hopper_geom_names:
@@ -589,20 +804,8 @@ class MujocoBinScene:
                 self.model.geom_contype[gid] = 0
                 self.model.geom_conaffinity[gid] = 0
 
-        # Phase 2: short re-settle after hopper walls removed
-        self._stable_count = 0
-        settle2_steps = int(2.0 / self.model.opt.timestep)
-        for i in range(settle2_steps):
-            step_start = time.time()
-            mujoco.mj_step(self.model, self.data)
-            if self.viewer is not None: self.viewer.sync()
-            if self.is_settled():
-                print(f"[t={self.data.time:.2f}s] Phase-2 settled at step {i}")
-                break
-            if self.render_flag:
-                elapsed = time.time() - step_start
-                remaining = max(0, self.model.opt.timestep - elapsed)
-                time.sleep(remaining)
+        # Phase 2: short re-settle after hopper walls removed.
+        run(int(2.0 / self.model.opt.timestep), "phase-2", body_subset=None)
 
         if self.viewer is not None: self.viewer.close()
 

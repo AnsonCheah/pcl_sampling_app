@@ -30,7 +30,12 @@ from rich import print as rp
 np.set_printoptions(precision=6, suppress=True)
 
 SCENE_FILL_RATE     = 0.6    # default fill rate (fraction of safe capacity)
-PACKING_FACTOR      = 0.6    # random-packing efficiency for part OBB volumes
+# Shape-aware random-packing efficiency for part OBB volumes. A fixed factor is only valid for
+# cube-like parts; random packing fraction falls ~1/aspect_ratio for elongated/flat parts
+# (Philipse random-contact scaling; see _auto_part_count). We taper from a cube anchor by the
+# OBB edge ratio so big elongated parts no longer over-count.
+PACKING_FACTOR_BASE  = 0.62  # cube/blocky parts (sphere random-close-pack band)
+PACKING_FACTOR_FLOOR = 0.18  # keep very thin/long parts from collapsing toward 0
 BIN_TOP_MARGIN_FRAC = 0.20   # reserve top 20% of bin height as spill headroom
 MIN_AUTO_PARTS      = 2      # never fewer than this
 MAX_AUTO_PARTS      = 500    # safety cap (tune): tiny parts otherwise explode the sim
@@ -144,12 +149,22 @@ class SyntheticStage(BaseStage):
     def _auto_part_count(self, part_mesh) -> int:
         """Size the part count to the part so the fixed max-size bin reaches a
         consistent volumetric fill across all parts, reserving BIN_TOP_MARGIN_FRAC
-        of the bin height as spill headroom. See module constants."""
+        of the bin height as spill headroom. See module constants.
+
+        The packing factor is shape-aware: it tapers from PACKING_FACTOR_BASE by the OBB
+        aspect ratio (longest/shortest edge) so elongated/flat parts — which pack far less
+        densely — no longer over-count. We do NOT also multiply by solidity: the count divides
+        by OBB volume, so the correct multiplier is the box-packing fraction (folding solidity
+        in again would double-count). Anchors: AR 1->0.62, 2->0.44, 4->0.31, >=12->0.18 floor."""
         bw, bl, bh, _ = MAX_BIN_DIM
         usable_h = bh * (1.0 - BIN_TOP_MARGIN_FRAC)   # reserve top headroom to prevent spilling
         bin_vol  = bw * bl * usable_h
         mobb_vol = max(float(part_mesh.bounding_box_oriented.volume), 1e-9)
-        n = round(self.fill_rate * PACKING_FACTOR * bin_vol / mobb_vol)
+        ext = np.sort(part_mesh.bounding_box_oriented.extents)[::-1]   # e1 >= e2 >= e3
+        aspect_ratio   = float(ext[0] / max(ext[2], 1e-9))
+        packing_factor = max(PACKING_FACTOR_FLOOR, PACKING_FACTOR_BASE / np.sqrt(aspect_ratio))
+        n = round(self.fill_rate * packing_factor * bin_vol / mobb_vol)
+        rp(f"[PACKING] OBB aspect ratio={aspect_ratio:.2f} -> packing_factor={packing_factor:.3f}")
         return int(np.clip(n, MIN_AUTO_PARTS, MAX_AUTO_PARTS))
 
     def _refresh_ui(self):
