@@ -59,6 +59,7 @@ class SyntheticStage(BaseStage):
         self.rendering_flag = False
         self.verbose = True
         self.o3d_scene = {}
+        self.stable_pose_R = None   # optional forced stable orientation (structured mode, set per-pose by headless driver)
 
     def build_panel(self):
         if self.app.headless:
@@ -167,14 +168,38 @@ class SyntheticStage(BaseStage):
         rp(f"[PACKING] OBB aspect ratio={aspect_ratio:.2f} -> packing_factor={packing_factor:.3f}")
         return int(np.clip(n, MIN_AUTO_PARTS, MAX_AUTO_PARTS))
 
+    def _display_convex_meshes(self):
+        """GUI helper: show each convex hull in a distinct HSV colour."""
+        n = len(self.app.convex_meshes)
+        for i, mesh in enumerate(self.app.convex_meshes):
+            material = rendering.MaterialRecord()
+            material.shader = "defaultLit"
+            rgb = colorsys.hsv_to_rgb(i / max(n, 1), 0.6, 0.9)
+            material.base_color = list(rgb) + [1.0]
+            geom = o3d.geometry.TriangleMesh(mesh)
+            geom.compute_vertex_normals()
+            self.app.scene.scene.add_geometry(f"convex_{i}", geom, material)
+
     def _refresh_ui(self):
         if self.app.headless:
             return
+        if len(self.app.synthetic_targets) > 0:
+            # Targets already generated — keep the segmented preview on screen.
+            self.show_segmented_scene()
+        else:
+            # Stage entry, before generation: show the decomposed convex hulls.
+            self.app.main_thread(lambda: self.app._clear_scene())
+            if len(self.app.convex_meshes) > 0:
+                self.app.main_thread(self._display_convex_meshes)
+            elif self.app.target_mesh is not None:
+                self.app.main_thread(lambda: self.app.scene.scene.add_geometry(
+                    "mesh", self.app.target_mesh, self.app.default_material))
         self.enable_widgets()
 
     def reset(self):
-        self.combobox_targets.clear_items()
-        self.combobox_scenes.clear_items()
+        if not self.app.headless:
+            self.combobox_targets.clear_items()
+            self.combobox_scenes.clear_items()
         self.app.synthetic_targets = {}
         self.app.synthetic_scenes = {}
         self.o3d_scene = {}
@@ -184,6 +209,13 @@ class SyntheticStage(BaseStage):
     def worker(self):
         TOTAL_STEPS = 10
         self.reset()
+
+        # The MuJoCo passive viewer is blocking and must never run headless/batch.
+        if self.app.headless:
+            self.rendering_flag = False
+        if not self.app.convex_meshes:
+            print("[WARN] No convex meshes available — run DecomposeStage before SYNTHETIC; "
+                  "simulation collisions will be degraded.")
 
         if not self.app.headless:
             self.app.show_progress("Simulating synthetic scene...")
@@ -222,7 +254,7 @@ class SyntheticStage(BaseStage):
             rp(f"[AUTO-COUNT] fill={self.fill_rate:.0%} "
                f"part OBB vol={part_mesh.bounding_box_oriented.volume:.2e} m³ "
                f"-> n_parts={self.num_targets}")
-        self.mj_scene = MujocoBinScene(part_mesh, self.app.convex_meshes, n_parts=self.num_targets, render=self.rendering_flag, arrangement=self.arrangement)
+        self.mj_scene = MujocoBinScene(part_mesh, self.app.convex_meshes, n_parts=self.num_targets, render=self.rendering_flag, arrangement=self.arrangement, stable_pose_R=self.stable_pose_R)
         self.mj_scene.simulate()
         self.mj_scene.verify_parts_in_bin()
         scene_state = self.mj_scene.extract_scene_state()
@@ -355,23 +387,23 @@ class SyntheticStage(BaseStage):
             )
             if not self.app.headless: self.combobox_targets.add_item(inst_name)
             
+        # default_point_material only exists in GUI mode; omit it when headless.
+        self.app.synthetic_scenes["bin_pcd"] = O3DSceneObject(
+            geom=bin_pcd,
+            material=None if self.app.headless else self.app.default_point_material)
+
         if not self.app.headless:
             bin_pcd.paint_uniform_color([1., 1., 1.])
             saturation, value = 0.4, 0.9
             hues = np.linspace(0, 1, len(self.app.synthetic_targets), endpoint=False).tolist()
             colors = [list(colorsys.hsv_to_rgb(h, saturation, value)) for h in hues]
             self.app.main_thread(lambda: self.app._clear_scene())
-            self.app.synthetic_scenes["bin_pcd"] = O3DSceneObject(geom=bin_pcd, material=self.app.default_point_material)
             for index, (key, value) in enumerate(self.app.synthetic_targets.items()):
                 material = rendering.MaterialRecord()
                 material.point_size = 1.5
                 material.base_color = colors[index] + [1.0]
                 value.material = material
                 self.app.scene.scene.add_geometry(key, value.geom, value.material)
-
-        self.app.synthetic_scenes["bin_pcd"] = O3DSceneObject(geom=bin_pcd, material=self.app.default_point_material)
-
-        if not self.app.headless:
             self.combobox_scenes.selected_text = "segmented_bin_scene"
             self.combobox_scenes.add_item("segmented_bin_scene")
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry("bin_pcd", bin_pcd, self.app.default_point_material))

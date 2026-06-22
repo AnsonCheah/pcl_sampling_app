@@ -24,7 +24,7 @@ registration/      ← no local imports (standalone)
     ↑
 stages/            ← geometry, sensor, physics
     ↑
-app_v2.py          ← stages only
+app.py             ← stages only
 ```
 
 Domain logic lives in its domain package. `stages/` orchestrates but does not implement physics or sensor math.
@@ -43,13 +43,20 @@ Python interpreter: `C:\Users\Hmgics\AppData\Local\anaconda3\envs\pcd-sampling\p
 ### GUI
 
 ```bash
-python app_v2.py
+python app.py
+```
+
+### Headless (interactive)
+
+```bash
+python app.py --headless                 # prompts for mesh + options
+python app.py --headless --mesh part.STL  # pre-seed the mesh, skip the prompt
 ```
 
 ### Headless (scripted)
 
 ```python
-from app_v2 import MeshSamplingApp
+from app import MeshSamplingApp
 from enums import Stage
 
 app = MeshSamplingApp(headless=True, mesh_path="part.STL")

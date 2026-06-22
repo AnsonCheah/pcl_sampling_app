@@ -28,7 +28,7 @@ registration/      ← no local imports (standalone)
     ↑
 stages/            ← geometry, sensor, physics (not registration yet)
     ↑
-app_v2.py          ← stages only
+app.py             ← stages only
 ```
 
 

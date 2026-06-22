@@ -1,4 +1,4 @@
-from app_v2 import MeshSamplingApp
+from app import MeshSamplingApp
 from enums import Stage
 # from synthetic_pcl_utils import scene_render, fibonacci_sphere, projector_from_camera
 import numpy as np
