@@ -59,6 +59,7 @@ class SyntheticStage(BaseStage):
         self.rendering_flag = False
         self.verbose = True
         self.o3d_scene = {}
+        self.T_cam = np.eye(4)      # world->camera view matrix; set per-scene in worker(), exported in save
         self.stable_pose_R = None   # optional forced stable orientation (structured mode, set per-pose by headless driver)
 
     def build_panel(self):
@@ -274,6 +275,7 @@ class SyntheticStage(BaseStage):
         cam_pos = np.asarray([0.0, 0.0, self.mj_scene.camera_distance])  # above bin
         look_at = np.asarray([0.0, 0.0, 0.0])                           # bin floor centre
         T_cam = camera_view_matrix(cam_pos, look_at, up=np.array([0.0, 1.0, 0.0]))
+        self.T_cam = T_cam   # kept for scene-state export in save_synthetic_targets
 
         self.app._reframe()
 
@@ -316,7 +318,9 @@ class SyntheticStage(BaseStage):
         _update_pb("Adding surface noises...")
 
         pts = add_surface_noise(pts, nrm, verbose=self.verbose)
-        add_to_render_scene("surface_noise_scene", o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts)))
+        surface_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
+        surface_pcd.normals = o3d.utility.Vector3dVector(nrm)   # kept so the full scene can be exported as PLY
+        add_to_render_scene("surface_noise_scene", surface_pcd)
         _update_pb("Synthesizing segmentation erosion/dilation...")
 
         label_masks = segment_point_cloud(  # {geom_id: (N,) bool} — one mask per instance, may overlap
@@ -420,6 +424,24 @@ class SyntheticStage(BaseStage):
             out_dir = out_dir / f"scene_{scene_num:05}"
             out_dir.mkdir(parents=True, exist_ok=True)
             self.app.stages[Stage.SAVE].worker(path=(out_dir))
+
+            # Full unsegmented scene (all instances + bin + outliers, post-noise) alongside the per-instance clouds.
+            scene_obj = self.app.synthetic_scenes.get("surface_noise_scene")
+            if scene_obj is not None:
+                pointcloud_to_ply(scene_obj.geom, out_dir / "scene.ply")
+
+            # Final scene state: per-part GT poses + bin geometry (from the sim) + camera matrix.
+            if getattr(self, "mj_scene", None) is not None:
+                state = self.mj_scene.export_scene_state()
+                state.update(
+                    T_cam      = np.asarray(self.T_cam, dtype=np.float64),  # world -> camera view matrix
+                    fov_deg    = np.float64(self.fov_deg),
+                    res_width  = np.int64(self.res_width),
+                    res_height = np.int64(self.res_height),
+                    source     = str(out_dir).encode(),
+                )
+                np.savez(out_dir / "scene_state.npz", **state)
+
             for i, value in enumerate(self.app.synthetic_targets.values()):
                 tf = value.T_gt # this is in 4x4 matrix
                 gt_comments = []

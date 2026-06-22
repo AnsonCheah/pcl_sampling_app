@@ -887,6 +887,35 @@ class MujocoBinScene:
             }
         return scene_dict
 
+    def export_scene_state(self):
+        """
+        Serializable final scene state for NPZ export. Builds on extract_scene_state():
+        packs every settled body's GT pose into a stacked 4x4 transform array and adds
+        the bin geometry (dims + placement). Camera extrinsics/intrinsics are owned by the
+        rendering stage, not the sim, so they are added there.
+
+        Returns a flat dict of numpy arrays ready to splat into np.savez.
+        """
+        state = self.extract_scene_state()
+        body_names  = list(state.keys())
+        positions   = np.array([state[n]["position"]   for n in body_names], dtype=np.float64)
+        quaternions = np.array([state[n]["quaternion"] for n in body_names], dtype=np.float64)  # wxyz
+
+        T_gt = np.tile(np.eye(4), (len(body_names), 1, 1))
+        for i in range(len(body_names)):
+            T_gt[i, :3, :3] = R.from_quat(quaternions[i], scalar_first=True).as_matrix()
+            T_gt[i, :3, 3]  = positions[i]
+
+        return {
+            "body_names":       np.array(body_names),
+            "positions":        positions,                                   # (n,3) world xyz
+            "quaternions_wxyz": quaternions,                                 # (n,4) world wxyz
+            "T_gt":             T_gt,                                        # (n,4,4) part_frame -> world
+            "bin_dim":          np.asarray(self.bin_dim, dtype=np.float64),  # (width, length, height, wall_thickness) m
+            "bin_transform":    np.asarray(self.bin_transform, dtype=np.float64),
+            "camera_distance":  np.float64(self.camera_distance),
+        }
+
     def mujoco_scene_to_o3d(self, scene_dict):
         """
         scene_dict : dict
