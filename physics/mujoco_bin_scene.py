@@ -611,6 +611,16 @@ class MujocoBinScene:
             vadr = int(self.model.jnt_dofadr[jnt])
             self._adr_of_body.append((qadr, vadr))
 
+        # Precompute flat qpos/qvel index matrices so the per-step velocity clamp and
+        # parked-body freeze are single vectorized writes instead of Python loops over
+        # every part (the dominant per-step overhead at high part counts). Layout per
+        # freejoint: qpos = [x,y,z, qw,qx,qy,qz] (7), qvel = [lin(3), ang(3)] (6).
+        qadr_arr = np.array([q for q, _ in self._adr_of_body], dtype=np.intp)
+        vadr_arr = np.array([v for _, v in self._adr_of_body], dtype=np.intp)
+        self._qpos_idx7  = qadr_arr[:, None] + np.arange(7, dtype=np.intp)   # (n,7)
+        self._qvel_idx6  = vadr_arr[:, None] + np.arange(6, dtype=np.intp)   # (n,6)
+        self._lin_vel_idx = vadr_arr[:, None] + np.arange(3, dtype=np.intp)  # (n,3) linear DOFs
+
         for i, batch in enumerate(self._batch_of_body):
             if batch > 0:
                 for gid in self._geom_ids_of_body[i]:
@@ -701,17 +711,21 @@ class MujocoBinScene:
     def _clamp_velocities(self):
         """
         Clamp each free body's LINEAR speed to vel_cap — a cheap per-step anti-tunneling
-        safeguard (one small vector op per part vs. the full mj_step solve). Angular velocity
-        is left untouched. No-op for parked bodies, whose qvel is held at zero each step.
+        safeguard. Angular velocity is left untouched. No-op for parked bodies, whose qvel
+        is held at zero each step.
+
+        Vectorized over all parts in one pass (no Python per-part loop): gather the linear
+        DOFs, scale only those whose speed exceeds vel_cap, and scatter back. Sub-cap
+        velocities are multiplied by 1.0, so this is numerically identical to the per-part
+        clamp it replaces.
         """
         if self.vel_cap is None:
             return
         qvel = self.data.qvel
-        for _, vadr in self._adr_of_body:
-            v  = qvel[vadr:vadr+3]
-            sp = float(np.linalg.norm(v))
-            if sp > self.vel_cap:
-                v *= self.vel_cap / sp
+        v  = qvel[self._lin_vel_idx]                       # (n,3)
+        sp = np.linalg.norm(v, axis=1)                     # (n,)
+        scale = np.where(sp > self.vel_cap, self.vel_cap / np.maximum(sp, 1e-12), 1.0)
+        qvel[self._lin_vel_idx] = v * scale[:, None]
 
     def is_settled(self, body_id_subset=None) -> bool:
         """
@@ -735,26 +749,35 @@ class MujocoBinScene:
         self._stable_count = self._stable_count + 1 if all_slow else 0
         return self._stable_count >= self.stable_steps
 
-    def simulate(self):
+    def simulate(self, on_step=None, preview_interval_s: float = 0.05):
+        """
+        on_step : optional no-arg callable invoked from inside the stepping loop (this
+            thread) every `preview_interval_s` of sim time. Intended for a live GUI mesh
+            preview: it runs between mj_step calls, so it can read xpos/xquat with no data
+            race, and any exception it raises is swallowed so a GUI hiccup never aborts the
+            sim. Structured arrangement returns before any stepping, so on_step is unused there.
+        """
         if self.arrangement == "structured":
             print("[INFO] Structured arrangement: skipping simulation and settling")
             return  # poses are final; mj_forward already called in generate_scene
 
+        preview_tick = max(1, int(preview_interval_s / self.model.opt.timestep))
         n_batches = (max(self._batch_of_body) + 1) if self._batch_of_body else 1
 
         # Snapshot parking qpos so parked (not-yet-released) bodies can be held in place each
         # step: contype=0 disables collisions, not gravity, so without this they free-fall.
-        parking_qpos = {}
-        for i, b in enumerate(self._batch_of_body):
-            if b > 0:
-                qadr, _ = self._adr_of_body[i]
-                parking_qpos[i] = self.data.qpos[qadr:qadr+7].copy()
+        # One (n,7) snapshot of every body's qpos; only parked rows are ever read back, so a
+        # body released later simply stops being frozen (its stale row goes unused).
+        parking_qpos = self.data.qpos[self._qpos_idx7].copy()
 
         def freeze_parked(parked_ids):
-            for i in parked_ids:
-                qadr, vadr = self._adr_of_body[i]
-                self.data.qpos[qadr:qadr+7] = parking_qpos[i]
-                self.data.qvel[vadr:vadr+6] = 0.0
+            # Vectorized hold: scatter the snapshot qpos and zero qvel for all parked parts
+            # in two writes, instead of a Python loop over each parked body.
+            pid = np.asarray(parked_ids, dtype=np.intp)
+            if pid.size == 0:
+                return
+            self.data.qpos[self._qpos_idx7[pid].ravel()] = parking_qpos[pid].ravel()
+            self.data.qvel[self._qvel_idx6[pid].ravel()] = 0.0
 
         def run(max_steps, label, body_subset=None, parked_ids=(), check_settle=True):
             self._stable_count = 0
@@ -767,6 +790,11 @@ class MujocoBinScene:
                 self._clamp_velocities()
                 if parked_ids:
                     freeze_parked(parked_ids)
+                if on_step is not None and i % preview_tick == 0:
+                    try:
+                        on_step()
+                    except Exception as e:
+                        print(f"[preview] on_step failed (ignored): {e}")
                 if self.viewer is not None: self.viewer.sync()
                 if check_settle and self.is_settled(body_id_subset=body_subset):
                     print(f"[t={self.data.time:.2f}s] {label} settled at step {i}")
@@ -788,8 +816,8 @@ class MujocoBinScene:
         # parts (see release_batch) so fall height stays bounded even while the pile is moving.
         for k in range(1, n_batches):
             self.release_batch(k)
-            for i in [idx for idx, b in enumerate(self._batch_of_body) if b == k]:
-                parking_qpos.pop(i, None)
+            # Released bodies are simply excluded from parked_now below; the snapshot array
+            # keeps their (now-stale) rows, which are never read again.
             released_ids.extend(self._body_ids[i] for i, b in enumerate(self._batch_of_body) if b == k)
             parked_now = [i for i, b in enumerate(self._batch_of_body) if b > k]
             run(interval_steps, f"batch-{k}", body_subset=released_ids, parked_ids=parked_now, check_settle=False)
@@ -871,6 +899,35 @@ class MujocoBinScene:
                 "quaternion": quat,
             }
         return scene_dict
+
+    def export_scene_state(self):
+        """
+        Serializable final scene state for NPZ export. Builds on extract_scene_state():
+        packs every settled body's GT pose into a stacked 4x4 transform array and adds
+        the bin geometry (dims + placement). Camera extrinsics/intrinsics are owned by the
+        rendering stage, not the sim, so they are added there.
+
+        Returns a flat dict of numpy arrays ready to splat into np.savez.
+        """
+        state = self.extract_scene_state()
+        body_names  = list(state.keys())
+        positions   = np.array([state[n]["position"]   for n in body_names], dtype=np.float64)
+        quaternions = np.array([state[n]["quaternion"] for n in body_names], dtype=np.float64)  # wxyz
+
+        T_gt = np.tile(np.eye(4), (len(body_names), 1, 1))
+        for i in range(len(body_names)):
+            T_gt[i, :3, :3] = R.from_quat(quaternions[i], scalar_first=True).as_matrix()
+            T_gt[i, :3, 3]  = positions[i]
+
+        return {
+            "body_names":       np.array(body_names),
+            "positions":        positions,                                   # (n,3) world xyz
+            "quaternions_wxyz": quaternions,                                 # (n,4) world wxyz
+            "T_gt":             T_gt,                                        # (n,4,4) part_frame -> world
+            "bin_dim":          np.asarray(self.bin_dim, dtype=np.float64),  # (width, length, height, wall_thickness) m
+            "bin_transform":    np.asarray(self.bin_transform, dtype=np.float64),
+            "camera_distance":  np.float64(self.camera_distance),
+        }
 
     def mujoco_scene_to_o3d(self, scene_dict):
         """

@@ -6,7 +6,8 @@ class Stage(Enum):
     CROP = 2
     DOWNSAMPLE = 3
     SAVE = 4
-    SYNTHETIC = 5
+    DECOMPOSE = 5
+    SYNTHETIC = 6
 
 class ToolMode(Enum):
     NONE = 0

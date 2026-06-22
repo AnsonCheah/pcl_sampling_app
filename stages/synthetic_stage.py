@@ -41,6 +41,8 @@ MIN_AUTO_PARTS      = 2      # never fewer than this
 MAX_AUTO_PARTS      = 500    # safety cap (tune): tiny parts otherwise explode the sim
 FILL_SLIDER_MIN, FILL_SLIDER_MAX   = 20, 100   # fill-rate slider range (percent)
 COUNT_SLIDER_MIN, COUNT_SLIDER_MAX = 2, 500    # override-count slider range (parts)
+PREVIEW_PARKED_Z = 1.0   # m — live-preview bodies above this z are still parked (PARKING_Z≈10);
+#                          hide them until release_batch() drops them onto the pile (bin ~0.25 m tall)
 
 class SyntheticStage(BaseStage):
     def __init__(self, app):
@@ -59,6 +61,8 @@ class SyntheticStage(BaseStage):
         self.rendering_flag = False
         self.verbose = True
         self.o3d_scene = {}
+        self.T_cam = np.eye(4)      # world->camera view matrix; set per-scene in worker(), exported in save
+        self.stable_pose_R = None   # optional forced stable orientation (structured mode, set per-pose by headless driver)
 
     def build_panel(self):
         if self.app.headless:
@@ -91,7 +95,7 @@ class SyntheticStage(BaseStage):
         self.btn_export = self.register_widget(gui.Button("Export Synthetic Targets"), lambda: len(self.app.synthetic_targets)>0)
         self.btn_export.set_on_clicked(self.save_synthetic_targets)
 
-        self.btn_back = self.register_widget(gui.Button("Back: SAVE"))
+        self.btn_back = self.register_widget(gui.Button("Back: Decompose"))
         self.btn_back.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value - 1)))
 
         self.btn_restart = self.register_widget(gui.Button("Restart"))
@@ -167,14 +171,38 @@ class SyntheticStage(BaseStage):
         rp(f"[PACKING] OBB aspect ratio={aspect_ratio:.2f} -> packing_factor={packing_factor:.3f}")
         return int(np.clip(n, MIN_AUTO_PARTS, MAX_AUTO_PARTS))
 
+    def _display_convex_meshes(self):
+        """GUI helper: show each convex hull in a distinct HSV colour."""
+        n = len(self.app.convex_meshes)
+        for i, mesh in enumerate(self.app.convex_meshes):
+            material = rendering.MaterialRecord()
+            material.shader = "defaultLit"
+            rgb = colorsys.hsv_to_rgb(i / max(n, 1), 0.6, 0.9)
+            material.base_color = list(rgb) + [1.0]
+            geom = o3d.geometry.TriangleMesh(mesh)
+            geom.compute_vertex_normals()
+            self.app.scene.scene.add_geometry(f"convex_{i}", geom, material)
+
     def _refresh_ui(self):
         if self.app.headless:
             return
+        if len(self.app.synthetic_targets) > 0:
+            # Targets already generated — keep the segmented preview on screen.
+            self.show_segmented_scene()
+        else:
+            # Stage entry, before generation: show the decomposed convex hulls.
+            self.app.main_thread(lambda: self.app._clear_scene())
+            if len(self.app.convex_meshes) > 0:
+                self.app.main_thread(self._display_convex_meshes)
+            elif self.app.target_mesh is not None:
+                self.app.main_thread(lambda: self.app.scene.scene.add_geometry(
+                    "mesh", self.app.target_mesh, self.app.default_material))
         self.enable_widgets()
 
     def reset(self):
-        self.combobox_targets.clear_items()
-        self.combobox_scenes.clear_items()
+        if not self.app.headless:
+            self.combobox_targets.clear_items()
+            self.combobox_scenes.clear_items()
         self.app.synthetic_targets = {}
         self.app.synthetic_scenes = {}
         self.o3d_scene = {}
@@ -184,6 +212,13 @@ class SyntheticStage(BaseStage):
     def worker(self):
         TOTAL_STEPS = 10
         self.reset()
+
+        # The MuJoCo passive viewer is blocking and must never run headless/batch.
+        if self.app.headless:
+            self.rendering_flag = False
+        if not self.app.convex_meshes:
+            print("[WARN] No convex meshes available — run DecomposeStage before SYNTHETIC; "
+                  "simulation collisions will be degraded.")
 
         if not self.app.headless:
             self.app.show_progress("Simulating synthetic scene...")
@@ -222,8 +257,14 @@ class SyntheticStage(BaseStage):
             rp(f"[AUTO-COUNT] fill={self.fill_rate:.0%} "
                f"part OBB vol={part_mesh.bounding_box_oriented.volume:.2e} m³ "
                f"-> n_parts={self.num_targets}")
-        self.mj_scene = MujocoBinScene(part_mesh, self.app.convex_meshes, n_parts=self.num_targets, render=self.rendering_flag, arrangement=self.arrangement)
-        self.mj_scene.simulate()
+        self.mj_scene = MujocoBinScene(part_mesh, self.app.convex_meshes, n_parts=self.num_targets, render=self.rendering_flag, arrangement=self.arrangement, stable_pose_R=self.stable_pose_R)
+        # Live mesh preview: only meaningful in GUI + random (structured simulate() is a no-op).
+        # The callback runs inside simulate()'s step loop (this thread) — no MjData race.
+        if not self.app.headless and self.arrangement == "random":
+            self._setup_live_preview()
+            self.mj_scene.simulate(on_step=self._live_preview_update)
+        else:
+            self.mj_scene.simulate()
         self.mj_scene.verify_parts_in_bin()
         scene_state = self.mj_scene.extract_scene_state()
         self.o3d_scene = self.mj_scene.mujoco_scene_to_o3d(scene_state)
@@ -242,6 +283,7 @@ class SyntheticStage(BaseStage):
         cam_pos = np.asarray([0.0, 0.0, self.mj_scene.camera_distance])  # above bin
         look_at = np.asarray([0.0, 0.0, 0.0])                           # bin floor centre
         T_cam = camera_view_matrix(cam_pos, look_at, up=np.array([0.0, 1.0, 0.0]))
+        self.T_cam = T_cam   # kept for scene-state export in save_synthetic_targets
 
         self.app._reframe()
 
@@ -284,7 +326,9 @@ class SyntheticStage(BaseStage):
         _update_pb("Adding surface noises...")
 
         pts = add_surface_noise(pts, nrm, verbose=self.verbose)
-        add_to_render_scene("surface_noise_scene", o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts)))
+        surface_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
+        surface_pcd.normals = o3d.utility.Vector3dVector(nrm)   # kept so the full scene can be exported as PLY
+        add_to_render_scene("surface_noise_scene", surface_pcd)
         _update_pb("Synthesizing segmentation erosion/dilation...")
 
         label_masks = segment_point_cloud(  # {geom_id: (N,) bool} — one mask per instance, may overlap
@@ -355,29 +399,88 @@ class SyntheticStage(BaseStage):
             )
             if not self.app.headless: self.combobox_targets.add_item(inst_name)
             
+        # default_point_material only exists in GUI mode; omit it when headless.
+        self.app.synthetic_scenes["bin_pcd"] = O3DSceneObject(
+            geom=bin_pcd,
+            material=None if self.app.headless else self.app.default_point_material)
+
         if not self.app.headless:
             bin_pcd.paint_uniform_color([1., 1., 1.])
             saturation, value = 0.4, 0.9
             hues = np.linspace(0, 1, len(self.app.synthetic_targets), endpoint=False).tolist()
             colors = [list(colorsys.hsv_to_rgb(h, saturation, value)) for h in hues]
             self.app.main_thread(lambda: self.app._clear_scene())
-            self.app.synthetic_scenes["bin_pcd"] = O3DSceneObject(geom=bin_pcd, material=self.app.default_point_material)
             for index, (key, value) in enumerate(self.app.synthetic_targets.items()):
                 material = rendering.MaterialRecord()
                 material.point_size = 1.5
                 material.base_color = colors[index] + [1.0]
                 value.material = material
                 self.app.scene.scene.add_geometry(key, value.geom, value.material)
-
-        self.app.synthetic_scenes["bin_pcd"] = O3DSceneObject(geom=bin_pcd, material=self.app.default_point_material)
-
-        if not self.app.headless:
             self.combobox_scenes.selected_text = "segmented_bin_scene"
             self.combobox_scenes.add_item("segmented_bin_scene")
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry("bin_pcd", bin_pcd, self.app.default_point_material))
             self.worker_step += 1
             self.app.update_progress(self.worker_step/TOTAL_STEPS, f"Compiling results...")
             self.show_segmented_scene()
+
+    # ===============================
+    # Live mesh preview during settling (GUI + random only)
+    # ===============================
+    @staticmethod
+    def _pose_to_T(pos, quat):
+        """Build a fresh 4x4 transform from a MuJoCo position + wxyz quaternion. Returns a new
+        array (safe to hand to the GUI thread; does not alias data.xpos/xquat)."""
+        T = np.eye(4)
+        T[:3, :3] = R.from_quat(quat, scalar_first=True).as_matrix()
+        T[:3, 3] = pos
+        return T
+
+    def _setup_live_preview(self):
+        """Add one part mesh per body + the bin to the scene once, framed on the bin. Subsequent
+        per-step transforms are pushed by _live_preview_update(). Parked (not-yet-released) bodies
+        start hidden. Must run before mj_scene.simulate()."""
+        import mujoco
+        # Populate xpos/xquat for the initial spawn poses (pure kinematics; does not advance the
+        # sim — simulate() recomputes everything from qpos/qvel via mj_step).
+        mujoco.mj_forward(self.mj_scene.model, self.mj_scene.data)
+        state = self.mj_scene.extract_scene_state()
+        part_mesh_o3d = trimesh_to_o3d(self.mj_scene.part_mesh)
+        bin_mesh = self.mj_scene.bin_mesh
+
+        def add_all():
+            self.app._clear_scene()
+            for body_name, bd in state.items():
+                pos = bd["position"]
+                geom = o3d.geometry.TriangleMesh(part_mesh_o3d)   # one copy per body
+                self.app.scene.scene.add_geometry(body_name, geom, self.app.default_material)
+                parked = float(pos[2]) > PREVIEW_PARKED_Z
+                self.app.scene.scene.show_geometry(body_name, not parked)
+                if not parked:
+                    self.app.scene.scene.set_geometry_transform(
+                        body_name, self._pose_to_T(pos, bd["quaternion"]))
+            self.app.scene.scene.add_geometry("bin", bin_mesh, self.app.default_material)
+        self.app.main_thread(add_all)
+        self.app._reframe()
+
+    def _live_preview_update(self):
+        """Called from inside simulate()'s step loop (worker thread). Snapshots body poses into
+        fresh transforms and posts a single GUI update; parked bodies are hidden until released."""
+        state = self.mj_scene.extract_scene_state()
+        updates = {
+            name: (self._pose_to_T(bd["position"], bd["quaternion"]),
+                   float(bd["position"][2]) > PREVIEW_PARKED_Z)
+            for name, bd in state.items()
+        }
+
+        def apply():
+            for name, (T, parked) in updates.items():
+                if not self.app.scene.scene.has_geometry(name):
+                    continue
+                self.app.scene.scene.show_geometry(name, not parked)
+                if not parked:
+                    self.app.scene.scene.set_geometry_transform(name, T)
+            self.app.scene.force_redraw()
+        self.app.main_thread(apply)
 
     def save_synthetic_targets(self):
         try:
@@ -388,6 +491,24 @@ class SyntheticStage(BaseStage):
             out_dir = out_dir / f"scene_{scene_num:05}"
             out_dir.mkdir(parents=True, exist_ok=True)
             self.app.stages[Stage.SAVE].worker(path=(out_dir))
+
+            # Full unsegmented scene (all instances + bin + outliers, post-noise) alongside the per-instance clouds.
+            scene_obj = self.app.synthetic_scenes.get("surface_noise_scene")
+            if scene_obj is not None:
+                pointcloud_to_ply(scene_obj.geom, out_dir / "scene.ply")
+
+            # Final scene state: per-part GT poses + bin geometry (from the sim) + camera matrix.
+            if getattr(self, "mj_scene", None) is not None:
+                state = self.mj_scene.export_scene_state()
+                state.update(
+                    T_cam      = np.asarray(self.T_cam, dtype=np.float64),  # world -> camera view matrix
+                    fov_deg    = np.float64(self.fov_deg),
+                    res_width  = np.int64(self.res_width),
+                    res_height = np.int64(self.res_height),
+                    source     = str(out_dir).encode(),
+                )
+                np.savez(out_dir / "scene_state.npz", **state)
+
             for i, value in enumerate(self.app.synthetic_targets.values()):
                 tf = value.T_gt # this is in 4x4 matrix
                 gt_comments = []
