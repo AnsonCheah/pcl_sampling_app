@@ -95,7 +95,7 @@ class SyntheticStage(BaseStage):
         self.btn_export = self.register_widget(gui.Button("Export Synthetic Targets"), lambda: len(self.app.synthetic_targets)>0)
         self.btn_export.set_on_clicked(self.save_synthetic_targets)
 
-        self.btn_back = self.register_widget(gui.Button("Back: SAVE"))
+        self.btn_back = self.register_widget(gui.Button("Back: Decompose"))
         self.btn_back.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value - 1)))
 
         self.btn_restart = self.register_widget(gui.Button("Restart"))

@@ -1,11 +1,13 @@
 import colorsys
+import numpy as np
 import open3d as o3d
 import open3d.visualization.gui as gui
 import open3d.visualization.rendering as rendering
-import trimesh
+from concurrent.futures import ProcessPoolExecutor
 from enums import Stage
 from stages.stage_base import BaseStage
 from geometry.geom_utils import o3d_to_trimesh
+from geometry.convex_decomp import vhacd_decompose
 
 
 class DecomposeStage(BaseStage):
@@ -84,14 +86,27 @@ class DecomposeStage(BaseStage):
         if self.app.target_mesh is None:
             print("[WARN] No mesh to decompose")
             return
+        self.app.update_progress(0.1, "Preparing mesh for decomposition...")
         self.app.convex_meshes = []
         part_mesh = o3d_to_trimesh(self.app.target_mesh)
-        decomposed_convex_list = trimesh.decomposition.convex_decomposition(part_mesh)
-        for h in decomposed_convex_list:
+        verts = np.asarray(part_mesh.vertices)
+        faces = np.asarray(part_mesh.faces)
+
+        # vhacdx.compute_vhacd holds the GIL for its full runtime, which would starve the
+        # Open3D GUI thread and freeze the progress bar. Run it in a child process and block
+        # on the result here; the wait releases the GIL so queued progress callbacks render.
+        self.app.update_progress(0.3, "Running convex decomposition...")
+        with ProcessPoolExecutor(max_workers=1) as ex:
+            decomposed_convex_list = ex.submit(vhacd_decompose, verts, faces).result()
+
+        n = len(decomposed_convex_list)
+        for i, (v, f) in enumerate(decomposed_convex_list):
             mesh = o3d.geometry.TriangleMesh(
-                vertices=o3d.utility.Vector3dVector(h["vertices"]),
-                triangles=o3d.utility.Vector3iVector(h["faces"]))
+                vertices=o3d.utility.Vector3dVector(v),
+                triangles=o3d.utility.Vector3iVector(f))
             self.app.convex_meshes.append(mesh)
+            self.app.update_progress(0.6 + 0.4 * (i + 1) / max(n, 1),
+                                     f"Building convex hulls ({i + 1}/{n})...")
         print(f"[DECOMPOSE] decomposed mesh into {len(self.app.convex_meshes)} convex hulls")
 
     def reset(self):

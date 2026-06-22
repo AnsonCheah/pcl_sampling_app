@@ -50,6 +50,7 @@ class MeshSamplingApp:
 
     def __init__(self, headless=False, mesh_path=None):
         self.headless = headless
+        self.express_sampling_busy = False   # blocks the Express Sampling button while a run is in flight
 
         self.mesh_path = Path(mesh_path) if mesh_path is not None else None
         self.stages = {
@@ -296,16 +297,23 @@ class MeshSamplingApp:
     # Express Handler
     # ===============================
     def start_express_sampling(self):
+        # Block the button immediately; cleared in the worker's finally (done or failed).
+        self.express_sampling_busy = True
+        self.stages[Stage.IMPORT_MESH].enable_widgets()
         self._express_sampling_thread = threading.Thread(target=self._express_sampling_worker)
         self._express_sampling_thread.start()
 
     def _express_sampling_worker(self):
-        self.stages[Stage.RAYCAST].worker()
-        self.down_pcd=self.raw_pcd
-        self.stages[Stage.DOWNSAMPLE].worker()
-        self.stages[Stage.DOWNSAMPLE].recenter_mesh_pcd()
-        self.set_stage(Stage.SAVE)
-        self.hide_progress()
+        try:
+            self.stages[Stage.RAYCAST].worker()
+            self.down_pcd=self.raw_pcd
+            self.stages[Stage.DOWNSAMPLE].worker()
+            self.stages[Stage.DOWNSAMPLE].recenter_mesh_pcd()
+            self.set_stage(Stage.SAVE)
+            self.hide_progress()
+        finally:
+            self.express_sampling_busy = False
+            self.main_thread(self.stages[Stage.IMPORT_MESH].enable_widgets)
 
     def start_batch_sampling(self):
         self.src_dir = open_source_folder_dialog()

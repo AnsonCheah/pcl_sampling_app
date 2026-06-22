@@ -24,7 +24,7 @@ class ImportMeshStage(BaseStage):
         self.btn_reset = self.register_widget(gui.Button("Clear Mesh"), enabled_if=lambda: self.app.target_mesh is not None)
         self.btn_reset.set_on_clicked(self.reset)
 
-        self.btn_express = self.register_widget(gui.Button("Express Sampling"), enabled_if=lambda: self.app.target_mesh is not None)
+        self.btn_express = self.register_widget(gui.Button("Express Sampling"), enabled_if=lambda: self.app.target_mesh is not None and not self.app.express_sampling_busy)
         self.btn_express.set_on_clicked(self.app.start_express_sampling)
 
         self.btn_batch = self.register_widget(gui.Button("Batch Sampling"))
