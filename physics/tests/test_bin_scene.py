@@ -324,6 +324,120 @@ def test_big_part_drop(part_mesh, convex_meshes, n_parts: int, display: bool):
             _display_scene(scene, scene_state)
 
 
+# -- Per-step vectorization tests ----------------------------------------------
+
+_GOLDEN = os.path.join(os.path.dirname(__file__), "golden")
+
+
+def test_index_arrays_match_adr(part_mesh, convex_meshes):
+    """The precomputed qpos/qvel index matrices must address the same DOFs as the
+    per-body (qpos_adr, qvel_adr) pairs they replace."""
+    rp("\n[bold cyan]=== INDEX ARRAYS MATCH _adr_of_body ===[/bold cyan]")
+    np.random.seed(0)
+    sc = MujocoBinScene(part_mesh, convex_meshes, n_parts=6, render=False, arrangement="random")
+    for i, (q, v) in enumerate(sc._adr_of_body):
+        assert np.array_equal(sc._qpos_idx7[i],  q + np.arange(7)), f"qpos idx row {i}"
+        assert np.array_equal(sc._qvel_idx6[i],  v + np.arange(6)), f"qvel idx row {i}"
+        assert np.array_equal(sc._lin_vel_idx[i], v + np.arange(3)), f"lin idx row {i}"
+    rp(f"  index matrices match _adr_of_body for all {len(sc._adr_of_body)} parts")
+
+
+def test_clamp_velocities_spec(part_mesh, convex_meshes):
+    """Vectorized clamp: linear speed capped at vel_cap, sub-cap linear velocities
+    unchanged, angular velocity untouched."""
+    rp("\n[bold cyan]=== CLAMP VELOCITIES SPEC ===[/bold cyan]")
+    np.random.seed(0)
+    sc = MujocoBinScene(part_mesh, convex_meshes, n_parts=5, render=False, arrangement="random")
+    cap = sc.vel_cap
+    qvel = sc.data.qvel
+    qvel[:] = 0.0
+    li = sc._lin_vel_idx
+    ai = sc._qvel_idx6[:, 3:]                       # angular DOFs per part
+    qvel[li[0]] = np.array([3.0 * cap, 0.0, 0.0])   # over cap
+    qvel[li[1]] = np.array([0.0, 0.5 * cap, 0.0])   # under cap
+    qvel[ai[0]] = np.array([7.0, -2.0, 1.0])        # nonzero angular
+    under_before = qvel[li[1]].copy()
+    ang_before   = qvel[ai[0]].copy()
+
+    sc._clamp_velocities()
+
+    sp0 = float(np.linalg.norm(qvel[li[0]]))
+    assert abs(sp0 - cap) < 1e-9, f"over-cap not clamped to {cap}: got {sp0}"
+    assert np.allclose(qvel[li[1]], under_before), "sub-cap linear velocity changed"
+    assert np.allclose(qvel[ai[0]], ang_before),   "angular velocity was modified"
+    rp(f"  over-cap clamped to {cap:.3f}, sub-cap and angular untouched")
+
+
+def test_freeze_parked_machinery(part_mesh, convex_meshes):
+    """Vectorized parked-body freeze restores the snapshot qpos and zeros qvel for
+    parked parts only, leaving active parts untouched."""
+    rp("\n[bold cyan]=== FREEZE PARKED MACHINERY ===[/bold cyan]")
+    np.random.seed(0)
+    sc = MujocoBinScene(part_mesh, convex_meshes, n_parts=15, render=False, arrangement="random")
+    parked = [i for i, b in enumerate(sc._batch_of_body) if b > 0]
+    assert len(parked) > 0, "fixture must produce >=2 batches so some bodies are parked"
+    active = np.array([i for i, b in enumerate(sc._batch_of_body) if b == 0], dtype=np.intp)
+    pid = np.array(parked, dtype=np.intp)
+
+    snapshot = sc.data.qpos[sc._qpos_idx7].copy()
+    active_qpos_before = sc.data.qpos[sc._qpos_idx7[active]].copy()
+    # Perturb parked bodies (simulate gravity pulling them while contype=0).
+    sc.data.qpos[sc._qpos_idx7[pid].ravel()] += 1.234
+    sc.data.qvel[sc._qvel_idx6[pid].ravel()] = 9.9
+
+    # Vectorized freeze (mirrors simulate()'s freeze_parked closure).
+    sc.data.qpos[sc._qpos_idx7[pid].ravel()] = snapshot[pid].ravel()
+    sc.data.qvel[sc._qvel_idx6[pid].ravel()] = 0.0
+
+    assert np.allclose(sc.data.qpos[sc._qpos_idx7[pid]], snapshot[pid]), "parked qpos not restored"
+    assert np.all(sc.data.qvel[sc._qvel_idx6[pid]] == 0.0), "parked qvel not zeroed"
+    assert np.allclose(sc.data.qpos[sc._qpos_idx7[active]], active_qpos_before), "active qpos changed"
+    rp(f"  {len(parked)} parked restored & zeroed, {len(active)} active untouched")
+
+
+def test_vectorization_parity():
+    """End-to-end: the vectorized per-step loops must reproduce the pre-refactor
+    settled poses bitwise (same np seed, baseline solver settings). Guards against any
+    behavioural drift from replacing the scalar clamp/freeze loops."""
+    rp("\n[bold cyan]=== VECTORIZATION PARITY (vs golden) ===[/bold cyan]")
+    gold_path = os.path.join(_GOLDEN, "settle_cube.npz")
+    np.random.seed(0)
+    pm, cv = generate_test_mesh("cube")
+    sc = MujocoBinScene(pm, cv, n_parts=8, render=False, arrangement="random")
+    sc.simulate()
+    st = sc.extract_scene_state()
+    names = list(st.keys())
+    xpos = np.array([st[n]["position"] for n in names])
+    xquat = np.array([st[n]["quaternion"] for n in names])
+
+    # Golden .npz is gitignored; on a fresh checkout regenerate from the current run so
+    # the parity check becomes a forward regression lock on the current settled poses.
+    if not os.path.exists(gold_path):
+        os.makedirs(_GOLDEN, exist_ok=True)
+        np.savez_compressed(gold_path, names=np.array(names), xpos=xpos, xquat=xquat,
+                            n_parts=np.array([sc.n_parts]))
+        rp(f"  [yellow]golden missing; baselined current poses to {gold_path}[/yellow]")
+    g = np.load(gold_path)
+    assert list(g["names"]) == names, "body order changed vs golden"
+    dpos = float(np.abs(xpos - g["xpos"]).max())
+    dquat = float(np.abs(xquat - g["xquat"]).max())
+    assert dpos < 1e-9,  f"settled xpos drifted from golden: max abs diff={dpos:.2e}"
+    assert dquat < 1e-9, f"settled xquat drifted from golden: max abs diff={dquat:.2e}"
+    rp(f"  bitwise match vs golden (max|dpos|={dpos:.1e}, max|dquat|={dquat:.1e})")
+
+
+def test_simulate_speedup():
+    """Informational: report simulate() wall-clock at a higher part count. Never fails."""
+    rp("\n[bold cyan]=== SIMULATE TIMING (informational) ===[/bold cyan]")
+    np.random.seed(0)
+    pm, cv = generate_test_mesh("cube")
+    n = realistic_part_count(pm, 60)
+    sc = MujocoBinScene(pm, cv, n_parts=n, render=False, arrangement="random")
+    import time as _t
+    t0 = _t.time(); sc.simulate(); dt = _t.time() - t0
+    rp(f"  simulate() n_parts={sc.n_parts}: {dt:.2f}s")
+
+
 # -- Entry point ---------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -382,6 +496,14 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"  FAIL - {name}: {e}")
             failed.append(name)
+
+    # Per-step vectorization unit tests (shape-independent; use a cube primitive).
+    _u_mesh, _u_convex = generate_test_mesh("cube")
+    run("index_arrays_match_adr",  test_index_arrays_match_adr,  _u_mesh, _u_convex)
+    run("clamp_velocities_spec",   test_clamp_velocities_spec,   _u_mesh, _u_convex)
+    run("freeze_parked_machinery", test_freeze_parked_machinery, _u_mesh, _u_convex)
+    run("vectorization_parity",    test_vectorization_parity)
+    run("simulate_speedup",        test_simulate_speedup)
 
     for name, part_mesh, convex_meshes in parts:
         rp(f"\n[bold magenta]######## PART: {name} ########[/bold magenta]")

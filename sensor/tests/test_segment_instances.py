@@ -13,7 +13,12 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import numpy as np
-from sensor.tests._fixtures import make_render_dict, make_two_plane_render_dict
+from sensor.tests._fixtures import (
+    make_render_dict,
+    make_two_plane_render_dict,
+    make_multi_instance_render_dict,
+)
+import sensor.segment_instances as si
 from sensor.segment_instances import (
     build_geom_id_image,
     build_depth_image,
@@ -23,7 +28,43 @@ from sensor.segment_instances import (
     _apply_erosion_bias,
     _apply_dilation_into_background,
     _apply_boundary_noise,
+    _bbox_of,
+    _influence_margin,
 )
+
+_GOLDEN = os.path.join(os.path.dirname(__file__), "golden")
+
+
+def _ensure_det_golden(name, render):
+    """Load (or, if absent, regenerate) the deterministic-models golden for `name`.
+
+    The golden .npz are gitignored, so on a fresh checkout they are rebuilt from the
+    current CPU code — this turns the bitwise test into a regression lock on the
+    current (verified) behaviour. The committed goldens carry the original
+    pre-refactor values; delete them to re-baseline.
+    """
+    path = os.path.join(_GOLDEN, f"{name}_det.npz")
+    if not os.path.exists(path):
+        os.makedirs(_GOLDEN, exist_ok=True)
+        saved = si._HAS_GPU
+        try:
+            si._HAS_GPU = False
+            masks, geom_img = build_perturbed_masks(render, apply_boundary_noise=False, seed=0)
+            d = {f"mask_{g}": m for g, m in masks.items()}
+            d["geom_img"] = geom_img
+            d["ids"] = np.array(sorted(masks.keys()), dtype=np.int64)
+            np.savez_compressed(path, **d)
+        finally:
+            si._HAS_GPU = saved
+    return np.load(path)
+
+
+def _gpu_available() -> bool:
+    return (si._cp is not None) and (si._cp.cuda.runtime.getDeviceCount() > 0)
+
+
+def _iou(a, b):
+    return (a & b).sum() / ((a | b).sum() + 1e-12)
 
 PASS = "\033[92mPASS\033[0m"
 FAIL = "\033[91mFAIL\033[0m"
@@ -175,21 +216,22 @@ def test_segment_returns_dict():
 
 
 def test_no_resolve_conflicts_allows_overlap():
+    # Structural overlap: a large dilation bridges the ~8 px gap between the two
+    # silhouettes deterministically. Erosion and boundary noise are disabled so the
+    # overlap does not depend on a stochastic boundary realisation (with crops, the
+    # boundary-noise field is a different draw than the full frame — see module docs).
     render, keep = make_two_plane_render_dict()
     pts  = render["points"][keep]
     pidx = render["pixel_idx"][keep]
-    result = segment_point_cloud(render, pts, pidx,
-                                 dilation_px=4.0,        # generous dilation → forces overlap
-                                 apply_confusion=False)   # isolate the dilation effect
+    ov_kw = dict(dilation_px=8.0, apply_confusion=False,
+                 apply_erosion=False, apply_boundary_noise=False)
+    result = segment_point_cloud(render, pts, pidx, **ov_kw)
     ids = list(result.keys())
     if len(ids) < 2:
         _check("two_plane_overlap_skipped_single_instance",
                True, "only 1 instance survived segmentation — skip overlap check")
         return
-    # At least one pair should have overlapping pixels in image space
-    masks_img, _ = build_perturbed_masks(render, dilation_px=4.0,
-                                         apply_confusion=False,
-                                         resolve_conflicts=False)
+    masks_img, _ = build_perturbed_masks(render, resolve_conflicts=False, **ov_kw)
     pairs = [(ids[i], ids[j]) for i in range(len(ids)) for j in range(i+1, len(ids))]
     any_overlap = any(
         (masks_img[a] & masks_img[b]).any()
@@ -200,18 +242,26 @@ def test_no_resolve_conflicts_allows_overlap():
 
 
 def test_resolve_conflicts_flag_eliminates_overlap():
+    # Same structural-overlap config as the no-resolve test, so there is genuine
+    # overlap for resolve_conflicts to eliminate (otherwise this passes vacuously).
     render, _ = make_two_plane_render_dict()
-    masks_resolved, _ = build_perturbed_masks(render, dilation_px=4.0,
-                                              apply_confusion=False,
-                                              resolve_conflicts=True)
+    ov_kw = dict(dilation_px=8.0, apply_confusion=False,
+                 apply_erosion=False, apply_boundary_noise=False)
+    masks_overlap, _   = build_perturbed_masks(render, resolve_conflicts=False, **ov_kw)
+    masks_resolved, _  = build_perturbed_masks(render, resolve_conflicts=True,  **ov_kw)
     ids = list(masks_resolved.keys())
     if len(ids) < 2:
         _check("resolve_conflicts_skipped_single_instance", True)
         return
+    had_overlap = any(
+        (masks_overlap[ids[i]] & masks_overlap[ids[j]]).any()
+        for i in range(len(ids)) for j in range(i+1, len(ids))
+    )
     overlap_free = all(
         not (masks_resolved[ids[i]] & masks_resolved[ids[j]]).any()
         for i in range(len(ids)) for j in range(i+1, len(ids))
     )
+    _check("resolve_conflicts_had_overlap_to_resolve", had_overlap)
     _check("resolve_conflicts_eliminates_overlap", overlap_free)
 
 
@@ -309,6 +359,158 @@ def test_segmentation_stats_dict_unassigned():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  Crop refactor + GPU backend equivalence
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_crop_equiv_deterministic_models_bitwise():
+    # With boundary noise OFF, the cropped pipeline (erosion+dilation+confusion+
+    # occlusion) must be BITWISE-equal to the pre-refactor full-frame golden.
+    si._HAS_GPU = False          # golden was produced on CPU
+    for name, mk in [("single", make_render_dict), ("two_plane", make_two_plane_render_dict)]:
+        render, _ = mk()
+        gold = _ensure_det_golden(name, render)
+        masks, geom_img = build_perturbed_masks(render, apply_boundary_noise=False, seed=0)
+        _check(f"crop_det_geom_img_bitwise_{name}",
+               np.array_equal(geom_img, gold["geom_img"]))
+        for gid in gold["ids"]:
+            ref = gold[f"mask_{gid}"]
+            cur = masks[int(gid)]
+            _check(f"crop_det_bitwise_{name}_gid{gid}",
+                   np.array_equal(ref, cur),
+                   f"diff_px={(ref ^ cur).sum()}")
+
+
+def test_crop_equiv_boundary_noise_statistical():
+    # Boundary noise draws an array-shaped field, so a crop is a different RNG
+    # realisation than the full frame — not bitwise. The model must still be
+    # statistically the same under cropping: near-zero-mean area change, of a
+    # magnitude comparable to the full-frame computation.
+    render, _ = make_two_plane_render_dict()
+    geom = build_geom_id_image(render)
+    H, W = geom.shape
+    margin = _influence_margin(3, 1.5, 4, 6.0, False, False, False, False, True)
+    for g in (0, 1):
+        full = (geom == g)
+        a0   = full.sum()
+        r0, c0, r1, c1 = _bbox_of(full, margin, H, W)
+        crop = full[r0:r1, c0:c1]
+        df, dc = [], []
+        for s in range(40):
+            nf = _apply_boundary_noise(full, 6.0, np.random.default_rng(s))
+            nc = _apply_boundary_noise(crop, 6.0, np.random.default_rng(s))
+            df.append((nf.sum() - a0) / a0)
+            dc.append((nc.sum() - a0) / a0)
+        mf, mc = float(np.mean(df)), float(np.mean(dc))
+        _check(f"boundary_noise_crop_unbiased_gid{g}", abs(mc) < 0.05,
+               f"crop_mean_area_change={mc:+.4f}")
+        _check(f"boundary_noise_crop_matches_full_gid{g}", abs(mf - mc) < 0.05,
+               f"full={mf:+.4f} crop={mc:+.4f}")
+
+
+def test_confusion_pruning_matches_allpairs():
+    # Higher resolution so the "far" layout's padded bboxes actually separate and
+    # the prune path fires; result must be identical to the un-pruned all-pairs pass.
+    si._HAS_GPU = False
+    kw = dict(erosion_px=2.0, boundary_noise_px=3.0, seed=1)
+    for layout, fires in [("grid", False), ("far", True)]:
+        render, _ = make_multi_instance_render_dict(layout=layout, W=480, H=360)
+        geom = build_geom_id_image(render)
+        margin = _influence_margin(2.0, 1.5, 4, 3.0, True, True, True, True, True)
+        crops = si._instance_crops(geom, margin, np)
+        ids = list(crops.keys())
+        pruned = sum(1 for i, a in enumerate(ids) for b in ids[i + 1:]
+                     if not si._bboxes_overlap(crops[a], crops[b]))
+        mp, _ = build_perturbed_masks(render, prune_confusion=True,  **kw)
+        mu, _ = build_perturbed_masks(render, prune_confusion=False, **kw)
+        same = all(np.array_equal(mp[g], mu[g]) for g in mp)
+        _check(f"confusion_prune_eq_allpairs_{layout}", same,
+               f"pruned {pruned} pairs")
+        if fires:
+            _check(f"confusion_prune_fires_{layout}", pruned > 0,
+                   f"pruned={pruned} (test would be vacuous otherwise)")
+
+
+def test_back_projection_self_consistent():
+    # segment_point_cloud back-projects from crops; it must equal back-projecting the
+    # full-frame masks of build_perturbed_masks with the same seed (same realisation).
+    render, keep = make_two_plane_render_dict()
+    pts  = render["points"][keep]
+    pidx = render["pixel_idx"][keep]
+    H, W = render["res"]
+    valid = pidx >= 0
+    seg = segment_point_cloud(render, pts, pidx, seed=0)
+    masks, _ = build_perturbed_masks(render, seed=0)
+    for g, m in masks.items():
+        manual = np.zeros(len(pts), bool)
+        manual[valid] = m.ravel()[pidx[valid]]
+        _check(f"backproj_self_consistent_gid{g}",
+               np.array_equal(manual, seg[g]))
+
+
+def test_cpu_fallback_without_gpu():
+    # With the GPU forced off the module must still produce a well-formed result.
+    saved = si._HAS_GPU
+    try:
+        si._HAS_GPU = False
+        render, keep = make_two_plane_render_dict()
+        pts  = render["points"][keep]
+        pidx = render["pixel_idx"][keep]
+        result = segment_point_cloud(render, pts, pidx, seed=0)
+        _check("cpu_fallback_returns_dict", isinstance(result, dict) and len(result) >= 1)
+        for g, arr in result.items():
+            _check(f"cpu_fallback_bool_len_gid{g}",
+                   arr.dtype == bool and len(arr) == len(pts))
+    finally:
+        si._HAS_GPU = saved
+
+
+def test_gpu_cpu_parity():
+    # GPU output must match CPU (RNG is on the host; only filter float-rounding can
+    # differ). Skipped when no CUDA device is present.
+    if not _gpu_available():
+        _check("gpu_cpu_parity_skipped_no_device", True, "no CUDA device")
+        return
+    saved = si._HAS_GPU
+    try:
+        render, _ = make_two_plane_render_dict()
+        si._HAS_GPU = False
+        det_cpu, _ = build_perturbed_masks(render, apply_boundary_noise=False, seed=0)
+        full_cpu, _ = build_perturbed_masks(render, seed=0)
+        si._HAS_GPU = True
+        det_gpu, _ = build_perturbed_masks(render, apply_boundary_noise=False, seed=0)
+        full_gpu, _ = build_perturbed_masks(render, seed=0)
+        for g in det_cpu:
+            _check(f"gpu_cpu_parity_det_gid{g}", _iou(det_cpu[g], det_gpu[g]) > 0.99,
+                   f"iou={_iou(det_cpu[g], det_gpu[g]):.5f}")
+        for g in full_cpu:
+            _check(f"gpu_cpu_parity_full_gid{g}", _iou(full_cpu[g], full_gpu[g]) > 0.99,
+                   f"iou={_iou(full_cpu[g], full_gpu[g]):.5f}")
+    finally:
+        si._HAS_GPU = saved
+
+
+def test_scaling_smoke():
+    # Informational: time CPU vs GPU on a multi-instance render. Never fails.
+    import time
+    render, keep = make_multi_instance_render_dict(layout="grid", W=480, H=360)
+    pts  = render["points"][keep]
+    pidx = render["pixel_idx"][keep]
+    saved = si._HAS_GPU
+    try:
+        si._HAS_GPU = False
+        t = time.time(); segment_point_cloud(render, pts, pidx, seed=0); t_cpu = time.time() - t
+        msg = f"CPU={t_cpu * 1e3:.1f}ms"
+        if _gpu_available():
+            si._HAS_GPU = True
+            segment_point_cloud(render, pts, pidx, seed=0)  # warm up kernels
+            t = time.time(); segment_point_cloud(render, pts, pidx, seed=0); t_gpu = time.time() - t
+            msg += f"  GPU={t_gpu * 1e3:.1f}ms"
+        _check("scaling_smoke_informational", True, msg)
+    finally:
+        si._HAS_GPU = saved
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  Runner
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -333,6 +535,14 @@ if __name__ == "__main__":
         test_segmentation_stats_dict_perfect_match,
         test_segmentation_stats_dict_confusion,
         test_segmentation_stats_dict_unassigned,
+        # crop refactor + GPU backend equivalence
+        test_crop_equiv_deterministic_models_bitwise,
+        test_crop_equiv_boundary_noise_statistical,
+        test_confusion_pruning_matches_allpairs,
+        test_back_projection_self_consistent,
+        test_cpu_fallback_without_gpu,
+        test_gpu_cpu_parity,
+        test_scaling_smoke,
     ]
 
     print(f"\n{'='*60}")

@@ -3,11 +3,12 @@ channels:
   - defaults
 dependencies:
   - python=3.12.13
+  - pip=26.0.1
   - pip:
       - numpy==2.4.1
       - open3d==0.19.0
       - scipy==1.16.3
-      - optuna=4.8.0
+      - optuna==4.8.0
       - scikit-learn==1.8.0
       - matplotlib==3.10.8
       - trimesh==4.11.0
@@ -19,3 +20,7 @@ dependencies:
       - manifold3d==3.4.1
       - grpcio==1.80.0
       - rich==14.3.3
+      # Optional GPU acceleration for sensor/segment_instances.py (cupyx.scipy.ndimage).
+      # Absent/unsupported GPU -> code falls back to SciPy/NumPy automatically.
+      # cupy-cuda12x requires a CUDA 12.x driver (12.8+ for Blackwell / sm_120).
+      - cupy-cuda12x[ctk]>=13.4.0
