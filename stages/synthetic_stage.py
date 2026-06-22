@@ -41,6 +41,8 @@ MIN_AUTO_PARTS      = 2      # never fewer than this
 MAX_AUTO_PARTS      = 500    # safety cap (tune): tiny parts otherwise explode the sim
 FILL_SLIDER_MIN, FILL_SLIDER_MAX   = 20, 100   # fill-rate slider range (percent)
 COUNT_SLIDER_MIN, COUNT_SLIDER_MAX = 2, 500    # override-count slider range (parts)
+PREVIEW_PARKED_Z = 1.0   # m — live-preview bodies above this z are still parked (PARKING_Z≈10);
+#                          hide them until release_batch() drops them onto the pile (bin ~0.25 m tall)
 
 class SyntheticStage(BaseStage):
     def __init__(self, app):
@@ -256,7 +258,13 @@ class SyntheticStage(BaseStage):
                f"part OBB vol={part_mesh.bounding_box_oriented.volume:.2e} m³ "
                f"-> n_parts={self.num_targets}")
         self.mj_scene = MujocoBinScene(part_mesh, self.app.convex_meshes, n_parts=self.num_targets, render=self.rendering_flag, arrangement=self.arrangement, stable_pose_R=self.stable_pose_R)
-        self.mj_scene.simulate()
+        # Live mesh preview: only meaningful in GUI + random (structured simulate() is a no-op).
+        # The callback runs inside simulate()'s step loop (this thread) — no MjData race.
+        if not self.app.headless and self.arrangement == "random":
+            self._setup_live_preview()
+            self.mj_scene.simulate(on_step=self._live_preview_update)
+        else:
+            self.mj_scene.simulate()
         self.mj_scene.verify_parts_in_bin()
         scene_state = self.mj_scene.extract_scene_state()
         self.o3d_scene = self.mj_scene.mujoco_scene_to_o3d(scene_state)
@@ -414,6 +422,65 @@ class SyntheticStage(BaseStage):
             self.worker_step += 1
             self.app.update_progress(self.worker_step/TOTAL_STEPS, f"Compiling results...")
             self.show_segmented_scene()
+
+    # ===============================
+    # Live mesh preview during settling (GUI + random only)
+    # ===============================
+    @staticmethod
+    def _pose_to_T(pos, quat):
+        """Build a fresh 4x4 transform from a MuJoCo position + wxyz quaternion. Returns a new
+        array (safe to hand to the GUI thread; does not alias data.xpos/xquat)."""
+        T = np.eye(4)
+        T[:3, :3] = R.from_quat(quat, scalar_first=True).as_matrix()
+        T[:3, 3] = pos
+        return T
+
+    def _setup_live_preview(self):
+        """Add one part mesh per body + the bin to the scene once, framed on the bin. Subsequent
+        per-step transforms are pushed by _live_preview_update(). Parked (not-yet-released) bodies
+        start hidden. Must run before mj_scene.simulate()."""
+        import mujoco
+        # Populate xpos/xquat for the initial spawn poses (pure kinematics; does not advance the
+        # sim — simulate() recomputes everything from qpos/qvel via mj_step).
+        mujoco.mj_forward(self.mj_scene.model, self.mj_scene.data)
+        state = self.mj_scene.extract_scene_state()
+        part_mesh_o3d = trimesh_to_o3d(self.mj_scene.part_mesh)
+        bin_mesh = self.mj_scene.bin_mesh
+
+        def add_all():
+            self.app._clear_scene()
+            for body_name, bd in state.items():
+                pos = bd["position"]
+                geom = o3d.geometry.TriangleMesh(part_mesh_o3d)   # one copy per body
+                self.app.scene.scene.add_geometry(body_name, geom, self.app.default_material)
+                parked = float(pos[2]) > PREVIEW_PARKED_Z
+                self.app.scene.scene.show_geometry(body_name, not parked)
+                if not parked:
+                    self.app.scene.scene.set_geometry_transform(
+                        body_name, self._pose_to_T(pos, bd["quaternion"]))
+            self.app.scene.scene.add_geometry("bin", bin_mesh, self.app.default_material)
+        self.app.main_thread(add_all)
+        self.app._reframe()
+
+    def _live_preview_update(self):
+        """Called from inside simulate()'s step loop (worker thread). Snapshots body poses into
+        fresh transforms and posts a single GUI update; parked bodies are hidden until released."""
+        state = self.mj_scene.extract_scene_state()
+        updates = {
+            name: (self._pose_to_T(bd["position"], bd["quaternion"]),
+                   float(bd["position"][2]) > PREVIEW_PARKED_Z)
+            for name, bd in state.items()
+        }
+
+        def apply():
+            for name, (T, parked) in updates.items():
+                if not self.app.scene.scene.has_geometry(name):
+                    continue
+                self.app.scene.scene.show_geometry(name, not parked)
+                if not parked:
+                    self.app.scene.scene.set_geometry_transform(name, T)
+            self.app.scene.force_redraw()
+        self.app.main_thread(apply)
 
     def save_synthetic_targets(self):
         try:

@@ -749,11 +749,19 @@ class MujocoBinScene:
         self._stable_count = self._stable_count + 1 if all_slow else 0
         return self._stable_count >= self.stable_steps
 
-    def simulate(self):
+    def simulate(self, on_step=None, preview_interval_s: float = 0.05):
+        """
+        on_step : optional no-arg callable invoked from inside the stepping loop (this
+            thread) every `preview_interval_s` of sim time. Intended for a live GUI mesh
+            preview: it runs between mj_step calls, so it can read xpos/xquat with no data
+            race, and any exception it raises is swallowed so a GUI hiccup never aborts the
+            sim. Structured arrangement returns before any stepping, so on_step is unused there.
+        """
         if self.arrangement == "structured":
             print("[INFO] Structured arrangement: skipping simulation and settling")
             return  # poses are final; mj_forward already called in generate_scene
 
+        preview_tick = max(1, int(preview_interval_s / self.model.opt.timestep))
         n_batches = (max(self._batch_of_body) + 1) if self._batch_of_body else 1
 
         # Snapshot parking qpos so parked (not-yet-released) bodies can be held in place each
@@ -782,6 +790,11 @@ class MujocoBinScene:
                 self._clamp_velocities()
                 if parked_ids:
                     freeze_parked(parked_ids)
+                if on_step is not None and i % preview_tick == 0:
+                    try:
+                        on_step()
+                    except Exception as e:
+                        print(f"[preview] on_step failed (ignored): {e}")
                 if self.viewer is not None: self.viewer.sync()
                 if check_settle and self.is_settled(body_id_subset=body_subset):
                     print(f"[t={self.data.time:.2f}s] {label} settled at step {i}")
