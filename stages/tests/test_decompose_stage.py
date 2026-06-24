@@ -2,10 +2,10 @@
 
 Covers:
   * DecomposeStage.worker() populates app.convex_meshes synchronously.
-  * SyntheticStage.reset() does not crash in headless mode (regression: the
+  * SceneStage/RenderStage.reset() do not crash in headless mode (regression: the
     combobox attributes do not exist when build_panel() returns early).
   * The Stage enum / app stages dict include DECOMPOSE ordered between
-    SAVE and SYNTHETIC.
+    SAVE and SCENE/RENDER.
 
 Run:  python -m pytest stages/tests/test_decompose_stage.py
 """
@@ -53,15 +53,19 @@ def test_decompose_reset_clears_meshes():
     assert app.convex_meshes == []
 
 
-def test_synthetic_reset_headless_no_crash():
+def test_scene_render_reset_headless_no_crash():
     # Regression: reset() touched combobox widgets that never exist in headless.
     app = MeshSamplingApp(headless=True)
-    app.stages[Stage.SYNTHETIC].reset()  # must not raise
+    app.stages[Stage.SCENE].reset()   # must not raise
+    app.stages[Stage.RENDER].reset()  # must not raise
     assert app.synthetic_targets == {}
     assert app.synthetic_scenes == {}
+    assert app.o3d_scene == {}
+    assert app.mj_scene is None
 
 
 def test_decompose_stage_registered_and_ordered():
     app = MeshSamplingApp(headless=True)
     assert Stage.DECOMPOSE in app.stages
-    assert Stage.SAVE.value < Stage.DECOMPOSE.value < Stage.SYNTHETIC.value
+    assert Stage.SCENE in app.stages and Stage.RENDER in app.stages
+    assert Stage.SAVE.value < Stage.DECOMPOSE.value < Stage.SCENE.value < Stage.RENDER.value

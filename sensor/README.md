@@ -11,7 +11,7 @@ Structured-light depth sensor simulation. Takes a set of meshes and a camera pos
 
 ## Core concept
 
-The noise pipeline is applied in a fixed order in `SyntheticStage.worker()`:
+The noise pipeline is applied in a fixed order in `RenderStage.worker()`:
 
 ```
 scene_render()                  # canonical raycast (pure, no noise)
@@ -78,6 +78,6 @@ render = scene_render(
 
 ## Constraints
 
-- **`scene_render()` is pure**: its only side effect is assigning `O3DSceneObject.id`. It must remain stateless — it is called by both `RaycastStage` and `SyntheticStage`.
+- **`scene_render()` is pure**: its only side effect is assigning `O3DSceneObject.id`. It must remain stateless — it is called by both `RaycastStage` and `RenderStage`.
 - **Noise functions are independently callable**: Phase 2 will fit each function's parameters against real-data residuals one at a time. Do not chain them internally.
 - **Parameters are physical quantities**: `roughness`, `albedo`, `sigma_fringe_corr` must correspond to measurable material/sensor properties. Non-physical tuning knobs belong in the Phase 2 learned residual.

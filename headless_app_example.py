@@ -27,13 +27,14 @@ print(f"Process took {time.time() - process_start}s")
 
 
 # Default: auto-size part count to ~60% volumetric fill of the bin (scales with part size).
-app.stages[Stage.SYNTHETIC].fill_rate = 0.6
+app.stages[Stage.SCENE].fill_rate = 0.6
 # To force an exact count instead, uncomment:
-# app.stages[Stage.SYNTHETIC].generate_mode = "count"
-# app.stages[Stage.SYNTHETIC].num_targets = 6
-app.stages[Stage.SYNTHETIC].rendering_flag = True
-app.stages[Stage.SYNTHETIC]._run_worker()
-rp([obj.geom for obj in app.stages[Stage.SYNTHETIC].o3d_scene.values()])
-vis = o3d_display([obj.geom for obj in app.stages[Stage.SYNTHETIC].o3d_scene.values()])
+# app.stages[Stage.SCENE].generate_mode = "count"
+# app.stages[Stage.SCENE].num_targets = 6
+app.stages[Stage.SCENE].rendering_flag = True
+app.stages[Stage.SCENE]._run_worker()        # build + settle physical scene -> app.o3d_scene
+app.stages[Stage.RENDER]._run_worker()        # sensor sim + segmentation -> app.synthetic_targets
+rp([obj.geom for obj in app.o3d_scene.values()])
+vis = o3d_display([obj.geom for obj in app.o3d_scene.values()])
 vis.run()
 vis.destroy_window()

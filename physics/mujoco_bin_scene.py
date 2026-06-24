@@ -22,6 +22,16 @@ HOPPER_INWARD_OFFSET = 0.02   # hopper walls inset this far inside the bin wall 
 HOPPER_TOP_Z = 5            # hopper walls extend to this z; generous upper bound
 MAX_BIN_DIM = (0.76, 0.585, 0.25, 0.005)   # (width, length, height, wall_thickness) m — fixed bin size
 
+# Structured-scene fixtures (partition dividers / injection-molded tray). Dimensions in metres.
+PARTITION_THICKNESS = 0.003   # cardboard divider thickness
+TRAY_WALL           = 0.003   # min tray material between a pocket and the cell edge (per side); sets pitch
+TRAY_BASE           = 0.004   # solid tray floor beneath every pocket
+TRAY_SEAT_GAP       = 0.0005  # spawn parts this far above the pocket floor → no initial penetration
+TRAY_VHACD_MAX_HULLS  = 24    # convex pieces per pocket frame (decomposed once, instanced across the grid)
+TRAY_VHACD_RESOLUTION = 800000  # high VHACD voxel resolution → wall intrusion stays below the clearance
+# Part↔slot running clearance by mode; "loose" resolves to 5% of the footprint diagonal.
+_CLEARANCE_M = {"snug": 0.001, "medium": 0.0025, "loose": None}
+
 # Batched-release settling (random arrangement). Parts are released in waves just above the
 # growing pile so none free-falls from a great height (bounds impact velocity → no tunneling).
 PARKING_Z                = 10.0   # m — z of parked (not-yet-released) bodies (collisions off)
@@ -35,7 +45,8 @@ class SceneObject:
     body_name: str
 
 class MujocoBinScene:
-    def __init__(self, part_mesh, part_convex_meshes, n_parts=1, bin_dim=MAX_BIN_DIM, settle_time=5.0, render=True, arrangement: str = "random", stable_pose_R: np.ndarray = None, timestep: float = 0.001):
+    def __init__(self, part_mesh, part_convex_meshes, n_parts=1, bin_dim=MAX_BIN_DIM, settle_time=5.0, render=True, arrangement: str = "random", stable_pose_R: np.ndarray = None, timestep: float = 0.001,
+                 structure_type: str = "none", structure_height_frac: float = 0.75, clearance_mode: str = "medium"):
         # Timestep is the primary anti-tunneling lever: MuJoCo has no continuous collision
         # detection, so per-step displacement (~vel_cap*dt) must stay under ~o_margin. With
         # vel_cap=1.5 m/s and o_margin=1 mm the hard-safe bound is dt <= 6.7e-4; the stiff
@@ -66,6 +77,13 @@ class MujocoBinScene:
         self.viewer = None
         self.arrangement = arrangement
         self.stable_pose_R = stable_pose_R  # optional forced stable orientation for structured mode
+        # Structured-scene fixtures: "none" (bare grid, static) | "partition" (egg-crate dividers) |
+        # "tray" (per-slot molded pockets). partition/tray spawn freejoint bodies and settle.
+        self.structure_type = structure_type
+        self.structure_height_frac = float(structure_height_frac)
+        self.clearance_mode = clearance_mode
+        self.bin_body = None        # MjSpec bin body; partition/tray geoms are added to it (set in _build_bin)
+        self._clearance_m = _CLEARANCE_M.get(clearance_mode, 0.0025) or 0.0025  # resolved per footprint in grid
 
         # Batched-release state (random arrangement) — populated by _generate_random_scene /
         # _cache_body_topology; see release_batch() and simulate().
@@ -145,6 +163,7 @@ class MujocoBinScene:
         bin_body = self.world.add_body()
         bin_body.name = "bin"
         bin_body.pos = [0, 0, 0]
+        self.bin_body = bin_body   # partition/tray fixtures attach geoms here (structured modes)
 
         for half_sizes, pos in boxes:
             # Transform geom center position into new frame
@@ -368,16 +387,23 @@ class MujocoBinScene:
 
         return R_tilt @ R_yaw @ R_stable
 
+    def _resolve_clearance(self, footprint_diag: float) -> float:
+        """Running clearance (m) between a part and its cell/pocket walls, from clearance_mode.
+        'loose' scales with the part: 5% of the footprint diagonal."""
+        c = _CLEARANCE_M.get(self.clearance_mode, 0.0025)
+        return float(0.05 * footprint_diag if c is None else c)
+
     def _compute_structured_grid(self, R_stable):
         """
         Compute centered rectangular grid positions and a yaw-aligned rotation.
 
-        Returns xs, ys (1-D arrays of grid coords), R_aligned (3x3), raw_pos_z (float).
+        Returns xs, ys (1-D grid coords), R_aligned (3x3), raw_pos_z (float), pitch_x, pitch_y, part_h.
         raw_pos_z places the part centre just above the bin floor at z=0, with enough
         clearance to absorb a +-5 deg orientation jitter without floor intersection.
         Yaw is auto-selected so the long axis fits the bin and grid slot count is maximised.
         Grid bounds account for wall thickness and jitter-induced footprint expansion so
-        the last row/column cannot clip the bin walls.
+        the last row/column cannot clip the bin walls. For partition/tray the pitch is widened
+        so each cell clears its fixture (divider thickness, or tray wall + clearance).
         """
         verts = np.asarray(self.part_mesh.vertices)
         sv = (R_stable @ verts.T).T
@@ -397,10 +423,24 @@ class MujocoBinScene:
         inner_hx = self.hx - 2 * t
         inner_hy = self.hy - 2 * t
 
+        # Per-pose part height (z-extent) drives divider height, pocket depth, and tray seat z.
+        part_h = float(maxs[2] - mins[2])
+
+        # Resolve running clearance, then widen the cell pitch so each cell clears its fixture:
+        # cardboard divider thickness (partition) or tray wall + pocket clearance (tray). "none" adds 0.
+        clearance = self._resolve_clearance(float(np.hypot(fp_x, fp_y)))
+        self._clearance_m = clearance
+        if self.structure_type == "partition":
+            extra = PARTITION_THICKNESS + 2 * clearance
+        elif self.structure_type == "tray":
+            extra = 2 * TRAY_WALL + 2 * clearance
+        else:
+            extra = 0.0
+
         # For each orientation the maximum valid part-centre coordinate is:
         #   inner_h? - half_footprint - jitter_margin
         # (the jitter can push the part edge outward by ~jitter_margin in X/Y)
-        gap = max(fp_x, fp_y) * 0.1
+        gap = max(fp_x, fp_y) * 0.1 + extra
 
         def _slot_count(fx, fy):
             px = fx + gap
@@ -450,8 +490,9 @@ class MujocoBinScene:
         xs = xs - cx
         ys = ys - cy
 
-        rp(f"[STRUCTURED] footprint {fp_x:.3f}x{fp_y:.3f} m  pitch {pitch_x:.3f}x{pitch_y:.3f} m  grid {nx}x{ny}{'  (yaw-rotated)' if apply_yaw90 else ''}")
-        return xs, ys, R_aligned, raw_pos_z
+        rp(f"[STRUCTURED] footprint {fp_x:.3f}x{fp_y:.3f} m  pitch {pitch_x:.3f}x{pitch_y:.3f} m  grid {nx}x{ny}"
+           f"  part_h {part_h:.3f} m  structure={self.structure_type}{'  (yaw-rotated)' if apply_yaw90 else ''}")
+        return xs, ys, R_aligned, raw_pos_z, pitch_x, pitch_y, part_h
 
     def _spawn_bodies(self, valid_poses, static=False):
         """Add part bodies to the MjSpec. static=True omits the freejoint (structured mode)."""
@@ -570,24 +611,159 @@ class MujocoBinScene:
 
     def _generate_structured_scene(self):
         R_stable = self.stable_pose_R if self.stable_pose_R is not None else self._find_stable_pose()
-        xs, ys, R_aligned, raw_pos_z = self._compute_structured_grid(R_stable)
+        xs, ys, R_aligned, raw_pos_z, pitch_x, pitch_y, part_h = self._compute_structured_grid(R_stable)
 
         grid_slots = [(x, y) for x in xs for y in ys]
         self.n_parts = len(grid_slots)
 
+        # "none" places static parts (no physics). partition/tray spawn freejoint parts already seated
+        # in their cell/pocket, then settle under gravity. Tray seats each part with its lowest point
+        # on the pocket floor (z = TRAY_BASE) and NO jitter so it registers to its matching concave
+        # pocket; partition/none seat just above the bin floor with the usual orientation jitter.
+        structured_static = (self.structure_type == "none")
+        verts = np.asarray(self.part_mesh.vertices)
+        min_z_pose = float((R_aligned @ verts.T).T[:, 2].min())
+        tray_seat_z = TRAY_BASE - min_z_pose + TRAY_SEAT_GAP   # rest on the pocket floor + tiny gap
+
         valid_poses = np.zeros((self.n_parts, 7))
         for i, (x, y) in enumerate(grid_slots):
-            R_jitter = R.from_euler("xyz", np.random.uniform(*JITTER_DEG), degrees=True).as_matrix()
-            R_local = R_aligned @ R_jitter
+            if self.structure_type == "tray":
+                R_local = R_aligned
+                pos_z = tray_seat_z
+            else:
+                R_jitter = R.from_euler("xyz", np.random.uniform(*JITTER_DEG), degrees=True).as_matrix()
+                R_local = R_aligned @ R_jitter
+                pos_z = raw_pos_z
             T_local = np.eye(4)
             T_local[:3, :3] = R_local
-            T_local[:3, 3] = [x, y, raw_pos_z]
+            T_local[:3, 3] = [x, y, pos_z]
             T = self.bin_transform @ T_local
             quat = R.from_matrix(T[:3, :3]).as_quat(scalar_first=True)
-            valid_poses[i, :3] = [x, y, raw_pos_z]
+            valid_poses[i, :3] = [x, y, pos_z]
             valid_poses[i, 3:] = quat
-        # Static bodies — no freejoint; non-intersection guaranteed by grid pitch
-        self._spawn_bodies(valid_poses, static=True)
+
+        # Build fixtures on the bin body (geoms + visual mesh) before compile().
+        if self.structure_type == "partition":
+            self._build_partitions(xs, ys, part_h)
+        elif self.structure_type == "tray":
+            self._build_tray(R_aligned, valid_poses[:, :3], pitch_x, pitch_y, part_h)
+
+        self._spawn_bodies(valid_poses, static=structured_static)
+        if not structured_static:
+            # Reuse the random-arrangement settle path: all parts in one batch (no parking waves).
+            self._batch_of_body = [0] * self.n_parts
+
+    def _build_partitions(self, xs, ys, part_h):
+        """Egg-crate cardboard dividers on the interior grid lines: thin static boxes on the bin body
+        (one part per cell). Also merged into self.bin_mesh so they share the bin geom id and are
+        treated as background by segmentation. Height = structure_height_frac x part_h."""
+        t = self.bin_dim[3]
+        inner_hx, inner_hy = self.hx - t, self.hy - t
+        h = max(1e-3, self.structure_height_frac * part_h)
+        half = PARTITION_THICKNESS / 2.0
+        x_lines = [(xs[i] + xs[i + 1]) / 2.0 for i in range(len(xs) - 1)]   # planes between columns
+        y_lines = [(ys[i] + ys[i + 1]) / 2.0 for i in range(len(ys) - 1)]   # planes between rows
+        geom_quat = np.array(R.from_matrix(self.bin_transform[:3, :3]).as_quat(scalar_first=True))
+        combined = o3d.geometry.TriangleMesh()
+
+        def add_divider(half_sizes, pos):
+            g = self.bin_body.add_geom()
+            g.type = mujoco.mjtGeom.mjGEOM_BOX
+            g.size = half_sizes
+            g.pos  = (self.bin_transform @ np.array([*pos, 1.0]))[:3].tolist()
+            g.quat = geom_quat.tolist()
+            g.mass = 0.0
+            g.rgba = [0.82, 0.70, 0.50, 1.0]   # cardboard
+            box = o3d.geometry.TriangleMesh.create_box(
+                width=half_sizes[0] * 2, height=half_sizes[1] * 2, depth=half_sizes[2] * 2)
+            box.translate(np.array(pos) - np.array(half_sizes))
+            return box
+
+        for x in x_lines:   # thin in x, spans interior y, from floor up to h
+            combined += add_divider([half, inner_hy, h / 2.0], [x, 0.0, h / 2.0])
+        for y in y_lines:   # thin in y, spans interior x
+            combined += add_divider([inner_hx, half, h / 2.0], [0.0, y, h / 2.0])
+
+        if len(combined.vertices) > 0:
+            combined.merge_close_vertices(1e-6)
+            combined.transform(self.bin_transform)
+            combined.compute_vertex_normals()
+            self.bin_mesh += combined
+        rp(f"[STRUCTURED] partition: {len(x_lines)} x-dividers + {len(y_lines)} y-dividers, height {h:.3f} m")
+
+    def _build_tray(self, R_aligned, body_positions, pitch_x, pitch_y, part_h):
+        """Injection-molded tray: one pocket per grid slot, settled parts seated in their pockets.
+
+        The pocket is traced from the part's CONVEX COLLISION (union of its VHACD pieces), not its raw
+        mesh — that is what MuJoCo actually collides (meshes collide as their convex hull), so a pocket
+        cut to the tighter mesh silhouette is overlapped by the bulging hulls and ejects the part. One
+        pocket's wall frame is VHACD-decomposed (high resolution) into convex pieces, registered as mesh
+        assets once, and instanced (geom.pos offset) at every slot; a separate floor slab (so no hull
+        bridges the base into the cavity) supports the parts. The smooth concave molded mesh is rendered
+        only (merged into self.bin_mesh, sharing the bin geom id -> background). Pocket depth = frac x part_h.
+        """
+        from geometry.tray_utils import (footprint_polygon, convex_footprint_polygon,
+                                          build_tray_collision_frame, tray_visual_tile)
+        pocket_depth = max(1e-3, self.structure_height_frac * part_h)
+        cvx = self.part_convex_meshes
+        if cvx:
+            # Robust footprint = union of each convex piece's 2D hull (exactly what MuJoCo collides).
+            # Avoids the mesh-projection silhouette, which fractures on real meshes and (keeping only
+            # the largest lobe) shrank the pocket below the part for some poses -> wall overlap -> eject.
+            poly = convex_footprint_polygon([o3d_to_trimesh(m) for m in cvx], R_aligned, self._clearance_m)
+        else:
+            poly = footprint_polygon(self.part_mesh, R_aligned, self._clearance_m)
+        _frame, pieces = build_tray_collision_frame(
+            poly, (pitch_x, pitch_y), pocket_depth, TRAY_BASE,
+            max_convex_hulls=TRAY_VHACD_MAX_HULLS, vhacd_resolution=TRAY_VHACD_RESOLUTION)
+        tile = tray_visual_tile(poly, (pitch_x, pitch_y), pocket_depth, TRAY_BASE)
+
+        bxy = np.asarray(body_positions)[:, :2]
+        geom_quat = R.from_matrix(self.bin_transform[:3, :3]).as_quat(scalar_first=True).tolist()
+
+        # Register the pocket frame's convex pieces as mesh assets ONCE; instance per slot via geom.pos.
+        piece_names = []
+        for j, (pv, pf) in enumerate(pieces):
+            m = self.spec.add_mesh()
+            m.name = f"tray_piece_{j}"
+            m.uservert = np.asarray(pv, dtype=float).flatten().tolist()
+            m.userface = np.asarray(pf).flatten().tolist()
+            piece_names.append(m.name)
+        for (bx, by) in bxy:
+            for name in piece_names:
+                g = self.bin_body.add_geom()
+                g.type = mujoco.mjtGeom.mjGEOM_MESH
+                g.meshname = name
+                g.pos  = (self.bin_transform @ np.array([bx, by, 0.0, 1.0]))[:3].tolist()
+                g.quat = geom_quat
+                g.mass = 0.0
+                g.rgba = [0.85, 0.85, 0.90, 1.0]
+
+        # One floor slab spanning the whole grid (z 0..TRAY_BASE) — kept out of the decomposed frame so
+        # no convex piece bridges the base into the pocket. Every part rests on it.
+        minx, miny, maxx, maxy = poly.bounds
+        fx0, fx1 = bxy[:, 0].min() + minx, bxy[:, 0].max() + maxx
+        fy0, fy1 = bxy[:, 1].min() + miny, bxy[:, 1].max() + maxy
+        fg = self.bin_body.add_geom()
+        fg.type = mujoco.mjtGeom.mjGEOM_BOX
+        fg.size = [(fx1 - fx0) / 2.0, (fy1 - fy0) / 2.0, TRAY_BASE / 2.0]
+        fg.pos  = (self.bin_transform @ np.array([(fx0 + fx1) / 2.0, (fy0 + fy1) / 2.0, TRAY_BASE / 2.0, 1.0]))[:3].tolist()
+        fg.quat = geom_quat
+        fg.mass = 0.0
+        fg.rgba = [0.85, 0.85, 0.90, 1.0]
+
+        # Visual: a translated copy of the smooth molded tile per slot, merged into the bin mesh.
+        tiles = []
+        for (bx, by) in bxy:
+            tc = tile.copy()
+            tc.apply_translation([float(bx), float(by), 0.0])
+            tiles.append(tc)
+        visual = trimesh_to_o3d(trimesh.util.concatenate(tiles))
+        visual.transform(self.bin_transform)
+        visual.compute_vertex_normals()
+        self.bin_mesh += visual
+        rp(f"[STRUCTURED] tray: {len(pieces)} VHACD pieces/pocket x {len(bxy)} slots + floor, "
+           f"pocket depth {pocket_depth:.3f} m")
 
     def _cache_body_topology(self):
         """
@@ -695,10 +871,12 @@ class MujocoBinScene:
         self.model = self.spec.compile()
         self.data = mujoco.MjData(self.model)
 
-        if self.arrangement == "structured":
+        # Structured/none is purely kinematic (static bodies): pose them and stop.
+        if self.arrangement == "structured" and self.structure_type == "none":
             mujoco.mj_forward(self.model, self.data)  # populate xpos/xquat without dynamics
             return
 
+        # Random and structured partition/tray have freejoint bodies that settle under gravity.
         self._cache_body_topology()   # body/geom/freejoint addressing + park later batches
 
         if self.render_flag and self.viewer is None:
@@ -749,17 +927,61 @@ class MujocoBinScene:
         self._stable_count = self._stable_count + 1 if all_slow else 0
         return self._stable_count >= self.stable_steps
 
+    def _settle_structured(self, on_step=None, preview_interval_s: float = 0.05):
+        """Clean settle for structured partition/tray, mirroring tray_cell_debug.simulate_cell: parts
+        are pre-seated in their cells/pockets, so just step until settled — no hopper, no batched
+        release, no phases. The per-step linear-velocity clamp is kept as a cheap anti-tunneling
+        safeguard (a no-op for already-seated parts); the GUI preview hook is honored each interval."""
+        # The hopper extension walls are a random-drop aid; disable them so each part settles in a
+        # clean cell exactly as in the single-cell verification (they never touch seated parts anyway).
+        for name in self._hopper_geom_names:
+            gid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name)
+            if gid >= 0:
+                self.model.geom_contype[gid] = 0
+                self.model.geom_conaffinity[gid] = 0
+
+        preview_tick = max(1, int(preview_interval_s / self.model.opt.timestep))
+        max_steps = int(self.settle_time / self.model.opt.timestep)
+        tick = max(1, int(1.0 / self.model.opt.timestep))
+        self._stable_count = 0
+        for i in range(max_steps):
+            if i % tick == 0:
+                print(f"[t={self.data.time:.2f}s] structured-settle step={i}/{max_steps}")
+            step_start = time.time()
+            mujoco.mj_step(self.model, self.data)
+            self._clamp_velocities()
+            if on_step is not None and i % preview_tick == 0:
+                try:
+                    on_step()
+                except Exception as e:
+                    print(f"[preview] on_step failed (ignored): {e}")
+            if self.viewer is not None:
+                self.viewer.sync()
+            if self.is_settled():
+                print(f"[t={self.data.time:.2f}s] structured settled at step {i}")
+                break
+            if self.render_flag:
+                elapsed = time.time() - step_start
+                time.sleep(max(0.0, self.model.opt.timestep - elapsed))
+        if self.viewer is not None:
+            self.viewer.close()
+
     def simulate(self, on_step=None, preview_interval_s: float = 0.05):
         """
         on_step : optional no-arg callable invoked from inside the stepping loop (this
             thread) every `preview_interval_s` of sim time. Intended for a live GUI mesh
             preview: it runs between mj_step calls, so it can read xpos/xquat with no data
             race, and any exception it raises is swallowed so a GUI hiccup never aborts the
-            sim. Structured arrangement returns before any stepping, so on_step is unused there.
+            sim. Structured arrangement is handled by _settle_structured() and returns early here.
         """
         if self.arrangement == "structured":
-            print("[INFO] Structured arrangement: skipping simulation and settling")
-            return  # poses are final; mj_forward already called in generate_scene
+            if self.structure_type == "none":
+                print("[INFO] Structured/none arrangement: skipping simulation and settling")
+                return  # poses are final; mj_forward already called in generate_scene
+            # Partition/tray: parts are pre-seated in their cells/pockets, so run a dedicated CLEAN
+            # settle (no hopper, no batched release) — mirrors the verified tray_cell_debug.simulate_cell.
+            self._settle_structured(on_step, preview_interval_s)
+            return
 
         preview_tick = max(1, int(preview_interval_s / self.model.opt.timestep))
         n_batches = (max(self._batch_of_body) + 1) if self._batch_of_body else 1
@@ -927,6 +1149,10 @@ class MujocoBinScene:
             "bin_dim":          np.asarray(self.bin_dim, dtype=np.float64),  # (width, length, height, wall_thickness) m
             "bin_transform":    np.asarray(self.bin_transform, dtype=np.float64),
             "camera_distance":  np.float64(self.camera_distance),
+            "arrangement":      str(self.arrangement),
+            "structure_type":   str(self.structure_type),                    # none | partition | tray
+            "structure_height_frac": np.float64(self.structure_height_frac),
+            "clearance_m":      np.float64(self._clearance_m),
         }
 
     def mujoco_scene_to_o3d(self, scene_dict):
@@ -1054,6 +1280,24 @@ if __name__ == "__main__":
         action="store_true",
         help="Open Open3D viewer after each test",
     )
+    parser.add_argument(
+        "--structure",
+        choices=["none", "partition", "tray"],
+        default="none",
+        help="Structured-scene fixture: none | partition (egg-crate dividers) | tray (molded pockets)",
+    )
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=75,
+        help="Divider height / pocket depth as %% of part height (50-100), for partition/tray",
+    )
+    parser.add_argument(
+        "--clearance",
+        choices=["snug", "medium", "loose"],
+        default="medium",
+        help="Part-to-wall running clearance for partition/tray",
+    )
     args = parser.parse_args()
 
     init_open3d()
@@ -1086,8 +1330,11 @@ if __name__ == "__main__":
                 render=args.display,
                 arrangement="structured",
                 stable_pose_R=R_stable,
+                structure_type=args.structure,
+                structure_height_frac=max(50, min(100, args.height)) / 100.0,
+                clearance_mode=args.clearance,
             )
-            scene.simulate()         # should be a no-op
+            scene.simulate()         # no-op for structure=none; settles for partition/tray
             scene_state = scene.extract_scene_state()
 
             if args.display:

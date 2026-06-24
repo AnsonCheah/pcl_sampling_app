@@ -10,6 +10,6 @@
 
 **`build_panel()` returns `None` in headless mode.** Every stage checks `self.app.headless` at the top of `build_panel()` and `_refresh_ui()`. Headless callers drive workers directly via `stage._run_worker()`.
 
-**`SyntheticStage` orchestrates but does not implement.** All sensor physics and physics simulation happen in `sensor/` and `physics/`. If sensor math or MuJoCo logic starts appearing in `synthetic_stage.py`, it's in the wrong place.
+**Synthetic generation is split into `SceneStage` → `RenderStage`.** `SceneStage` (`scene_stage.py`) builds the physical bin scene (MuJoCo arrangement/settle, partitions/tray) → `app.o3d_scene` + `app.mj_scene`; `RenderStage` (`render_stage.py`) simulates the sensor (raycast → noise → segmentation → export). They communicate only through `app` attributes. If sensor math appears in `scene_stage.py`, or MuJoCo logic in `render_stage.py`, it's in the wrong place.
 
-**`decompose_thread` race condition.** `ImportMeshStage.decompose_mesh()` runs in a daemon thread that starts during `worker()`. `SyntheticStage` requires the decomposition to be complete before calling `MujocoBinScene`. The join must happen before sim init.
+**`decompose_thread` race condition.** `ImportMeshStage.decompose_mesh()` runs in a daemon thread that starts during `worker()`. `SceneStage` requires the decomposition to be complete before calling `MujocoBinScene`. The join must happen before sim init.

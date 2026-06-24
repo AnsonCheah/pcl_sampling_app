@@ -46,11 +46,11 @@ After `simulate()`, `scene_state` contains one entry per simulated body:
 }
 ```
 
-`T` is a 4×4 world-frame transform. The `bin` key is always present — `SyntheticStage` uses it to separate bin points from part points during labelling.
+`T` is a 4×4 world-frame transform. The `bin` key is always present — `RenderStage` uses it to separate bin points from part points during labelling. Partition/tray fixtures are merged into `bin_mesh`, so they share the bin id and segment as background.
 
 ## Constraints
 
 - **Final part count may be less than `n_parts`**: Collision-aware placement skips parts that cannot be placed without overlap after ~50 insertion attempts. Never assume `len(scene_state) - 1 == n_parts`.
 - **`render=True` is blocking**: The passive MuJoCo viewer must not be used in headless mode. Pass `render=False` when running without a display.
-- **`simulate()` is thread-safe**: MuJoCo has no main-thread requirement. `SyntheticStage` runs it in a background worker.
-- **Convex meshes must be ready before construction**: `ImportMeshStage.decompose_mesh()` runs in a daemon thread. `SyntheticStage` must join that thread before constructing `MujocoBinScene`.
+- **`simulate()` is thread-safe**: MuJoCo has no main-thread requirement. `SceneStage` runs it in a background worker. Structured `none` is a no-op (static poses); `partition`/`tray` settle the parts under gravity.
+- **Convex meshes must be ready before construction**: `ImportMeshStage.decompose_mesh()` runs in a daemon thread. `SceneStage` must join that thread before constructing `MujocoBinScene`.

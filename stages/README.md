@@ -4,7 +4,7 @@ GUI panels and pipeline orchestration. Calls into `sensor/`, `physics/`, and `ge
 
 ## Pipeline
 
-Six stages run in sequence. All share `app` as their only communication channel.
+Stages run in sequence. All share `app` as their only communication channel.
 
 | Stage enum | Class | Heavy work |
 |------------|-------|------------|
@@ -13,7 +13,9 @@ Six stages run in sequence. All share `app` as their only communication channel.
 | `CROP` | `CropStage` | Box-select UI, mask-based point removal |
 | `DOWNSAMPLE` | `DownsampleStage` | Uniform or adaptive voxel downsampling |
 | `SAVE` | `SaveStage` | PLY export with geocenter + GT pose comments |
-| `SYNTHETIC` | `SyntheticStage` | MuJoCo bin sim + structured-light noise chain |
+| `DECOMPOSE` | `DecomposeStage` | VHACD convex decomposition for sim collision |
+| `SCENE` | `SceneStage` | MuJoCo bin arrangement/settle (random, or structured ± partition/tray) |
+| `RENDER` | `RenderStage` | Structured-light noise chain + instance segmentation + export |
 
 ## `BaseStage`
 
@@ -45,11 +47,13 @@ Key attributes written and read between stages:
 
 | Attribute | Written by | Read by |
 |-----------|------------|---------|
-| `app.target_mesh` | `ImportMeshStage` | `RaycastStage`, `SyntheticStage` |
-| `app.convex_meshes` | `ImportMeshStage` | `SyntheticStage` |
+| `app.target_mesh` | `ImportMeshStage` | `RaycastStage`, `SceneStage` |
+| `app.convex_meshes` | `DecomposeStage` | `SceneStage` |
 | `app.raw_pcd` | `RaycastStage` | `CropStage` |
-| `app.down_pcd` | `DownsampleStage` | `SaveStage`, `SyntheticStage` |
-| `app.synthetic_scenes` | `SyntheticStage` | `SaveStage` |
+| `app.down_pcd` | `DownsampleStage` | `SaveStage`, `RenderStage` |
+| `app.o3d_scene` | `SceneStage` | `RenderStage` |
+| `app.mj_scene` | `SceneStage` | `RenderStage`, `app._reframe` |
+| `app.synthetic_scenes` | `RenderStage` | `SaveStage` |
 
 Stages never call each other's methods directly. All handoffs go through `app`.
 
@@ -61,16 +65,21 @@ Every stage checks `self.app.headless` at the top of `build_panel()` and `_refre
 app = MeshSamplingApp(headless=True, mesh_path="part.STL")
 app.stages[Stage.IMPORT_MESH]._run_worker()
 # Default: auto-size count to ~60% volumetric fill (set generate_mode="count" to override).
-app.stages[Stage.SYNTHETIC].fill_rate = 0.6
-app.stages[Stage.SYNTHETIC]._run_worker()
+app.stages[Stage.SCENE].fill_rate = 0.6
+app.stages[Stage.SCENE]._run_worker()    # build + settle physical scene -> app.o3d_scene
+app.stages[Stage.RENDER]._run_worker()   # sensor sim + segmentation -> app.synthetic_targets
 ```
+
+For a structured scene with fixtures, set on `SceneStage` before the worker: `arrangement="structured"`,
+`structure_type` (`"none"|"partition"|"tray"`), `structure_height_pct` (50–100), `clearance_mode`
+(`"snug"|"medium"|"loose"`), and `stable_pose_R` (one scene per stable pose).
 
 ## Threading rules
 
 - **Never touch Open3D GUI from `worker()`**: O3D GUI is not thread-safe. Route all GUI mutations through `self.app.main_thread(lambda: ...)`.
-- **`SyntheticStage` must join `decompose_thread`** before constructing `MujocoBinScene`. The convex decomposition from `ImportMeshStage` runs in a daemon thread and may still be running when `SyntheticStage` starts.
+- **`SceneStage` must join `decompose_thread`** before constructing `MujocoBinScene`. The convex decomposition from `DecomposeStage`/`ImportMeshStage` runs in a daemon thread and may still be running when `SceneStage` starts.
 
 ## Constraints
 
 - **Stages orchestrate, never implement**: domain logic (sensor physics, MuJoCo setup, geometry math) belongs in `sensor/`, `physics/`, `geometry/`. If domain logic appears in a stage file, it is in the wrong place.
-- **`SyntheticStage` is the integration point**: it is the only stage that calls both `physics/` and `sensor/`. The noise call sequence there is intentional — do not reorder.
+- **`SceneStage` and `RenderStage` are the integration points**: `SceneStage` calls `physics/`, `RenderStage` calls `sensor/`. The noise call sequence in `RenderStage` is intentional — do not reorder.

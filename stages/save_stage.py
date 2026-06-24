@@ -121,9 +121,9 @@ class SaveStage(BaseStage):
 
                 self.app.output_pcd_path = base_path / f"{stem}_surface" / f"{stem}_surface.ply"
 
-            elif self.app.stage == Stage.SYNTHETIC:
+            elif self.app.stage == Stage.RENDER:
                 if path is None:
-                    print(f"[SAVE] worker: path is not provided in synthetic stage.")
+                    print(f"[SAVE] worker: path is not provided in render stage.")
                 pcd_path = path / "reference_cloud.ply"
 
                 center_quat = R.from_matrix(self.app.geocenter[:3, :3]).as_quat()

@@ -35,7 +35,8 @@ from stages.crop_stage import CropStage
 from stages.downsample_stage import DownsampleStage
 from stages.save_stage import SaveStage
 from stages.decompose_stage import DecomposeStage
-from stages.synthetic_stage import SyntheticStage
+from stages.scene_stage import SceneStage
+from stages.render_stage import RenderStage
 import threading
 import time
 from pathlib import Path
@@ -60,7 +61,8 @@ class MeshSamplingApp:
             Stage.DOWNSAMPLE: DownsampleStage(self),
             Stage.SAVE: SaveStage(self),
             Stage.DECOMPOSE: DecomposeStage(self),
-            Stage.SYNTHETIC: SyntheticStage(self),
+            Stage.SCENE: SceneStage(self),
+            Stage.RENDER: RenderStage(self),
         }
         if not self.headless:
             # === Scene widget ===
@@ -129,6 +131,9 @@ class MeshSamplingApp:
         self.convex_meshes = []
         self.synthetic_targets = {}
         self.synthetic_scenes = {}
+        self.o3d_scene = {}          # SceneStage -> RenderStage handoff: physical scene meshes + GT poses
+        self.mj_scene = None         # SceneStage -> RenderStage handoff: MujocoBinScene (GT/bin export, camera)
+        self.scene_mesh = None       # SceneStage physical-scene preview mesh
         self.feature_pcd = None
         self.pcd_flat = None
         self.output_pcd_path = None
@@ -136,8 +141,8 @@ class MeshSamplingApp:
         self.point_count_mean = None
         self.point_count_range = None
         self.stage = Stage.IMPORT_MESH
-        if not self.headless and Stage.SYNTHETIC in self.stages:
-            self.stages[Stage.SYNTHETIC].combobox_targets.clear_items()
+        if not self.headless and Stage.RENDER in self.stages:
+            self.stages[Stage.RENDER].combobox_targets.clear_items()
         self.set_stage(Stage.IMPORT_MESH)
 
     def set_stage(self, stage: Stage):
@@ -175,8 +180,8 @@ class MeshSamplingApp:
         if self.target_mesh is None:
             return
         else:
-            if self.stage == Stage.SYNTHETIC:
-                mj_scene = self.stages[Stage.SYNTHETIC].mj_scene
+            if self.stage in (Stage.SCENE, Stage.RENDER) and self.mj_scene is not None:
+                mj_scene = self.mj_scene
                 look_at, cam_pos, up = mj_scene._get_camera_lookat()
                 bbox = mj_scene.bin_mesh.get_axis_aligned_bounding_box()
             else:
@@ -456,19 +461,21 @@ def run_sampling(app, express):
 
 
 def generate_one_scene(app, scene_label):
-    synth = app.stages[Stage.SYNTHETIC]
+    scene = app.stages[Stage.SCENE]
+    render = app.stages[Stage.RENDER]
     rp(f"[bold]Generating {scene_label}...[/bold]")
     t0 = time.time()
-    synth._run_worker()
+    scene._run_worker()      # build + settle the physical scene -> app.o3d_scene / app.mj_scene
+    render._run_worker()     # sensor sim + segmentation -> app.synthetic_targets
     rp(f"  {len(app.synthetic_targets)} valid targets in {time.time() - t0:.1f}s")
-    synth.save_synthetic_targets()
+    render.save_synthetic_targets()
 
 
 def run_synthetic(app, express):
-    synth = app.stages[Stage.SYNTHETIC]
-    # Required so save_synthetic_targets() -> SaveStage.worker takes the SYNTHETIC
+    scene = app.stages[Stage.SCENE]
+    # Required so save_synthetic_targets() -> SaveStage.worker takes the RENDER
     # branch and writes reference_cloud.ply into each scene directory.
-    app.set_stage(Stage.SYNTHETIC)
+    app.set_stage(Stage.RENDER)
 
     banner("Synthetic scene generation")
     # Arrangement is asked in BOTH express and custom modes.
@@ -482,16 +489,32 @@ def run_synthetic(app, express):
         part_mesh = o3d_to_trimesh(app.target_mesh)
         poses = MujocoBinScene.get_stable_poses(part_mesh)
         rp(f"[cyan]Found {len(poses)} stable pose(s); generating one scene each.[/cyan]")
-        synth.arrangement = "structured"
+        scene.arrangement = "structured"
+        structure = ask_choice(
+            "Structure", ["none", "partition", "tray"], "none",
+            hint="none = bare grid (static); partition = cardboard egg-crate dividers; "
+                 "tray = injection-molded pockets tracing the part footprint. partition/tray settle "
+                 "the parts under gravity.")
+        scene.structure_type = structure
+        if structure != "none":
+            pct = ask(
+                "Structure height (% of part height)", scene.structure_height_pct, int,
+                hint="partition = divider height; tray = pocket depth. 50-100% of part height "
+                     "(higher = more enclosed / less exposed).")
+            scene.structure_height_pct = max(50, min(100, pct))
+            scene.clearance_mode = ask_choice(
+                "Fit clearance", ["snug", "medium", "loose"], scene.clearance_mode,
+                hint="part-to-wall running clearance; snug (~1 mm) holds tighter, "
+                     "loose (~5% of footprint) settles more easily.")
         for i, (R_stable, prob) in enumerate(poses):
-            synth.stable_pose_R = R_stable
+            scene.stable_pose_R = R_stable
             generate_one_scene(app, f"structured scene {i + 1}/{len(poses)} (p={prob:.2f})")
-        synth.stable_pose_R = None
+        scene.stable_pose_R = None
         return
 
     # arrangement == "random"
-    synth.arrangement = "random"
-    synth.stable_pose_R = None
+    scene.arrangement = "random"
+    scene.stable_pose_R = None
     n_scenes = ask(
         "Number of scenes to generate", 1, int,
         hint="Each scene is a full physics sim + sensor-noise render (can take minutes). "
@@ -500,33 +523,33 @@ def run_synthetic(app, express):
 
     if express:
         if n_scenes == 1:
-            synth.generate_mode = "fill_rate"
-            synth.fill_rate = 0.6
+            scene.generate_mode = "fill_rate"
+            scene.fill_rate = 0.6
             generate_one_scene(app, "scene 1/1 (fill 60%)")
         else:
             # Sweep fill rate 20% -> 100% across the scenes.
             for i, fr in enumerate(np.linspace(0.2, 1.0, n_scenes)):
-                synth.generate_mode = "fill_rate"
-                synth.fill_rate = float(fr)
+                scene.generate_mode = "fill_rate"
+                scene.fill_rate = float(fr)
                 generate_one_scene(app, f"scene {i + 1}/{n_scenes} (fill {fr:.0%})")
     else:
         # Custom: prompt per scene.
         for i in range(n_scenes):
             banner(f"Scene {i + 1}/{n_scenes} settings")
             mode = ask_choice(
-                "Generate mode", ["fill_rate", "count"], synth.generate_mode,
+                "Generate mode", ["fill_rate", "count"], scene.generate_mode,
                 hint="fill_rate = auto-size the part count to a target bin fill %; "
                      "count = drop an exact number of parts.")
-            synth.generate_mode = mode
+            scene.generate_mode = mode
             if mode == "fill_rate":
                 pct = ask(
-                    "Fill rate (%)", int(round(synth.fill_rate * 100)), int,
+                    "Fill rate (%)", int(round(scene.fill_rate * 100)), int,
                     hint="Target volumetric fill of the bin; higher = more parts, "
                          "more clutter and occlusion.")
-                synth.fill_rate = max(0.0, min(1.0, pct / 100.0))
+                scene.fill_rate = max(0.0, min(1.0, pct / 100.0))
             else:
-                synth.num_targets = ask(
-                    "Part count", synth.num_targets, int,
+                scene.num_targets = ask(
+                    "Part count", scene.num_targets, int,
                     hint="Exact number of parts to drop into the bin.")
             generate_one_scene(app, f"scene {i + 1}/{n_scenes}")
 

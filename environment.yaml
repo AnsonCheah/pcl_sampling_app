@@ -18,6 +18,11 @@ dependencies:
       - vhacdx==0.0.10
       - networkx==3.6.1
       - manifold3d==3.4.1
+      # Tray pocket geometry (geometry/tray_utils.py): shapely = footprint silhouette + buffer
+      # smoothing/clearance; mapbox-earcut = polygon triangulation behind trimesh.extrude_polygon.
+      - shapely==2.1.2
+      - mapbox-earcut==2.0.0
+      - rtree==1.4.1
       - grpcio==1.80.0
       - rich==14.3.3
       # Optional GPU acceleration for sensor/segment_instances.py (cupyx.scipy.ndimage).
