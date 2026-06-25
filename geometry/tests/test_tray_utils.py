@@ -12,7 +12,8 @@ import trimesh
 from shapely.geometry import Polygon
 
 from geometry.tray_utils import (footprint_polygon, convex_footprint_polygon, _coalesce,
-                                  build_tray_collision_frame, tray_visual_tile)
+                                  build_tray_collision_frame, tray_visual_tile,
+                                  build_tray_conforming_hfield)
 
 
 def _lshape():
@@ -86,6 +87,25 @@ def test_build_tray_collision_frame_decomposed():
     assert len(pieces) >= 1
     for v, f in pieces:
         assert len(v) >= 4 and len(f) >= 4    # each convex piece is a real closed mesh
+
+
+def test_conforming_hfield_cradles_a_tilted_bottom():
+    # A box tilted about Y has a ramped bottom; the conforming pocket floor must ramp to match it
+    # (and provide a uniform clearance gap), with walls at the cell top outside the footprint.
+    box = trimesh.creation.box(extents=[0.08, 0.05, 0.02])
+    box.apply_transform(trimesh.transformations.rotation_matrix(np.radians(15), [0, 1, 0]))
+    hf = build_tray_conforming_hfield([box.convex_hull], np.eye(3), (0.10, 0.07),
+                                      pocket_depth=0.02, base_thickness=0.004, clearance=0.0025)
+    el = hf["elevation"]
+    assert el.ndim == 2 and el.min() >= 0.0 and el.max() <= 1.0
+    assert len(hf["size"]) == 4 and hf["seat_dz"] > 0
+    assert len(hf["visual"].vertices) > 0
+    # walls present (elevation hits the cell top = 1) AND a lower conforming floor
+    assert el.max() > 0.99 and el.min() < el.max() - 0.05
+    # the floor ramps along the tilt axis (x = columns): mean elevation should trend across columns
+    floor_rows = el[el.min(axis=1) < 0.99]          # rows that contain floor (not all-wall)
+    col_means = el.mean(axis=0)
+    assert np.ptp(col_means) > 0.02, "conforming floor shows no ramp for a tilted bottom"
 
 
 def test_tray_visual_tile_watertight():

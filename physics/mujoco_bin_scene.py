@@ -621,9 +621,17 @@ class MujocoBinScene:
         # on the pocket floor (z = TRAY_BASE) and NO jitter so it registers to its matching concave
         # pocket; partition/none seat just above the bin floor with the usual orientation jitter.
         structured_static = (self.structure_type == "none")
-        verts = np.asarray(self.part_mesh.vertices)
-        min_z_pose = float((R_aligned @ verts.T).T[:, 2].min())
-        tray_seat_z = TRAY_BASE - min_z_pose + TRAY_SEAT_GAP   # rest on the pocket floor + tiny gap
+
+        # Tray: build the conforming height-field pocket first — it sets the seat height parts spawn at
+        # (lowest point `clearance` above the cradle). partition/none seat just above the bin floor.
+        tray_hf = None
+        if self.structure_type == "tray":
+            tray_hf = self._build_tray_hfield(R_aligned, pitch_x, pitch_y, part_h)
+            tray_seat_z = tray_hf["seat_dz"] + TRAY_SEAT_GAP
+        else:
+            verts = np.asarray(self.part_mesh.vertices)
+            min_z_pose = float((R_aligned @ verts.T).T[:, 2].min())
+            tray_seat_z = TRAY_BASE - min_z_pose + TRAY_SEAT_GAP
 
         valid_poses = np.zeros((self.n_parts, 7))
         for i, (x, y) in enumerate(grid_slots):
@@ -646,7 +654,7 @@ class MujocoBinScene:
         if self.structure_type == "partition":
             self._build_partitions(xs, ys, part_h)
         elif self.structure_type == "tray":
-            self._build_tray(R_aligned, valid_poses[:, :3], pitch_x, pitch_y, part_h)
+            self._instance_tray_hfield(tray_hf, valid_poses[:, :3])
 
         self._spawn_bodies(valid_poses, static=structured_static)
         if not structured_static:
@@ -691,79 +699,53 @@ class MujocoBinScene:
             self.bin_mesh += combined
         rp(f"[STRUCTURED] partition: {len(x_lines)} x-dividers + {len(y_lines)} y-dividers, height {h:.3f} m")
 
-    def _build_tray(self, R_aligned, body_positions, pitch_x, pitch_y, part_h):
-        """Injection-molded tray: one pocket per grid slot, settled parts seated in their pockets.
-
-        The pocket is traced from the part's CONVEX COLLISION (union of its VHACD pieces), not its raw
-        mesh — that is what MuJoCo actually collides (meshes collide as their convex hull), so a pocket
-        cut to the tighter mesh silhouette is overlapped by the bulging hulls and ejects the part. One
-        pocket's wall frame is VHACD-decomposed (high resolution) into convex pieces, registered as mesh
-        assets once, and instanced (geom.pos offset) at every slot; a separate floor slab (so no hull
-        bridges the base into the cavity) supports the parts. The smooth concave molded mesh is rendered
-        only (merged into self.bin_mesh, sharing the bin geom id -> background). Pocket depth = frac x part_h.
-        """
-        from geometry.tray_utils import (footprint_polygon, convex_footprint_polygon,
-                                          build_tray_collision_frame, tray_visual_tile)
+    def _build_tray_hfield(self, R_aligned, pitch_x, pitch_y, part_h):
+        """Build ONE conforming height-field pocket asset that cradles the part's bottom surface (like a
+        3D-print support bed). The floor follows the part's bottom depth map (offset down by clearance),
+        the walls rise to the cell top outside the footprint; the part seats `clearance` above and
+        settles into a uniform-clearance cradle. Returns the hfield dict (+ registered asset name); the
+        per-slot geoms and visual tiles are added by _instance_tray_hfield once body positions are known.
+        Replaces the old flat VHACD pocket — an exact 2.5D surface, no convex decomposition (so no hull
+        bridging the cavity), one geom per cell."""
+        from geometry.tray_utils import build_tray_conforming_hfield
         pocket_depth = max(1e-3, self.structure_height_frac * part_h)
-        cvx = self.part_convex_meshes
-        if cvx:
-            # Robust footprint = union of each convex piece's 2D hull (exactly what MuJoCo collides).
-            # Avoids the mesh-projection silhouette, which fractures on real meshes and (keeping only
-            # the largest lobe) shrank the pocket below the part for some poses -> wall overlap -> eject.
-            poly = convex_footprint_polygon([o3d_to_trimesh(m) for m in cvx], R_aligned, self._clearance_m)
-        else:
-            poly = footprint_polygon(self.part_mesh, R_aligned, self._clearance_m)
-        _frame, pieces = build_tray_collision_frame(
-            poly, (pitch_x, pitch_y), pocket_depth, TRAY_BASE,
-            max_convex_hulls=TRAY_VHACD_MAX_HULLS, vhacd_resolution=TRAY_VHACD_RESOLUTION)
-        tile = tray_visual_tile(poly, (pitch_x, pitch_y), pocket_depth, TRAY_BASE)
+        cvx = ([o3d_to_trimesh(m) for m in self.part_convex_meshes]
+               if self.part_convex_meshes else [self.part_mesh])
+        hf = build_tray_conforming_hfield(cvx, R_aligned, (pitch_x, pitch_y), pocket_depth,
+                                          TRAY_BASE, self._clearance_m)
+        el = hf["elevation"]
+        asset = self.spec.add_hfield()
+        asset.name = "tray_pocket"
+        asset.nrow, asset.ncol = int(el.shape[0]), int(el.shape[1])
+        asset.size = [float(v) for v in hf["size"]]
+        asset.userdata = el.flatten().astype(float).tolist()
+        hf["name"] = asset.name
+        rp(f"[STRUCTURED] tray (conforming hfield): {el.shape[0]}x{el.shape[1]} grid, "
+           f"pocket depth {pocket_depth:.3f} m")
+        return hf
 
+    def _instance_tray_hfield(self, hf, body_positions):
+        """Place one conforming height-field geom per slot (all sharing the one asset) and merge the
+        smooth pocket surface into self.bin_mesh (shared bin geom id -> background)."""
+        cx, cy = hf["center_xy"]
+        geom_quat = np.array(R.from_matrix(self.bin_transform[:3, :3]).as_quat(scalar_first=True)).tolist()
         bxy = np.asarray(body_positions)[:, :2]
-        geom_quat = R.from_matrix(self.bin_transform[:3, :3]).as_quat(scalar_first=True).tolist()
-
-        # Register the pocket frame's convex pieces as mesh assets ONCE; instance per slot via geom.pos.
-        piece_names = []
-        for j, (pv, pf) in enumerate(pieces):
-            m = self.spec.add_mesh()
-            m.name = f"tray_piece_{j}"
-            m.uservert = np.asarray(pv, dtype=float).flatten().tolist()
-            m.userface = np.asarray(pf).flatten().tolist()
-            piece_names.append(m.name)
-        for (bx, by) in bxy:
-            for name in piece_names:
-                g = self.bin_body.add_geom()
-                g.type = mujoco.mjtGeom.mjGEOM_MESH
-                g.meshname = name
-                g.pos  = (self.bin_transform @ np.array([bx, by, 0.0, 1.0]))[:3].tolist()
-                g.quat = geom_quat
-                g.mass = 0.0
-                g.rgba = [0.85, 0.85, 0.90, 1.0]
-
-        # One floor slab spanning the whole grid (z 0..TRAY_BASE) — kept out of the decomposed frame so
-        # no convex piece bridges the base into the pocket. Every part rests on it.
-        minx, miny, maxx, maxy = poly.bounds
-        fx0, fx1 = bxy[:, 0].min() + minx, bxy[:, 0].max() + maxx
-        fy0, fy1 = bxy[:, 1].min() + miny, bxy[:, 1].max() + maxy
-        fg = self.bin_body.add_geom()
-        fg.type = mujoco.mjtGeom.mjGEOM_BOX
-        fg.size = [(fx1 - fx0) / 2.0, (fy1 - fy0) / 2.0, TRAY_BASE / 2.0]
-        fg.pos  = (self.bin_transform @ np.array([(fx0 + fx1) / 2.0, (fy0 + fy1) / 2.0, TRAY_BASE / 2.0, 1.0]))[:3].tolist()
-        fg.quat = geom_quat
-        fg.mass = 0.0
-        fg.rgba = [0.85, 0.85, 0.90, 1.0]
-
-        # Visual: a translated copy of the smooth molded tile per slot, merged into the bin mesh.
         tiles = []
         for (bx, by) in bxy:
-            tc = tile.copy()
-            tc.apply_translation([float(bx), float(by), 0.0])
+            g = self.bin_body.add_geom()
+            g.type = mujoco.mjtGeom.mjGEOM_HFIELD
+            g.hfieldname = hf["name"]
+            g.pos  = (self.bin_transform @ np.array([bx + cx, by + cy, 0.0, 1.0]))[:3].tolist()
+            g.quat = geom_quat
+            g.mass = 0.0
+            g.rgba = [0.85, 0.85, 0.90, 1.0]
+            tc = hf["visual"].copy()
+            tc.apply_translation([float(bx + cx), float(by + cy), 0.0])
             tiles.append(tc)
         visual = trimesh_to_o3d(trimesh.util.concatenate(tiles))
         visual.transform(self.bin_transform)
         visual.compute_vertex_normals()
         self.bin_mesh += visual
-        rp(f"[STRUCTURED] tray: {len(pieces)} VHACD pieces/pocket x {len(bxy)} slots + floor, "
-           f"pocket depth {pocket_depth:.3f} m")
 
     def _cache_body_topology(self):
         """
@@ -975,12 +957,12 @@ class MujocoBinScene:
             sim. Structured arrangement is handled by _settle_structured() and returns early here.
         """
         if self.arrangement == "structured":
-            if self.structure_type == "none":
-                print("[INFO] Structured/none arrangement: skipping simulation and settling")
-                return  # poses are final; mj_forward already called in generate_scene
-            # Partition/tray: parts are pre-seated in their cells/pockets, so run a dedicated CLEAN
-            # settle (no hopper, no batched release) — mirrors the verified tray_cell_debug.simulate_cell.
-            self._settle_structured(on_step, preview_interval_s)
+            # if self.structure_type == "none":
+            #     print("[INFO] Structured/none arrangement: skipping simulation and settling")
+            #     return  # poses are final; mj_forward already called in generate_scene
+            # # Partition/tray: parts are pre-seated in their cells/pockets, so run a dedicated CLEAN
+            # # settle (no hopper, no batched release) — mirrors the verified tray_cell_debug.simulate_cell.
+            # self._settle_structured(on_step, preview_interval_s)
             return
 
         preview_tick = max(1, int(preview_interval_s / self.model.opt.timestep))

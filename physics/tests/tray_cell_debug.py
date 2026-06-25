@@ -29,6 +29,10 @@ Usage:
 import argparse
 import colorsys
 import math
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import numpy as np
 import trimesh
@@ -39,7 +43,7 @@ from scipy.spatial.transform import Rotation as R
 from physics.mujoco_bin_scene import (MujocoBinScene, load_part, TRAY_WALL, TRAY_BASE, TRAY_SEAT_GAP,
                                       TRAY_VHACD_MAX_HULLS, TRAY_VHACD_RESOLUTION, _CLEARANCE_M)
 from geometry.tray_utils import (footprint_polygon, convex_footprint_polygon,
-                                  build_tray_collision_frame)
+                                  build_tray_collision_frame, build_tray_conforming_hfield)
 from geometry.convex_decomp import vhacd_decompose
 
 try:                          # trimesh.mesh.projected() needs rtree; only used for the blue MESH line.
@@ -108,8 +112,11 @@ def _plot_poly(ax, poly, style, label):
 
 # ---------------------------------------------------------------------------- per-pose pipeline
 
-def compute_cell(R_aligned, part_mesh, convex, collision_part, clearance_mode, height_pct):
-    """Run the tray_utils pocket pipeline for one stable pose; return all stage geoms + diagnostics."""
+def compute_cell(R_aligned, part_mesh, convex, collision_part, clearance_mode, height_pct, conform=False):
+    """Run the tray_utils pocket pipeline for one stable pose; return all stage geoms + diagnostics.
+
+    conform=True builds a CONFORMING height-field pocket (cradles the part's bottom surface) instead of
+    the flat extruded VHACD frame."""
     sv = (R_aligned @ np.asarray(part_mesh.vertices).T).T
     fp_x, fp_y = float(np.ptp(sv[:, 0])), float(np.ptp(sv[:, 1]))
     part_h = float(np.ptp(sv[:, 2]))
@@ -121,28 +128,34 @@ def compute_cell(R_aligned, part_mesh, convex, collision_part, clearance_mode, h
     poly_mesh_raw = footprint_polygon(part_mesh, R_aligned, 0.0)        # mesh silhouette (may fracture)
     poly_col_raw = convex_footprint_polygon(convex, R_aligned, 0.0)     # robust collision silhouette
     poly_col = convex_footprint_polygon(convex, R_aligned, clearance)
+    out = dict(fp_x=fp_x, fp_y=fp_y, part_h=part_h, clearance=clearance, pitch=pitch, pocket_depth=pocket_depth,
+               poly_mesh_raw=poly_mesh_raw, poly_col_raw=poly_col_raw, poly_col=poly_col)
+
+    if conform:
+        hf = build_tray_conforming_hfield(convex, R_aligned, pitch, pocket_depth, TRAY_BASE, clearance)
+        cx, cy = hf["center_xy"]
+        T_seat = np.eye(4); T_seat[:3, :3] = R_aligned; T_seat[2, 3] = hf["seat_dz"] + TRAY_SEAT_GAP
+        out.update(hf=hf, seat_z=hf["seat_dz"] + TRAY_SEAT_GAP, hf_center=(cx, cy),
+                   seated_pieces=[p.copy().apply_transform(T_seat) for p in convex],
+                   visual=hf["visual"].copy().apply_translation([cx, cy, 0.0]),
+                   floor_pen=0.0, wall_overlap=0.0, floor_overlap=0.0, pieces=[])
+        return out
+
     frame, pieces = build_tray_collision_frame(poly_col, pitch, pocket_depth, TRAY_BASE,
                                                TRAY_VHACD_MAX_HULLS, TRAY_VHACD_RESOLUTION)
-
     min_z_mesh = float(sv[:, 2].min())
     min_z_col = float((R_aligned @ np.asarray(collision_part.vertices).T).T[:, 2].min())
     seat_z = TRAY_BASE - min_z_mesh + TRAY_SEAT_GAP
     T_seat = np.eye(4); T_seat[:3, :3] = R_aligned; T_seat[2, 3] = seat_z
     seated_pieces = [p.copy().apply_transform(T_seat) for p in convex]
-
     b = poly_col.bounds
     floor = trimesh.creation.box(extents=[b[2] - b[0] + 2 * TRAY_WALL, b[3] - b[1] + 2 * TRAY_WALL, TRAY_BASE])
     floor.apply_translation([(b[0] + b[2]) / 2, (b[1] + b[3]) / 2, TRAY_BASE / 2])
-
-    return dict(
-        fp_x=fp_x, fp_y=fp_y, part_h=part_h, clearance=clearance, pitch=pitch, pocket_depth=pocket_depth,
-        seat_z=seat_z,
-        poly_mesh_raw=poly_mesh_raw, poly_col_raw=poly_col_raw, poly_col=poly_col,
-        frame=frame, pieces=pieces, seated_pieces=seated_pieces, floor=floor,
-        floor_pen=TRAY_BASE - (seat_z + min_z_col),
-        wall_overlap=sum(_intersection_volume(sp, frame) for sp in seated_pieces),
-        floor_overlap=sum(_intersection_volume(sp, floor) for sp in seated_pieces),
-    )
+    out.update(seat_z=seat_z, frame=frame, pieces=pieces, seated_pieces=seated_pieces, floor=floor,
+               floor_pen=TRAY_BASE - (seat_z + min_z_col),
+               wall_overlap=sum(_intersection_volume(sp, frame) for sp in seated_pieces),
+               floor_overlap=sum(_intersection_volume(sp, floor) for sp in seated_pieces))
+    return out
 
 
 # ---------------------------------------------------------------------------- single-cell MuJoCo settle
@@ -171,17 +184,24 @@ def simulate_cell(cell, convex, R_aligned, settle_time=2.0, view=False):
     g0.conaffinity = 1
     world = spec.worldbody
 
-    # Static tray cell: VHACD wall pieces + one floor slab.
+    # Static tray cell: either a conforming height field, or the flat VHACD wall pieces + floor slab.
     tray = world.add_body(); tray.name = "tray"
-    for j, (v, f) in enumerate(cell["pieces"]):
-        mesh = spec.add_mesh(); mesh.name = f"tp_{j}"
-        mesh.uservert = np.asarray(v, dtype=float).flatten().tolist()
-        mesh.userface = np.asarray(f).flatten().tolist()
-        gm = tray.add_geom(); gm.type = mujoco.mjtGeom.mjGEOM_MESH; gm.meshname = f"tp_{j}"; gm.mass = 0.0
-    fb = cell["floor"].bounds
-    fg = tray.add_geom(); fg.type = mujoco.mjtGeom.mjGEOM_BOX
-    fg.size = [(fb[1][0] - fb[0][0]) / 2, (fb[1][1] - fb[0][1]) / 2, TRAY_BASE / 2]
-    fg.pos = [(fb[0][0] + fb[1][0]) / 2, (fb[0][1] + fb[1][1]) / 2, TRAY_BASE / 2]; fg.mass = 0.0
+    if "hf" in cell:
+        hf = cell["hf"]; el = hf["elevation"]; cx, cy = hf["center_xy"]
+        h = spec.add_hfield(); h.name = "pocket"; h.nrow = el.shape[0]; h.ncol = el.shape[1]
+        h.size = hf["size"]; h.userdata = el.flatten().astype(float).tolist()
+        gm = tray.add_geom(); gm.type = mujoco.mjtGeom.mjGEOM_HFIELD; gm.hfieldname = "pocket"
+        gm.pos = [cx, cy, 0.0]; gm.mass = 0.0
+    else:
+        for j, (v, f) in enumerate(cell["pieces"]):
+            mesh = spec.add_mesh(); mesh.name = f"tp_{j}"
+            mesh.uservert = np.asarray(v, dtype=float).flatten().tolist()
+            mesh.userface = np.asarray(f).flatten().tolist()
+            gm = tray.add_geom(); gm.type = mujoco.mjtGeom.mjGEOM_MESH; gm.meshname = f"tp_{j}"; gm.mass = 0.0
+        fb = cell["floor"].bounds
+        fg = tray.add_geom(); fg.type = mujoco.mjtGeom.mjGEOM_BOX
+        fg.size = [(fb[1][0] - fb[0][0]) / 2, (fb[1][1] - fb[0][1]) / 2, TRAY_BASE / 2]
+        fg.pos = [(fb[0][0] + fb[1][0]) / 2, (fb[0][1] + fb[1][1]) / 2, TRAY_BASE / 2]; fg.mass = 0.0
 
     # Free part seated at the pocket: convex pieces, body oriented R_aligned at the seat height.
     part = world.add_body(); part.name = "part"
@@ -217,9 +237,11 @@ def simulate_cell(cell, convex, R_aligned, settle_time=2.0, view=False):
                 if rem > 0:
                     time.sleep(rem)
             post = data.xpos[pid].copy(); pq = data.xquat[pid].copy()
-            print("   [viewer] settled — close the window to continue")
-            while viewer.is_running():
-                viewer.sync(); time.sleep(0.02)
+            # print("   [viewer] settled — close the window to continue")
+            # time.sleep(1)
+            viewer.close()
+            # while viewer.is_running():
+            #     viewer.sync(); time.sleep(0.02)
     else:
         for _ in range(nsteps):
             mujoco.mj_step(model, data)
@@ -241,6 +263,8 @@ def main():
     ap.add_argument("--pose", type=int, default=None, help="restrict to one pose index (default: sweep all)")
     ap.add_argument("--stage", default="all",
                     choices=["footprint", "negative", "vhacd", "overlay", "all"])
+    ap.add_argument("--conform", action="store_true",
+                    help="conforming height-field pocket (cradles the part bottom) instead of flat VHACD")
     ap.add_argument("--sim", action="store_true", help="drop the part into each cell and settle under MuJoCo")
     ap.add_argument("--settle", type=float, default=2.0, help="settle time in seconds for --sim")
     ap.add_argument("--view", action="store_true",
@@ -261,12 +285,16 @@ def main():
         print(" [note] rtree not installed -> the blue MESH silhouette falls back to its convex hull "
               "(cosmetic only).\n        The collision pocket (red) uses convex hulls directly and is "
               "unaffected. `pip install rtree` for the true mesh outline.")
+    if args.conform:
+        print(f" [mode] CONFORMING height-field pocket (cradles the part bottom)")
     sim_hdr = f" {'driftXY':>8} {'driftZ':>7} {'status':>7}" if args.sim else ""
-    print(f"{'pose':>4} {'prob':>5} {'footprint(mm)':>14} {'depth':>6} {'hulls':>5} "
+    geo_col = "grid" if args.conform else "hulls"
+    print(f"{'pose':>4} {'prob':>5} {'footprint(mm)':>14} {'depth':>6} {geo_col:>7} "
           f"{'floorPen':>8} {'wall(mm^3)':>11} {'floor(mm^3)':>11}{sim_hdr}  flags")
     cells = []
     for i in sel:
-        c = compute_cell(poses[i][0], part_mesh, convex, collision_part, args.clearance, args.height)
+        c = compute_cell(poses[i][0], part_mesh, convex, collision_part, args.clearance, args.height,
+                         conform=args.conform)
         cells.append((i, float(poses[i][1]), c))
         sim_cols = ""
         if args.sim:
@@ -277,8 +305,9 @@ def main():
         flags = ("  <-- WALL INTRUSION" if c["wall_overlap"] > 1e-10 else "") + \
                 ("  <-- FLOOR PEN" if c["floor_pen"] > 1e-4 else "") + \
                 ("  <-- POPPED OUT" if args.sim and c["sim"]["escaped"] else "")
+        geo = f"{c['hf']['elevation'].shape[0]}x{c['hf']['elevation'].shape[1]}" if args.conform else str(len(c["pieces"]))
         print(f"{i:>4} {poses[i][1]:>5.2f} {c['fp_x']*1e3:>6.1f}x{c['fp_y']*1e3:<7.1f} "
-              f"{c['pocket_depth']*1e3:>6.1f} {len(c['pieces']):>5} {c['floor_pen']*1e3:>8.2f} "
+              f"{c['pocket_depth']*1e3:>6.1f} {geo:>7} {c['floor_pen']*1e3:>8.2f} "
               f"{c['wall_overlap']*1e9:>11.1f} {c['floor_overlap']*1e9:>11.1f}{sim_cols}{flags}")
     bad = [i for i, _, c in cells
            if c["wall_overlap"] > 1e-10 or c["floor_pen"] > 1e-4 or (args.sim and c["sim"]["escaped"])]
@@ -315,25 +344,28 @@ def main():
 
     for i, prob, c in cells:
         tag = f"pose {i}/{len(poses)-1} (p={prob:.2f})"
-        if args.stage == "negative":
+        if args.stage == "negative" and not args.conform:
             prism = trimesh.creation.extrude_polygon(c["poly_col"], height=c["pocket_depth"])
             prism.apply_translation([0, 0, TRAY_BASE])
             show_3d([_o3d(prism, [0.9, 0.5, 0.2]), _o3d(c["floor"], [0.6, 0.6, 0.6])], f"{tag} — 3D negative")
-        if args.stage == "vhacd":
+        if args.stage == "vhacd" and not args.conform:
             geoms = [_o3d(trimesh.Trimesh(np.asarray(v), np.asarray(f), process=False),
                           list(colorsys.hsv_to_rgb(j / max(len(c["pieces"]), 1), 0.6, 0.9)))
                      for j, (v, f) in enumerate(c["pieces"])]
             show_3d(geoms + [_o3d(c["floor"], [0.55, 0.55, 0.55])], f"{tag} — VHACD pieces ({len(c['pieces'])})")
         if args.stage in ("overlay", "all"):
-            tray = [_o3d(trimesh.Trimesh(np.asarray(v), np.asarray(f), process=False), [0.3, 0.5, 0.9])
-                    for v, f in c["pieces"]] + [_o3d(c["floor"], [0.55, 0.55, 0.55])]
+            if args.conform:   # conforming hfield surface (cradle) instead of VHACD walls + floor
+                tray = [_o3d(c["visual"], [0.3, 0.5, 0.9])]
+            else:
+                tray = [_o3d(trimesh.Trimesh(np.asarray(v), np.asarray(f), process=False), [0.3, 0.5, 0.9])
+                        for v, f in c["pieces"]] + [_o3d(c["floor"], [0.55, 0.55, 0.55])]
             if args.sim:   # show where the part actually SETTLED
                 Tf = c["sim"]["T_settled"]
                 part = [_o3d(pc.copy().apply_transform(Tf), [0.9, 0.2, 0.2]) for pc in convex]
                 extra = f"settled drift={c['sim']['drift_xy']*1e3:.1f}mm  {'POPPED' if c['sim']['escaped'] else 'seated'}"
             else:
                 part = [_o3d(sp, [0.9, 0.2, 0.2]) for sp in c["seated_pieces"]]
-                extra = f"overlap={c['wall_overlap']*1e9:.0f}mm³"
+                extra = "conforming pocket" if args.conform else f"overlap={c['wall_overlap']*1e9:.0f}mm³"
             show_3d(tray + part, f"{tag} — OVERLAY (red part in blue tray)  {extra}")
 
 
