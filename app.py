@@ -121,28 +121,30 @@ class MeshSamplingApp:
 
     def _restart(self):
         self.target_mesh = None
+        self.mesh_basename = None
         self.raw_pcd = None
+        self.cropped_pcd = None
+        self.point_count_mean = None
+        self.point_count_range = None
         self.down_pcd = None
         self.down_pcd_surface = None
         self.down_pcd_edge = None
         self.visible_target_pcd = None
         self.occluders_pcd = None
-        self.mesh_basename = None
+        self.feature_pcd = None
+        self.pcd_flat = None
+        self.geocenter = np.eye(4)
+        self.output_pcd_path = None
         self.convex_meshes = []
-        self.synthetic_targets = {}
-        self.synthetic_scenes = {}
         self.o3d_scene = {}          # SceneStage -> RenderStage handoff: physical scene meshes + GT poses
         self.mj_scene = None         # SceneStage -> RenderStage handoff: MujocoBinScene (GT/bin export, camera)
         self.scene_mesh = None       # SceneStage physical-scene preview mesh
-        self.feature_pcd = None
-        self.pcd_flat = None
-        self.output_pcd_path = None
-        self.geocenter = np.eye(4)
-        self.point_count_mean = None
-        self.point_count_range = None
+        self.synthetic_targets = {}
+        self.synthetic_scenes = {}
         self.stage = Stage.IMPORT_MESH
         if not self.headless and Stage.RENDER in self.stages:
             self.stages[Stage.RENDER].combobox_targets.clear_items()
+            self.stages[Stage.RENDER].combobox_scenes.clear_items()
         self.set_stage(Stage.IMPORT_MESH)
 
     def set_stage(self, stage: Stage):

@@ -30,6 +30,10 @@ class DecomposeStage(BaseStage):
                                                   enabled_if=lambda: self.app.target_mesh is not None)
         self.btn_decompose.set_on_clicked(self.start)
 
+        self.btn_reset = self.register_widget(gui.Button("Clear Decomposition"),
+                                              enabled_if=lambda: len(self.app.convex_meshes) > 0)
+        self.btn_reset.set_on_clicked(self.reset)
+
         self.btn_back = self.register_widget(gui.Button("Back: Save"))
         self.btn_back.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value - 1)))
         # Only advance once decomposition has produced convex hulls.
@@ -43,7 +47,7 @@ class DecomposeStage(BaseStage):
         v.add_child(gui.Label("Convex Decomposition"))
         v.add_child(gui.Label(""))
         v.add_child(self.btn_decompose)
-        v.add_child(gui.Label(""))
+        v.add_child(self.btn_reset)
         v.add_child(gui.Label(""))
         v.add_child(gui.Label(""))
         v.add_child(gui.Label(""))
@@ -86,8 +90,8 @@ class DecomposeStage(BaseStage):
         if self.app.target_mesh is None:
             print("[WARN] No mesh to decompose")
             return
+        self._clear_data()
         self.app.update_progress(0.1, "Preparing mesh for decomposition...")
-        self.app.convex_meshes = []
         part_mesh = o3d_to_trimesh(self.app.target_mesh)
         verts = np.asarray(part_mesh.vertices)
         faces = np.asarray(part_mesh.faces)
@@ -109,6 +113,17 @@ class DecomposeStage(BaseStage):
                                      f"Building convex hulls ({i + 1}/{n})...")
         print(f"[DECOMPOSE] decomposed mesh into {len(self.app.convex_meshes)} convex hulls")
 
-    def reset(self):
+    def _clear_data(self):
         self.app.convex_meshes = []
+        self.app.o3d_scene = {}
+        self.app.mj_scene = None
+        self.app.scene_mesh = None
+        self.app.synthetic_targets = {}
+        self.app.synthetic_scenes = {}
+        if not self.app.headless:
+            self.app.stages[Stage.RENDER].combobox_targets.clear_items()
+            self.app.stages[Stage.RENDER].combobox_scenes.clear_items()
+
+    def reset(self):
+        self._clear_data()
         self._refresh_ui()

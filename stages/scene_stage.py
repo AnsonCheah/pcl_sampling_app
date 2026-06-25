@@ -242,24 +242,26 @@ class SceneStage(BaseStage):
                     "mesh", self.app.target_mesh, self.app.default_material))
         self.enable_widgets()
 
-    def reset(self):
+    def _clear_data(self):
         self.app.o3d_scene = {}
         self.app.mj_scene = None
         self.app.scene_mesh = None
+        self.app.synthetic_targets = {}
+        self.app.synthetic_scenes = {}
         self.o3d_scene = {}
         self.mj_scene = None
         self.worker_step = 0
+        if not self.app.headless:
+            self.app.stages[Stage.RENDER].combobox_targets.clear_items()
+            self.app.stages[Stage.RENDER].combobox_scenes.clear_items()
+
+    def reset(self):
+        self._clear_data()
         self._refresh_ui()
 
     def worker(self):
         TOTAL_STEPS = 4
-        # Reset state without calling _refresh_ui, which would re-enable widgets mid-run
-        self.app.o3d_scene = {}
-        self.app.mj_scene = None
-        self.app.scene_mesh = None
-        self.o3d_scene = {}
-        self.mj_scene = None
-        self.worker_step = 0
+        self._clear_data()
 
         # The MuJoCo passive viewer is blocking and must never run headless/batch.
         if self.app.headless:

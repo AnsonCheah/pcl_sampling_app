@@ -94,7 +94,7 @@ class RenderStage(BaseStage):
             self.app.main_thread(lambda: self.app._clear_scene())
         self.enable_widgets()
 
-    def reset(self):
+    def _clear_data(self):
         if not self.app.headless:
             self.combobox_targets.clear_items()
             self.combobox_scenes.clear_items()
@@ -102,9 +102,13 @@ class RenderStage(BaseStage):
         self.app.synthetic_scenes = {}
         self.worker_step = 0
 
+    def reset(self):
+        self._clear_data()
+        self._refresh_ui()
+
     def worker(self):
         TOTAL_STEPS = 9
-        self.reset()
+        self._clear_data()
 
         if not self.app.o3d_scene or self.app.mj_scene is None:
             print("[WARN] No scene available — run SCENE before RENDER.")

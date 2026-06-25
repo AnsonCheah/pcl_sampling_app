@@ -70,15 +70,32 @@ class CropStage(BaseStage):
         self.app.scene.force_redraw()
         self.enable_widgets()
 
-    def reset(self):
+    def _clear_downstream(self):
+        """Clear everything downstream of cropped_pcd without touching cropped_pcd itself."""
         self.app.down_pcd = None
-        self.app.cropped_pcd = copy.deepcopy(self.app.raw_pcd)
+        self.app.down_pcd_surface = None
+        self.app.down_pcd_edge = None
+        self.app.feature_pcd = None
+        self.app.pcd_flat = None
+        self.app.geocenter = np.eye(4)
         self.app.output_pcd_path = None
+        self.app.o3d_scene = {}
+        self.app.mj_scene = None
+        self.app.scene_mesh = None
+        self.app.synthetic_targets = {}
+        self.app.synthetic_scenes = {}
+        if not self.app.headless:
+            self.app.stages[Stage.RENDER].combobox_targets.clear_items()
+            self.app.stages[Stage.RENDER].combobox_scenes.clear_items()
 
+    def reset(self):
+        self.app.cropped_pcd = copy.deepcopy(self.app.raw_pcd)
+        self._clear_downstream()
         self._refresh_ui()
 
     def worker(self):
         """Deletes selected points from pointcloud"""
+        self._clear_downstream()
         mask = np.ones(len(self.app.cropped_pcd.points), dtype=bool)
         mask[self.selected_indices] = False
         self.app.cropped_pcd = mask_point_cloud(self.app.cropped_pcd, mask)
