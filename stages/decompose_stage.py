@@ -17,6 +17,10 @@ class DecomposeStage(BaseStage):
     ``app.convex_meshes`` is guaranteed populated before SYNTHETIC consumes it.
     """
 
+    downstream = {
+        "convex_meshes": lambda: [],
+    }
+
     def __init__(self, app):
         self.name = Stage.DECOMPOSE.name
         super().__init__(app)
@@ -90,7 +94,7 @@ class DecomposeStage(BaseStage):
         if self.app.target_mesh is None:
             print("[WARN] No mesh to decompose")
             return
-        self._clear_data()
+        self.app.clear_state_from(self.stage_key)
         self.app.update_progress(0.1, "Preparing mesh for decomposition...")
         part_mesh = o3d_to_trimesh(self.app.target_mesh)
         verts = np.asarray(part_mesh.vertices)
@@ -113,17 +117,3 @@ class DecomposeStage(BaseStage):
                                      f"Building convex hulls ({i + 1}/{n})...")
         print(f"[DECOMPOSE] decomposed mesh into {len(self.app.convex_meshes)} convex hulls")
 
-    def _clear_data(self):
-        self.app.convex_meshes = []
-        self.app.o3d_scene = {}
-        self.app.mj_scene = None
-        self.app.scene_mesh = None
-        self.app.synthetic_targets = {}
-        self.app.synthetic_scenes = {}
-        if not self.app.headless:
-            self.app.stages[Stage.RENDER].combobox_targets.clear_items()
-            self.app.stages[Stage.RENDER].combobox_scenes.clear_items()
-
-    def reset(self):
-        self._clear_data()
-        self._refresh_ui()

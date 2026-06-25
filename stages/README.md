@@ -29,17 +29,30 @@ class BaseStage(ABC):
         self.panel = ...          # built by build_panel()
         self.worker_thread = None
 
+    downstream = {...}            # app.* attrs this stage owns -> default factory
     @abstractmethod
     def build_panel(self): ...    # return None in headless mode
     @abstractmethod
     def _refresh_ui(self): ...    # called on scene change
     @abstractmethod
     def worker(self): ...         # heavy computation (runs in background thread)
-    @abstractmethod
-    def reset(self): ...          # clear state, revert to prior stage
+    def reset(self): ...          # default: clear this stage + downstream, then refresh
+    def on_clear(self): ...       # hook: GUI/scratch cleanup when this stage's data is cleared
 ```
 
 Running a worker: `stage._run_worker()` spawns `worker()` in a background thread.
+
+## Automatic downstream clearing
+
+Each stage declares the `app.*` attributes it owns in a `downstream` class dict mapping
+attr name → a zero-arg default factory. `BaseStage.clear_produced()` resets them (and runs
+`on_clear()`); `app.clear_state_from(stage, inclusive=True)` resets a stage's own state plus
+every later stage's, by strict `Stage` enum order. This is the single source of truth:
+`app._restart()` and each worker's start-of-run wipe both go through it, so adding a stage or
+an attribute means editing one `downstream` dict and nothing else. `reset()` is the generic
+default in `BaseStage`; only `CropStage` overrides it (it restores `cropped_pcd` from
+`raw_pcd` instead of nulling it). GUI-only cleanup (e.g. RenderStage's comboboxes) lives in
+each stage's `on_clear()`.
 
 ## `app` state attributes
 

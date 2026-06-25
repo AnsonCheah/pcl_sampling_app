@@ -8,6 +8,15 @@ from geometry.math_utils import find_cdf_knee
 import copy
 
 class DownsampleStage(BaseStage):
+    downstream = {
+        "down_pcd": lambda: None,
+        "down_pcd_surface": lambda: None,
+        "down_pcd_edge": lambda: None,
+        "feature_pcd": lambda: None,
+        "pcd_flat": lambda: None,
+        "geocenter": lambda: np.eye(4),
+    }
+
     def __init__(self, app):
         self.name = Stage.DOWNSAMPLE.name
         self.use_adaptive = False
@@ -85,26 +94,6 @@ class DownsampleStage(BaseStage):
         self.app.main_thread(lambda: self.app.scene.force_redraw())
         self.app.main_thread(self.enable_widgets)
 
-    def _clear_data(self):
-        self.app.down_pcd = None
-        self.app.down_pcd_surface = None
-        self.app.down_pcd_edge = None
-        self.app.feature_pcd = None
-        self.app.pcd_flat = None
-        self.app.geocenter = np.eye(4)
-        self.app.output_pcd_path = None
-        self.app.o3d_scene = {}
-        self.app.mj_scene = None
-        self.app.scene_mesh = None
-        self.app.synthetic_targets = {}
-        self.app.synthetic_scenes = {}
-        if not self.app.headless:
-            self.app.stages[Stage.RENDER].combobox_targets.clear_items()
-            self.app.stages[Stage.RENDER].combobox_scenes.clear_items()
-
-    def reset(self):
-        self._clear_data()
-        self._refresh_ui()
 
     def worker(self):
         if not self.app.headless:
@@ -113,7 +102,7 @@ class DownsampleStage(BaseStage):
         if self.app.cropped_pcd is None:
             print("cropped pcd is none")
             return
-        self._clear_data()
+        self.app.clear_state_from(self.stage_key)
 
         bbox = self.app.cropped_pcd.get_minimal_oriented_bounding_box()
         self.voxel_size = np.round(np.clip((np.asarray(bbox.volume()) / 3), 0.001, 0.005), 4)

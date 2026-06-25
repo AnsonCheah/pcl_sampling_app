@@ -10,6 +10,10 @@ from scipy.spatial.transform import Rotation as R
 _IDENTITY_POSE = [0, 0, 0, 1, 0, 0, 0]
 
 class SaveStage(BaseStage):
+    downstream = {
+        "output_pcd_path": lambda: None,
+    }
+
     def __init__(self, app):
         self.name = Stage.SAVE.name
         super().__init__(app)
@@ -142,6 +146,3 @@ class SaveStage(BaseStage):
         except Exception as e:
             print(f"[ERROR] Failed to save PLY: {e}")
             return
-
-    def reset(self):
-        pass

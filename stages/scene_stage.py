@@ -34,6 +34,12 @@ class SceneStage(BaseStage):
     partitions/tray), settle under MuJoCo, and hand the resulting meshes + GT poses to RenderStage via
     app attributes (app.o3d_scene, app.mj_scene, app.scene_mesh)."""
 
+    downstream = {
+        "o3d_scene": lambda: {},    # SceneStage -> RenderStage handoff: physical scene meshes + GT poses
+        "mj_scene": lambda: None,   # SceneStage -> RenderStage handoff: MujocoBinScene (GT/bin export, camera)
+        "scene_mesh": lambda: None,  # SceneStage physical-scene preview mesh
+    }
+
     def __init__(self, app):
         self.name = Stage.SCENE.name
         # Set before super().__init__(): it calls build_panel(), which reads these.
@@ -242,26 +248,15 @@ class SceneStage(BaseStage):
                     "mesh", self.app.target_mesh, self.app.default_material))
         self.enable_widgets()
 
-    def _clear_data(self):
-        self.app.o3d_scene = {}
-        self.app.mj_scene = None
-        self.app.scene_mesh = None
-        self.app.synthetic_targets = {}
-        self.app.synthetic_scenes = {}
+    def on_clear(self):
+        # Reset stage-local scratch alongside the app-level scene state.
         self.o3d_scene = {}
         self.mj_scene = None
         self.worker_step = 0
-        if not self.app.headless:
-            self.app.stages[Stage.RENDER].combobox_targets.clear_items()
-            self.app.stages[Stage.RENDER].combobox_scenes.clear_items()
-
-    def reset(self):
-        self._clear_data()
-        self._refresh_ui()
 
     def worker(self):
         TOTAL_STEPS = 4
-        self._clear_data()
+        self.app.clear_state_from(self.stage_key)
 
         # The MuJoCo passive viewer is blocking and must never run headless/batch.
         if self.app.headless:

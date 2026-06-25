@@ -64,6 +64,10 @@ class MeshSamplingApp:
             Stage.SCENE: SceneStage(self),
             Stage.RENDER: RenderStage(self),
         }
+        # Give each stage a back-reference to its own enum key so reset()/clear_state_from
+        # can locate it without a reverse lookup.
+        for st, inst in self.stages.items():
+            inst.stage_key = st
         if not self.headless:
             # === Scene widget ===
             self.window_width = 1440
@@ -120,32 +124,28 @@ class MeshSamplingApp:
         self._restart()
 
     def _restart(self):
-        self.target_mesh = None
-        self.mesh_basename = None
-        self.raw_pcd = None
-        self.cropped_pcd = None
-        self.point_count_mean = None
-        self.point_count_range = None
-        self.down_pcd = None
-        self.down_pcd_surface = None
-        self.down_pcd_edge = None
-        self.visible_target_pcd = None
-        self.occluders_pcd = None
-        self.feature_pcd = None
-        self.pcd_flat = None
-        self.geocenter = np.eye(4)
-        self.output_pcd_path = None
-        self.convex_meshes = []
-        self.o3d_scene = {}          # SceneStage -> RenderStage handoff: physical scene meshes + GT poses
-        self.mj_scene = None         # SceneStage -> RenderStage handoff: MujocoBinScene (GT/bin export, camera)
-        self.scene_mesh = None       # SceneStage physical-scene preview mesh
-        self.synthetic_targets = {}
-        self.synthetic_scenes = {}
+        # Single source of truth: every app.* pipeline attribute is declared in some
+        # stage's `downstream` map (see stages/*.py). reset_all_state() applies them all,
+        # so adding/removing state means editing one stage, never this method.
+        self.reset_all_state()
         self.stage = Stage.IMPORT_MESH
-        if not self.headless and Stage.RENDER in self.stages:
-            self.stages[Stage.RENDER].combobox_targets.clear_items()
-            self.stages[Stage.RENDER].combobox_scenes.clear_items()
         self.set_stage(Stage.IMPORT_MESH)
+
+    # ===============================
+    # State clearing (driven by per-stage `downstream` declarations)
+    # ===============================
+    def clear_state_from(self, stage: Stage, inclusive: bool = True):
+        """Reset the owned state of `stage` (when inclusive) and every later stage to
+        defaults, by strict pipeline order (Stage enum value)."""
+        start = stage.value if inclusive else stage.value + 1
+        for st, inst in self.stages.items():
+            if st.value >= start:
+                inst.clear_produced()
+
+    def reset_all_state(self):
+        """Reset every stage's owned state to defaults."""
+        for inst in self.stages.values():
+            inst.clear_produced()
 
     def set_stage(self, stage: Stage):
         self.stage = stage

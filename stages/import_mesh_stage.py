@@ -8,6 +8,11 @@ from stages.stage_base import BaseStage
 from enums import Stage
 
 class ImportMeshStage(BaseStage):
+    downstream = {
+        "target_mesh": lambda: None,
+        "mesh_basename": lambda: None,
+    }
+
     def __init__(self, app):
         self.name = Stage.IMPORT_MESH.name
         self.file_path = None  # may be pre-set by caller to skip the dialog
@@ -70,35 +75,6 @@ class ImportMeshStage(BaseStage):
         self.app.scene.force_redraw()
         self.enable_widgets()
 
-    def _clear_data(self):
-        self.app.target_mesh = None
-        self.app.mesh_basename = None
-        self.app.raw_pcd = None
-        self.app.cropped_pcd = None
-        self.app.point_count_mean = None
-        self.app.point_count_range = None
-        self.app.down_pcd = None
-        self.app.down_pcd_surface = None
-        self.app.down_pcd_edge = None
-        self.app.feature_pcd = None
-        self.app.pcd_flat = None
-        self.app.geocenter = np.eye(4)
-        self.app.output_pcd_path = None
-        self.app.convex_meshes = []
-        self.app.o3d_scene = {}
-        self.app.mj_scene = None
-        self.app.scene_mesh = None
-        self.app.synthetic_targets = {}
-        self.app.synthetic_scenes = {}
-        if not self.app.headless:
-            self.app.stages[Stage.RENDER].combobox_targets.clear_items()
-            self.app.stages[Stage.RENDER].combobox_scenes.clear_items()
-
-    def reset(self):
-        """Clear mesh-related data"""
-        self._clear_data()
-        self._refresh_ui()
-
     # ===============================
     # Worker
     # ===============================
@@ -127,7 +103,7 @@ class ImportMeshStage(BaseStage):
             print("[WARN] Empty mesh")
             return
 
-        self._clear_data()  # new mesh is valid; wipe all stale downstream state
+        self.app.clear_state_from(self.stage_key)  # new mesh is valid; wipe all stale downstream state
 
         bbox = mesh.get_axis_aligned_bounding_box()
         extent_max = bbox.get_extent().max()

@@ -7,11 +7,17 @@ class BaseStage(ABC):
     Base class for all stages.
     """
 
+    # Maps each app.* attribute this stage owns -> a zero-arg factory returning its
+    # reset default. Factories (not literals) so every clear gets a fresh mutable
+    # default. Stages that own nothing (e.g. CROP) inherit the empty dict.
+    downstream = {}
+
     def __init__(self, app):
         self.app = app
         self.widgets = []
         self.panel = self.build_panel()
         self.worker_thread = None
+        self.stage_key = None   # set by MeshSamplingApp.__init__ after the stages dict is built
 
     # -------------------------
     # Required interface
@@ -32,10 +38,26 @@ class BaseStage(ABC):
         """Heavy processing logic"""
         pass
 
-    @abstractmethod
-    def reset(self):
-        """Clear stage data and restore previous stage"""
+    # -------------------------
+    # State clearing
+    # -------------------------
+
+    def clear_produced(self):
+        """Reset every app.* attribute this stage owns to its declared default,
+        then run any GUI-side cleanup tied to this stage's data."""
+        for attr, factory in self.downstream.items():
+            setattr(self.app, attr, factory())
+        self.on_clear()
+
+    def on_clear(self):
+        """Hook: GUI cleanup when this stage's products are cleared. Default no-op."""
         pass
+
+    def reset(self):
+        """Clear this stage's data plus every later stage's data, then refresh UI.
+        Stages with special restore semantics (e.g. CROP) override this."""
+        self.app.clear_state_from(self.stage_key)
+        self._refresh_ui()
 
     # -------------------------
     # Thread handling

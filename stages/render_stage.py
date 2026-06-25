@@ -32,6 +32,11 @@ class RenderStage(BaseStage):
     pipeline → instance segmentation → per-target export. Reads app.o3d_scene + app.mj_scene; writes
     app.synthetic_targets + app.synthetic_scenes."""
 
+    downstream = {
+        "synthetic_targets": lambda: {},
+        "synthetic_scenes": lambda: {},
+    }
+
     def __init__(self, app):
         self.name = Stage.RENDER.name
         super().__init__(app)
@@ -94,21 +99,16 @@ class RenderStage(BaseStage):
             self.app.main_thread(lambda: self.app._clear_scene())
         self.enable_widgets()
 
-    def _clear_data(self):
+    def on_clear(self):
+        # GUI + stage-local scratch tied to the synthetic outputs.
         if not self.app.headless:
             self.combobox_targets.clear_items()
             self.combobox_scenes.clear_items()
-        self.app.synthetic_targets = {}
-        self.app.synthetic_scenes = {}
         self.worker_step = 0
-
-    def reset(self):
-        self._clear_data()
-        self._refresh_ui()
 
     def worker(self):
         TOTAL_STEPS = 9
-        self._clear_data()
+        self.app.clear_state_from(self.stage_key)
 
         if not self.app.o3d_scene or self.app.mj_scene is None:
             print("[WARN] No scene available — run SCENE before RENDER.")
