@@ -82,8 +82,8 @@ class DownsampleStage(BaseStage):
         elif self.app.cropped_pcd is not None:
             self.app.main_thread(lambda: self.app._clear_scene())
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry("cropped_pcd", self.app.cropped_pcd, self.app.default_point_material))
-        self.app.scene.force_redraw()
-        self.enable_widgets()
+        self.app.main_thread(lambda: self.app.scene.force_redraw())
+        self.app.main_thread(self.enable_widgets)
 
     def reset(self):
         self.app.down_pcd = None
@@ -180,4 +180,5 @@ class DownsampleStage(BaseStage):
             mesh.transform(T)
         self.app.geocenter = np.round(pcd_geocenter(self.app.down_pcd_surface), decimals=5)
         print("recentered mesh and pointcloud")
+        self.app.main_thread(self.app._reframe)
         self._refresh_ui()

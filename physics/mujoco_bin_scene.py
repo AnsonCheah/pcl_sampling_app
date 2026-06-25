@@ -957,9 +957,9 @@ class MujocoBinScene:
             sim. Structured arrangement is handled by _settle_structured() and returns early here.
         """
         if self.arrangement == "structured":
-            # if self.structure_type == "none":
-            #     print("[INFO] Structured/none arrangement: skipping simulation and settling")
-            #     return  # poses are final; mj_forward already called in generate_scene
+            if self.structure_type == "none":
+                print("[INFO] Structured/none arrangement: skipping simulation and settling")
+                return  # poses are final; mj_forward already called in generate_scene
             # # Partition/tray: parts are pre-seated in their cells/pockets, so run a dedicated CLEAN
             # # settle (no hopper, no batched release) — mirrors the verified tray_cell_debug.simulate_cell.
             # self._settle_structured(on_step, preview_interval_s)

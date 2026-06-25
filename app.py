@@ -305,6 +305,7 @@ class MeshSamplingApp:
         # Block the button immediately; cleared in the worker's finally (done or failed).
         self.express_sampling_busy = True
         self.stages[Stage.IMPORT_MESH].enable_widgets()
+        self.stages[Stage.IMPORT_MESH].center_mesh()
         self._express_sampling_thread = threading.Thread(target=self._express_sampling_worker)
         self._express_sampling_thread.start()
 
@@ -314,7 +315,7 @@ class MeshSamplingApp:
             self.down_pcd=self.raw_pcd
             self.stages[Stage.DOWNSAMPLE].worker()
             self.stages[Stage.DOWNSAMPLE].recenter_mesh_pcd()
-            self.set_stage(Stage.SAVE)
+            self.main_thread(lambda: self.set_stage(Stage.SAVE))
             self.hide_progress()
         finally:
             self.express_sampling_busy = False
@@ -343,6 +344,7 @@ class MeshSamplingApp:
                 print(f"[INFO] Processing {stl_path.name}")
                 self.stages[Stage.IMPORT_MESH].file_path = stl_path
                 self.stages[Stage.IMPORT_MESH].worker()
+                self.stages[Stage.IMPORT_MESH].center_mesh()
                 self._express_sampling_worker()
                 pointcloud_to_ply(self.down_pcd, str(dst_dir / (stl_path.stem + ".ply")))
 
@@ -577,6 +579,12 @@ def run_headless(mesh_arg=None):
         rp("[red]Failed to import mesh. Aborting.[/red]")
         return
     rp(f"[green]Imported {app.mesh_basename}[/green]")
+
+    # 1b. Centering
+    if ask_yes_no("Center mesh at origin before raycasting?", default=True,
+                  hint="Translates the mesh centroid to the world origin. "
+                       "Recommended for consistent view-sphere coverage."):
+        app.stages[Stage.IMPORT_MESH].center_mesh()
 
     # 2. Top-level mode
     mode = ask_choice(

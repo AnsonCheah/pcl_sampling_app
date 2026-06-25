@@ -204,6 +204,7 @@ class SceneStage(BaseStage):
             geom = o3d.geometry.TriangleMesh(mesh)
             geom.compute_vertex_normals()
             self.app.scene.scene.add_geometry(f"convex_{i}", geom, material)
+        self.app.main_thread(self.app._reframe)
 
     def _show_scene_mesh(self):
         """GUI helper: show the settled physical scene, framed on the bin. Everything runs on the main
@@ -252,7 +253,13 @@ class SceneStage(BaseStage):
 
     def worker(self):
         TOTAL_STEPS = 4
-        self.reset()
+        # Reset state without calling _refresh_ui, which would re-enable widgets mid-run
+        self.app.o3d_scene = {}
+        self.app.mj_scene = None
+        self.app.scene_mesh = None
+        self.o3d_scene = {}
+        self.mj_scene = None
+        self.worker_step = 0
 
         # The MuJoCo passive viewer is blocking and must never run headless/batch.
         if self.app.headless:
@@ -280,14 +287,29 @@ class SceneStage(BaseStage):
             self.worker_step += 1
             self.app.update_progress(self.worker_step / TOTAL_STEPS, message)
 
+        # MujocoBinScene requires mesh centered at its own origin: every rotation, spawn-height,
+        # stable-pose, and tray-pocket calculation rotates vertices around (0,0,0). Center a
+        # local copy without modifying app.target_mesh so the user's centering choice is preserved.
+        mesh_center = np.asarray(self.app.target_mesh.get_center())
+        needs_centering = np.linalg.norm(mesh_center) > 1e-9
         part_mesh = o3d_to_trimesh(self.app.target_mesh)
+        if needs_centering:
+            part_mesh.apply_translation(-mesh_center)
+        if needs_centering and self.app.convex_meshes:
+            physics_convex = []
+            for cm in self.app.convex_meshes:
+                c = copy.deepcopy(cm)
+                c.translate(-mesh_center)
+                physics_convex.append(c)
+        else:
+            physics_convex = self.app.convex_meshes
         # Fill-rate mode auto-sizes count to the part; structured ignores n_parts (grid sets it).
         if self.generate_mode == "fill_rate" and self.arrangement == "random":
             self.num_targets = self._auto_part_count(part_mesh)
             rp(f"[AUTO-COUNT] fill={self.fill_rate:.0%} "
                f"part OBB vol={part_mesh.bounding_box_oriented.volume:.2e} m³ "
                f"-> n_parts={self.num_targets}")
-        self.mj_scene = MujocoBinScene(part_mesh, self.app.convex_meshes, n_parts=self.num_targets,
+        self.mj_scene = MujocoBinScene(part_mesh, physics_convex, n_parts=self.num_targets,
                                        render=self.rendering_flag, arrangement=self.arrangement,
                                        stable_pose_R=self.stable_pose_R,
                                        structure_type=self.structure_type,
@@ -308,6 +330,19 @@ class SceneStage(BaseStage):
         self.mj_scene.verify_parts_in_bin()
         scene_state = self.mj_scene.extract_scene_state()
         self.o3d_scene = self.mj_scene.mujoco_scene_to_o3d(scene_state)
+        # T_gt from MuJoCo is in the centered body frame. Remap it and the mesh geom back to
+        # the original mesh frame so RenderStage and GT export stay consistent with down_pcd.
+        # Math: T_gt_adj = T_gt_phys @ [[I, -mesh_center]; [0,1]]
+        #   because p_world = T_gt_phys @ p_centered = T_gt_phys @ (p_orig - mesh_center) = T_gt_adj @ p_orig
+        if needs_centering:
+            T_shift = np.eye(4)
+            T_shift[:3, 3] = -mesh_center
+            original_mesh_o3d = o3d.geometry.TriangleMesh(self.app.target_mesh)
+            original_mesh_o3d.compute_vertex_normals()
+            for key, obj in self.o3d_scene.items():
+                if key != "bin":
+                    obj.T_gt = obj.T_gt @ T_shift
+                    obj.geom = copy.deepcopy(original_mesh_o3d)
         self.app.o3d_scene = self.o3d_scene   # handoff to RenderStage
         _update_pb("Compiling physical scene mesh...")
 

@@ -40,7 +40,7 @@ class RaycastStage(BaseStage):
         self.num_views_slider.int_value = 20
 
         self.btn_raycast = self.register_widget(gui.Button("Raycast"))
-        self.btn_raycast.set_on_clicked(self.start)
+        self.btn_raycast.set_on_clicked(self._start_with_current_settings)
 
         self.btn_reset = self.register_widget(gui.Button("Clear Raycast"), lambda: self.app.raw_pcd is not None)
         self.btn_reset.set_on_clicked(self.reset)
@@ -73,8 +73,8 @@ class RaycastStage(BaseStage):
         elif self.app.target_mesh is not None:
             print(f"[Raycast] adding mesh")
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry("mesh", self.app.target_mesh, self.app.default_material))
-        self.app.scene.force_redraw()
-        self.enable_widgets()
+        self.app.main_thread(lambda: self.app.scene.force_redraw())
+        self.app.main_thread(self.enable_widgets)
 
     def reset(self):
         self.app.raw_pcd = None
@@ -84,23 +84,27 @@ class RaycastStage(BaseStage):
         self._refresh_ui()
 
     # ---------- Worker ----------
+    def _start_with_current_settings(self):
+        self.camera_distance = self.camera_distance_slider.double_value
+        self.num_views = self.num_views_slider.int_value
+        self.start()
+
     def worker(self):
         if self.app.target_mesh is None:
             print("[WARN] No mesh loaded")
             return
         if not self.app.headless:
             self.app.main_thread(lambda: self.disable_widgets())
-            self.camera_distance = self.camera_distance_slider.double_value
-            self.num_views = self.num_views_slider.int_value
             self.app.show_progress("Raycasting mesh...")
         print(f"[RAYCAST] Worker started")
         all_points = []
         all_cam_pos = []
         self.point_counts = np.zeros((self.num_views))
         raycast_dict = {"ref_mesh": O3DSceneObject(geom=self.app.target_mesh, T_gt=np.eye(4))}
+        mesh_center = np.asarray(self.app.target_mesh.get_center())
         for view_index, view_dir in enumerate(self.view_sphere):
-            cam_pos = view_dir * self.camera_distance
-            look_at = np.zeros(3)
+            cam_pos = mesh_center + view_dir * self.camera_distance
+            look_at = mesh_center
             T_cam = camera_view_matrix(cam_pos, look_at)
             initial_render = scene_render(raycast_dict, T_cam, look_at, self.fov_deg, self.res_width, self.res_height)
             hit_points = initial_render["points"]
