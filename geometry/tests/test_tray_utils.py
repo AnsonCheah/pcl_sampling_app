@@ -100,6 +100,15 @@ def test_conforming_hfield_cradles_a_tilted_bottom():
     assert el.ndim == 2 and el.min() >= 0.0 and el.max() <= 1.0
     assert len(hf["size"]) == 4 and hf["seat_dz"] > 0
     assert len(hf["visual"].vertices) > 0
+    assert hf["z_offset"] >= 0.0 and hf["size"][2] > 0.0
+    mujoco_z = hf["z_offset"] + el.astype(float) * hf["size"][2]
+    assert np.allclose(hf["collision_surface"], mujoco_z, atol=1e-7)
+    vz = np.asarray(hf["visual"].vertices)[:, 2].reshape(hf["visual_shape"])
+    contact = hf["visual_contact_mask"]
+    top_z = hf["z_offset"] + hf["size"][2]
+    assert np.allclose(vz[contact], hf["visual_floor"][contact], atol=1e-7)
+    rim = (~contact) & (vz > hf["visual_floor"] + 1e-7) & (vz < top_z - 1e-7)
+    assert rim.any(), "visual mesh has no smoothed wall/rim band"
     # walls present (elevation hits the cell top = 1) AND a lower conforming floor
     assert el.max() > 0.99 and el.min() < el.max() - 0.05
     # the floor ramps along the tilt axis (x = columns): mean elevation should trend across columns

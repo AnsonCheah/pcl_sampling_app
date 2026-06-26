@@ -191,7 +191,7 @@ def simulate_cell(cell, convex, R_aligned, settle_time=2.0, view=False):
         h = spec.add_hfield(); h.name = "pocket"; h.nrow = el.shape[0]; h.ncol = el.shape[1]
         h.size = hf["size"]; h.userdata = el.flatten().astype(float).tolist()
         gm = tray.add_geom(); gm.type = mujoco.mjtGeom.mjGEOM_HFIELD; gm.hfieldname = "pocket"
-        gm.pos = [cx, cy, 0.0]; gm.mass = 0.0
+        gm.pos = [cx, cy, float(hf.get("z_offset", 0.0))]; gm.mass = 0.0
     else:
         for j, (v, f) in enumerate(cell["pieces"]):
             mesh = spec.add_mesh(); mesh.name = f"tp_{j}"

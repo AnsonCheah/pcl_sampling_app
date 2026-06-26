@@ -149,9 +149,16 @@ def _heightfield_mesh(gx, gy, Z):
     return trimesh.Trimesh(vertices=verts, faces=np.asarray(faces, dtype=np.int64), process=False)
 
 
+def _smoothstep(x):
+    x = np.clip(x, 0.0, 1.0)
+    return x * x * (3.0 - 2.0 * x)
+
+
 def build_tray_conforming_hfield(convex_pieces, R_aligned, pitch_xy, pocket_depth: float,
                                  base_thickness: float, clearance: float,
-                                 grid_res: float = 0.0015, max_grid: int = 128):
+                                 grid_res: float = 0.0015, max_grid: int = 128,
+                                 visual_grid_res: float = 0.00075, visual_max_grid: int = 192,
+                                 visual_wall_radius: float = None):
     """Conforming tray pocket as a MuJoCo height field that cradles the part's bottom surface — like a
     3D-print support bed. The pocket FLOOR follows the part's bottom depth map z_bottom(x,y) of its
     CONVEX COLLISION (what MuJoCo collides), and the WALLS rise to the cell top outside the
@@ -160,10 +167,11 @@ def build_tray_conforming_hfield(convex_pieces, R_aligned, pitch_xy, pocket_dept
 
     Built from a 2D orthographic depth map (Open3D raycast from below) — fast, no VHACD. Returns a dict:
       elevation  : (nrow, ncol) float32 in [0, 1]  → MjSpec hfield userdata
-      size       : [radius_x, radius_y, z_top, base]  → MjSpec hfield size (z = z0 + elevation*z_top)
+      size       : [radius_x, radius_y, z_range, base]  → MjSpec hfield size
+      z_offset   : geom-local z of the minimum hfield elevation
       center_xy  : (cx, cy) footprint centre in the part frame; the hfield geom goes at body_xy + center
       seat_dz    : part-body z so its lowest point rests `clearance` above the floor (z0 = 0)
-      visual     : trimesh surface mesh of the pocket top (floor + walls), centred at the footprint
+      visual     : visual-only surface mesh; contact floor matches the hfield, walls/rim are smoothed
     """
     import scipy.ndimage as ndi
     import open3d as o3d
@@ -185,11 +193,16 @@ def build_tray_conforming_hfield(convex_pieces, R_aligned, pitch_xy, pocket_dept
 
     scene = o3d.t.geometry.RaycastingScene()
     scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(trimesh_to_o3d(M)))
-    zlo = min_z - 0.01
-    origins = np.stack([GX.ravel(), GY.ravel(), np.full(GX.size, zlo)], axis=1).astype(np.float32)
-    dirs = np.tile(np.array([0, 0, 1], np.float32), (GX.size, 1))
-    t_hit = scene.cast_rays(o3d.core.Tensor(np.concatenate([origins, dirs], axis=1)))["t_hit"].numpy()
-    z_bottom = (zlo + t_hit).reshape(nrow, ncol)               # +inf where the ray misses (outside part)
+
+    def raycast_bottom(GX_, GY_):
+        zlo = min_z - 0.01
+        origins = np.stack([GX_.ravel(), GY_.ravel(), np.full(GX_.size, zlo)], axis=1).astype(np.float32)
+        dirs = np.tile(np.array([0, 0, 1], np.float32), (GX_.size, 1))
+        rays = o3d.core.Tensor(np.concatenate([origins, dirs], axis=1))
+        t_hit_ = scene.cast_rays(rays)["t_hit"].numpy()
+        return (zlo + t_hit_).reshape(GX_.shape)               # +inf where the ray misses (outside part)
+
+    z_bottom = raycast_bottom(GX, GY)
     hit = np.isfinite(z_bottom)
     if not hit.any():
         raise ValueError("conforming hfield: no raycast hits (empty footprint)")
@@ -202,24 +215,69 @@ def build_tray_conforming_hfield(convex_pieces, R_aligned, pitch_xy, pocket_dept
     rad_px = max(1, int(round(clearance / (px / max(ncol - 1, 1)))))
     floor_mask = ndi.binary_dilation(hit, iterations=rad_px)
 
-    # VISUAL surface = the SMOOTH conforming floor (no conservative steps) for a clean rendered pocket.
-    surface_vis = np.where(floor_mask, np.minimum(floor, cell_top), cell_top)
     # COLLISION surface = a conservative lower envelope: the part's bottom curves below the linear
     # interpolation through the grid samples, so a floor *through* the samples rises above the part and
     # the solver ejects it. The min-filter pulls each sample down to its neighbourhood minimum so the
-    # interpolated hfield stays under the true bottom and the part cradles. (The plateau steps it leaves
-    # live only in the hidden collision geom — the visual above uses the smooth floor.)
+    # interpolated hfield stays under the true bottom and the part cradles. The visual contact floor
+    # samples this same surface so settled MuJoCo poses do not appear vertically offset in the rerender.
     coll_floor = ndi.minimum_filter(floor, size=3, mode="nearest")
     surface_coll = np.where(floor_mask, np.minimum(coll_floor, cell_top), cell_top)
 
-    elevation = np.clip(surface_coll / cell_top, 0.0, 1.0).astype(np.float32)
+    # MuJoCo normalizes compile-time hfield elevation data to [0, 1]. Keep that normalization explicit
+    # and place the geom at z_offset so MuJoCo collision and the Open3D visual share one coordinate frame.
+    hfield_min = float(surface_coll.min())
+    hfield_range = max(float(surface_coll.max() - hfield_min), 1e-9)
+    elevation = np.clip((surface_coll - hfield_min) / hfield_range, 0.0, 1.0).astype(np.float32)
+    hfield_surface = hfield_min + elevation.astype(float) * hfield_range
+
+    # VISUAL surface = the same contact floor, but only the walls and top rim are rounded. A finer
+    # visual grid reduces the stair-step outline without increasing MuJoCo's hfield resolution.
+    if visual_grid_res is None or visual_grid_res <= 0:
+        visual_grid_res = grid_res
+    visual_max_grid = max(8, int(visual_max_grid or max_grid))
+    ncol_vis = int(np.clip(round(px / float(visual_grid_res)), 8, visual_max_grid))
+    nrow_vis = int(np.clip(round(py / float(visual_grid_res)), 8, visual_max_grid))
+    gx_vis = np.linspace(-px / 2, px / 2, ncol_vis)
+    gy_vis = np.linspace(-py / 2, py / 2, nrow_vis)
+    GXv, GYv = np.meshgrid(gx_vis, gy_vis)
+
+    z_bottom_vis = raycast_bottom(GXv, GYv)
+    hit_vis = np.isfinite(z_bottom_vis)
+    if not hit_vis.any():
+        hit_vis = ndi.zoom(hit.astype(float), (nrow_vis / nrow, ncol_vis / ncol), order=0) > 0.5
+
+    row = ((GYv - gy[0]) / max(gy[-1] - gy[0], 1e-12) * (nrow - 1)).ravel()
+    col = ((GXv - gx[0]) / max(gx[-1] - gx[0], 1e-12) * (ncol - 1)).ravel()
+    visual_floor = ndi.map_coordinates(
+        np.minimum(coll_floor, cell_top), [row, col], order=1, mode="nearest"
+    ).reshape(nrow_vis, ncol_vis)
+
+    dx_vis = px / max(ncol_vis - 1, 1)
+    dy_vis = py / max(nrow_vis - 1, 1)
+    outside_dist = ndi.distance_transform_edt(~hit_vis, sampling=(dy_vis, dx_vis))
+    wall_radius = visual_wall_radius
+    if wall_radius is None:
+        wall_radius = max(float(clearance), 2.0 * max(dx_vis, dy_vis))
+    wall_radius = max(float(wall_radius), 1e-9)
+    floor_margin = max(float(clearance), 0.0)
+    blend = _smoothstep((outside_dist - floor_margin) / wall_radius)
+    surface_vis = visual_floor * (1.0 - blend) + cell_top * blend
+    surface_vis[hit_vis] = visual_floor[hit_vis]
+    surface_vis[outside_dist >= floor_margin + wall_radius] = cell_top
+    surface_vis = np.clip(surface_vis, hfield_min, cell_top)
+
     return dict(
         elevation=elevation,
-        size=[px / 2.0, py / 2.0, float(cell_top), float(base_thickness)],
+        size=[px / 2.0, py / 2.0, hfield_range, float(base_thickness)],
+        z_offset=hfield_min,
         center_xy=(cx, cy),
         seat_dz=base_thickness - min_z + clearance,
         pocket_depth=pocket_depth,
-        visual=_heightfield_mesh(gx, gy, surface_vis),
+        collision_surface=hfield_surface,
+        visual=_heightfield_mesh(gx_vis, gy_vis, surface_vis),
+        visual_shape=surface_vis.shape,
+        visual_contact_mask=hit_vis,
+        visual_floor=visual_floor,
     )
 
 

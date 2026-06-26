@@ -726,8 +726,9 @@ class MujocoBinScene:
 
     def _instance_tray_hfield(self, hf, body_positions):
         """Place one conforming height-field geom per slot (all sharing the one asset) and merge the
-        smooth pocket surface into self.bin_mesh (shared bin geom id -> background)."""
+        matching pocket surface into self.bin_mesh (shared bin geom id -> background)."""
         cx, cy = hf["center_xy"]
+        z_offset = float(hf.get("z_offset", 0.0))
         geom_quat = np.array(R.from_matrix(self.bin_transform[:3, :3]).as_quat(scalar_first=True)).tolist()
         bxy = np.asarray(body_positions)[:, :2]
         tiles = []
@@ -735,7 +736,7 @@ class MujocoBinScene:
             g = self.bin_body.add_geom()
             g.type = mujoco.mjtGeom.mjGEOM_HFIELD
             g.hfieldname = hf["name"]
-            g.pos  = (self.bin_transform @ np.array([bx + cx, by + cy, 0.0, 1.0]))[:3].tolist()
+            g.pos  = (self.bin_transform @ np.array([bx + cx, by + cy, z_offset, 1.0]))[:3].tolist()
             g.quat = geom_quat
             g.mass = 0.0
             g.rgba = [0.85, 0.85, 0.90, 1.0]
@@ -962,7 +963,7 @@ class MujocoBinScene:
                 return  # poses are final; mj_forward already called in generate_scene
             # # Partition/tray: parts are pre-seated in their cells/pockets, so run a dedicated CLEAN
             # # settle (no hopper, no batched release) — mirrors the verified tray_cell_debug.simulate_cell.
-            # self._settle_structured(on_step, preview_interval_s)
+            self._settle_structured(on_step, preview_interval_s)
             return
 
         preview_tick = max(1, int(preview_interval_s / self.model.opt.timestep))
