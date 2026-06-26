@@ -1,6 +1,6 @@
 """Tests for the declarative downstream-clearing mechanism.
 
-Covers `BaseStage.downstream` / `clear_produced`, `app.clear_state_from`,
+Covers `BaseStage.downstream` / `clear_downstream`, `app.clear_state_from`,
 `app.reset_all_state`, and `app._restart()`. These are the highest-value tests: they pin
 the single-source-of-truth contract that replaced the hand-written per-stage clears.
 """

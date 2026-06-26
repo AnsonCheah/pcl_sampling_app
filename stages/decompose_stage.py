@@ -38,13 +38,6 @@ class DecomposeStage(BaseStage):
                                               enabled_if=lambda: len(self.app.convex_meshes) > 0)
         self.btn_reset.set_on_clicked(self.reset)
 
-        self.btn_back = self.register_widget(gui.Button("Back: Save"))
-        self.btn_back.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value - 1)))
-        # Only advance once decomposition has produced convex hulls.
-        self.btn_next = self.register_widget(gui.Button("Next: Scene"),
-                                            enabled_if=lambda: len(self.app.convex_meshes) > 0)
-        self.btn_next.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value + 1)))
-
         self.btn_restart = self.register_widget(gui.Button("Restart"))
         self.btn_restart.set_on_clicked(lambda: self.app._restart())
 
@@ -53,14 +46,14 @@ class DecomposeStage(BaseStage):
         v.add_child(self.btn_decompose)
         v.add_child(self.btn_reset)
         v.add_child(gui.Label(""))
-        v.add_child(gui.Label(""))
-        v.add_child(gui.Label(""))
-        v.add_child(self.btn_back)
-        v.add_child(self.btn_next)
         v.add_child(self.btn_restart)
 
         print("loaded decompose panel")
         return v
+
+    # Only advance once decomposition has produced convex hulls.
+    def next_enabled(self) -> bool:
+        return len(self.app.convex_meshes) > 0
 
     def _display_convex_meshes(self):
         """GUI helper: show each convex hull in a distinct HSV colour."""
@@ -86,7 +79,6 @@ class DecomposeStage(BaseStage):
             # On stage entry, before decomposition: show the original mesh.
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry(
                 "mesh", self.app.target_mesh, self.app.default_material))
-        # self.app.main_thread(self.app._reframe)
         self.app.scene.force_redraw()
         self.enable_widgets()
 

@@ -13,7 +13,7 @@ import colorsys
 from rich import print as rp
 np.set_printoptions(precision=6, suppress=True)
 
-SCENE_FILL_RATE     = 0.6    # default fill rate (fraction of safe capacity)
+SCENE_FILL_RATE     = 0.2    # default fill rate (fraction of safe capacity)
 # Shape-aware random-packing efficiency for part OBB volumes. A fixed factor is only valid for
 # cube-like parts; random packing fraction falls ~1/aspect_ratio for elongated/flat parts
 # (Philipse random-contact scaling; see _auto_part_count). We taper from a cube anchor by the
@@ -103,11 +103,6 @@ class SceneStage(BaseStage):
         self.btn_reset = self.register_widget(gui.Button("Clear Scene"), lambda: self.app.mj_scene is not None)
         self.btn_reset.set_on_clicked(self.reset)
 
-        self.btn_next = self.register_widget(gui.Button("Next: Render"), lambda: len(self.app.o3d_scene) > 0)
-        self.btn_next.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value + 1)))
-        self.btn_back = self.register_widget(gui.Button("Back: Decompose"))
-        self.btn_back.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value - 1)))
-
         self.btn_restart = self.register_widget(gui.Button("Restart"))
         self.btn_restart.set_on_clicked(lambda: self.app._restart())
         v.add_child(gui.Label("Generate Physical Scene"))
@@ -125,16 +120,13 @@ class SceneStage(BaseStage):
         v.add_child(self.btn_generate)
         v.add_child(self.btn_reset)
         v.add_child(gui.Label(""))
-        v.add_child(gui.Label(""))
-        v.add_child(gui.Label(""))
-        v.add_child(gui.Label(""))
-        v.add_child(gui.Label(""))
-        v.add_child(self.btn_back)
-        v.add_child(self.btn_next)
         v.add_child(self.btn_restart)
 
         print("loaded scene panel")
         return v
+
+    def next_enabled(self) -> bool:
+        return len(self.app.o3d_scene) > 0
 
     def _is_random(self) -> bool:
         return self.arrangement_combo.selected_text == "Random"
@@ -210,7 +202,6 @@ class SceneStage(BaseStage):
             geom = o3d.geometry.TriangleMesh(mesh)
             geom.compute_vertex_normals()
             self.app.scene.scene.add_geometry(f"convex_{i}", geom, material)
-        self.app.main_thread(self.app._reframe)
 
     def _show_scene_mesh(self):
         """GUI helper: show the settled physical scene, framed on the bin. Everything runs on the main
@@ -228,7 +219,7 @@ class SceneStage(BaseStage):
                     if obj.T_gt is not None:
                         g.transform(obj.T_gt)
                     self.app.scene.scene.add_geometry(name, g, self.app.default_material)
-            self.app._reframe()
+            self.app.main_thread(self.app._reframe)
             self.app.scene.force_redraw()
         self.app.main_thread(show)
 
@@ -253,6 +244,7 @@ class SceneStage(BaseStage):
         self.o3d_scene = {}
         self.mj_scene = None
         self.worker_step = 0
+        self.app.main_thread(self.app._reframe)
 
     def worker(self):
         TOTAL_STEPS = 4

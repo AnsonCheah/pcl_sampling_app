@@ -62,8 +62,6 @@ class RenderStage(BaseStage):
         self.btn_export = self.register_widget(gui.Button("Export Synthetic Targets"), lambda: len(self.app.synthetic_targets) > 0)
         self.btn_export.set_on_clicked(self.save_synthetic_targets)
 
-        self.btn_back = self.register_widget(gui.Button("Back: Scene"))
-        self.btn_back.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value - 1)))
         self.btn_restart = self.register_widget(gui.Button("Restart"))
         self.btn_restart.set_on_clicked(lambda: self.app._restart())
 
@@ -74,11 +72,6 @@ class RenderStage(BaseStage):
         v.add_child(self.combobox_scenes)
         v.add_child(self.btn_export)
         v.add_child(gui.Label(""))
-        v.add_child(gui.Label(""))
-        v.add_child(gui.Label(""))
-        v.add_child(gui.Label(""))
-        v.add_child(gui.Label(""))
-        v.add_child(self.btn_back)
         v.add_child(self.btn_restart)
 
         print("loaded render panel")

@@ -26,11 +26,6 @@ class SaveStage(BaseStage):
         self.btn_save = self.register_widget(gui.Button("Export Point Cloud"))
         self.btn_save.set_on_clicked(self.start)
 
-        self.btn_next = self.register_widget(gui.Button("Next: Decompose"))
-        self.btn_next.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value + 1)))
-        self.btn_back = self.register_widget(gui.Button("Back: Downsample"))
-        self.btn_back.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value - 1)))
-
         self.btn_restart = self.register_widget(gui.Button("Restart"))
         self.btn_restart.set_on_clicked(lambda: self.app._restart())
 
@@ -38,12 +33,6 @@ class SaveStage(BaseStage):
         v.add_child(gui.Label(""))
         v.add_child(self.btn_save)
         v.add_child(gui.Label(""))
-        v.add_child(gui.Label(""))
-        v.add_child(gui.Label(""))
-        v.add_child(gui.Label(""))
-        v.add_child(gui.Label(""))
-        v.add_child(self.btn_back)
-        v.add_child(self.btn_next)
         v.add_child(self.btn_restart)
 
         print("loaded save panel")

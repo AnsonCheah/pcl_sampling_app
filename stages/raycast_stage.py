@@ -52,22 +52,17 @@ class RaycastStage(BaseStage):
         self.btn_reset = self.register_widget(gui.Button("Clear Raycast"), lambda: self.app.raw_pcd is not None)
         self.btn_reset.set_on_clicked(self.reset)
 
-        self.btn_next = self.register_widget(gui.Button("Next: Crop"), lambda: self.app.raw_pcd is not None)
-        self.btn_next.set_on_clicked(lambda: self.app.set_stage(Stage.CROP))
-
-        self.btn_back = self.register_widget(gui.Button("Back: Import Mesh"))
-        self.btn_back.set_on_clicked(lambda: self.app.set_stage(Stage.IMPORT_MESH))
-
         v.add_child(gui.Label("Camera Distance"))
         v.add_child(self.camera_distance_slider)
         v.add_child(gui.Label("Number of Views"))
         v.add_child(self.num_views_slider)
         v.add_child(self.btn_raycast)
         v.add_child(self.btn_reset)
-        v.add_child(self.btn_back)
-        v.add_child(self.btn_next)
         print(f"[Raycast] panel loaded")
         return v
+
+    def next_enabled(self) -> bool:
+        return self.app.raw_pcd is not None
 
     # ---------- Stage lifecycle ----------
     def _refresh_ui(self):

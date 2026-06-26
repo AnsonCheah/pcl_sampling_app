@@ -40,10 +40,6 @@ class DownsampleStage(BaseStage):
 
         self.btn_reset = self.register_widget(gui.Button("Restart Downsample"), lambda: self.app.down_pcd is not None)
         self.btn_reset.set_on_clicked(self.reset)
-        self.btn_next = self.register_widget(gui.Button("Next: Save"), lambda: self.app.down_pcd is not None)
-        self.btn_next.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value + 1)))
-        self.btn_back = self.register_widget(gui.Button("Back: Crop"))
-        self.btn_back.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value - 1)))
 
         self.radio_cloud = self.register_widget(
             gui.RadioButton(gui.RadioButton.HORIZ),
@@ -62,12 +58,12 @@ class DownsampleStage(BaseStage):
         v.add_child(gui.Label(""))
         v.add_child(gui.Label("Show Cloud:"))
         v.add_child(self.radio_cloud)
-        v.add_child(gui.Label(""))
-        v.add_child(self.btn_back)
-        v.add_child(self.btn_next)
         print("loaded downsample panel")
 
         return v
+
+    def next_enabled(self) -> bool:
+        return self.app.down_pcd is not None
 
     def _on_cloud_radio_changed(self, idx):
         self.cloud_radio_idx = idx

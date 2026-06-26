@@ -42,7 +42,7 @@ class BaseStage(ABC):
     # State clearing
     # -------------------------
 
-    def clear_produced(self):
+    def clear_downstream(self):
         """Reset every app.* attribute this stage owns to its declared default,
         then run any GUI-side cleanup tied to this stage's data."""
         for attr, factory in self.downstream.items():
@@ -112,6 +112,11 @@ class BaseStage(ABC):
         self.widgets.append(WidgetBinding(widget, enabled_if))
         return widget
 
+    def next_enabled(self) -> bool:
+        """Whether the unified Next button is clickable while on this stage.
+        Override in stages that require produced state before advancing."""
+        return True
+
     def enable_widgets(self):
         """
         Re-evaluate all widget enable conditions.
@@ -125,6 +130,8 @@ class BaseStage(ABC):
             except Exception as e:
                 print(f"[UI] Condition failed: {e}")
                 binding.widget.enabled = False
+        # Keep the app-level Back/Next buttons in sync with the latest state.
+        self.app._update_nav_buttons()
 
     def disable_widgets(self):
         if self.app.headless:

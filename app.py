@@ -103,6 +103,21 @@ class MeshSamplingApp:
                 stage_class.panel.visible = False
                 self.panel.add_child(stage_class.panel)
 
+            # === Unified Back/Next navigation (pinned to panel bottom) ===
+            # The buttons are declared once here, not per stage. set_stage drives their
+            # labels/visibility from pipeline order; the leading stretch pushes them down.
+            self._back_target = None
+            self._next_target = None
+            self.panel.add_stretch()
+            self.nav_panel = gui.Vert(0.25 * em)
+            self.btn_back = gui.Button("Back")
+            self.btn_back.set_on_clicked(self._go_back)
+            self.btn_next = gui.Button("Next")
+            self.btn_next.set_on_clicked(self._go_next)
+            self.nav_panel.add_child(self.btn_back)
+            self.nav_panel.add_child(self.btn_next)
+            self.panel.add_child(self.nav_panel)
+
             # === Progress Bar widget ===
             self.progress_panel = gui.Vert(0, gui.Margins(10, 10, 10, 10))
             self.progress_panel.visible = False
@@ -140,12 +155,12 @@ class MeshSamplingApp:
         start = stage.value if inclusive else stage.value + 1
         for st, inst in self.stages.items():
             if st.value >= start:
-                inst.clear_produced()
+                inst.clear_downstream()
 
     def reset_all_state(self):
         """Reset every stage's owned state to defaults."""
         for inst in self.stages.values():
-            inst.clear_produced()
+            inst.clear_downstream()
 
     def set_stage(self, stage: Stage):
         self.stage = stage
@@ -160,6 +175,49 @@ class MeshSamplingApp:
         self.stages[stage]._refresh_ui()
         self.stages[stage].enable_widgets()
         self._update_title()
+
+    # ===============================
+    # Unified Back/Next navigation
+    # ===============================
+    @staticmethod
+    def _stage_label(stage: Stage) -> str:
+        """Human-readable button label derived from the stage enum name."""
+        return stage.name.replace("_", " ").title()
+
+    def _go_back(self):
+        if self._back_target is not None:
+            self.set_stage(self._back_target)
+
+    def _go_next(self):
+        if self._next_target is not None:
+            self.set_stage(self._next_target)
+
+    def _update_nav_buttons(self):
+        """Re-derive Back/Next labels, visibility and the Next-enabled state from the
+        current stage's position in the pipeline. Called on every enable_widgets pass."""
+        if self.headless:
+            return
+        order = list(self.stages.keys())          # insertion order == Stage enum order
+        idx = order.index(self.stage)
+
+        if idx > 0:
+            self._back_target = order[idx - 1]
+            self.btn_back.text = f"Back: {self._stage_label(self._back_target)}"
+            self.btn_back.visible = True
+        else:
+            self._back_target = None
+            self.btn_back.visible = False
+
+        if idx < len(order) - 1:
+            self._next_target = order[idx + 1]
+            self.btn_next.text = f"Next: {self._stage_label(self._next_target)}"
+            self.btn_next.visible = True
+            self.btn_next.enabled = bool(self.stages[self.stage].next_enabled())
+        else:
+            self._next_target = None
+            self.btn_next.visible = False
+
+        self.window.set_needs_layout()
 
     def _on_layout(self, layout_context):
         r = self.window.content_rect

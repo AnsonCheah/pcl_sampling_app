@@ -38,24 +38,18 @@ class CropStage(BaseStage):
         self.btn_reset = self.register_widget(gui.Button("Reset Crop"), lambda: len(self.app.cropped_pcd.points)<len(self.app.raw_pcd.points))
         self.btn_reset.set_on_clicked(self.reset)
 
-        self.btn_next = self.register_widget(gui.Button("Next: Downsample"), lambda: self.app.cropped_pcd is not None)
-        self.btn_next.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value + 1)))
-        self.btn_back = self.register_widget(gui.Button("Back: Raycast"))
-        self.btn_back.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value - 1)))
-
         v.add_child(gui.Label("Crop Point Cloud"))
         v.add_child(gui.Label(""))
         v.add_child(gui.Label("Controls"))
         v.add_child(self.btn_box_select)
         v.add_child(self.delete_btn)
         v.add_child(self.btn_reset)
-        v.add_child(gui.Label(""))
-        v.add_child(gui.Label(""))
-        v.add_child(self.btn_back)
-        v.add_child(self.btn_next)
         print("loaded crop panel")
 
         return v
+
+    def next_enabled(self) -> bool:
+        return self.app.cropped_pcd is not None
 
     def _refresh_ui(self):
         if self.app.headless:

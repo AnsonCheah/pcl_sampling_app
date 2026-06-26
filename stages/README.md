@@ -45,7 +45,7 @@ Running a worker: `stage._run_worker()` spawns `worker()` in a background thread
 ## Automatic downstream clearing
 
 Each stage declares the `app.*` attributes it owns in a `downstream` class dict mapping
-attr name → a zero-arg default factory. `BaseStage.clear_produced()` resets them (and runs
+attr name → a zero-arg default factory. `BaseStage.clear_downstream()` resets them (and runs
 `on_clear()`); `app.clear_state_from(stage, inclusive=True)` resets a stage's own state plus
 every later stage's, by strict `Stage` enum order. This is the single source of truth:
 `app._restart()` and each worker's start-of-run wipe both go through it, so adding a stage or

@@ -37,9 +37,6 @@ class ImportMeshStage(BaseStage):
         self.btn_batch = self.register_widget(gui.Button("Batch Sampling"))
         self.btn_batch.set_on_clicked(self.app.start_batch_sampling)
 
-        self.btn_next = self.register_widget(gui.Button("Next: Raycast"), enabled_if=lambda: self.app.target_mesh is not None)
-        self.btn_next.set_on_clicked(lambda: self.app.set_stage(Stage.RAYCAST))
-
         v.add_child(title)
         v.add_child(gui.Label(""))
         v.add_child(self.btn_load)
@@ -48,12 +45,12 @@ class ImportMeshStage(BaseStage):
         v.add_child(gui.Label(""))
         v.add_child(self.btn_express)
         v.add_child(self.btn_batch)
-        # v.add_child(gui.Label(""))
-        # v.add_child(gui.Label(""))
-        v.add_child(self.btn_next)
 
         print(f"[Import Mesh] panel loaded")
         return v
+
+    def next_enabled(self) -> bool:
+        return self.app.target_mesh is not None
 
     def _refresh_ui(self):
         """Refresh scene and button states"""
