@@ -27,6 +27,17 @@ from rich import print as rp
 np.set_printoptions(precision=6, suppress=True)
 
 
+def _passes_2d_filter(aspect, area_ratio, aspect_range, area_range) -> bool:
+    """Mirror the real Mask2Former post-filter: an instance is a valid candidate iff its
+    2D-mask elongation and image-area fraction both fall inside the auto-derived per-part
+    ranges. If a range is missing (None), that dimension is not gated."""
+    if aspect_range is not None and not (aspect_range[0] <= aspect <= aspect_range[1]):
+        return False
+    if area_range is not None and not (area_range[0] <= area_ratio <= area_range[1]):
+        return False
+    return True
+
+
 class RenderStage(BaseStage):
     """Simulate the 3D sensor scanning the physical scene produced by SceneStage: raycast → noise
     pipeline → instance segmentation → per-target export. Reads app.o3d_scene + app.mj_scene; writes
@@ -181,7 +192,7 @@ class RenderStage(BaseStage):
         add_to_render_scene("surface_noise_scene", surface_pcd)
         _update_pb("Synthesizing segmentation erosion/dilation...")
 
-        label_masks = segment_point_cloud(  # {geom_id: (N,) bool} — one mask per instance, may overlap
+        label_masks, seg_metrics = segment_point_cloud(  # masks: {geom_id: (N,) bool}; metrics: 2D mask stats
             render, pts, pix_all,
             erosion_px=5.0,
             dilation_px=5.0,
@@ -190,9 +201,10 @@ class RenderStage(BaseStage):
             occlusion_loss_px=2,
             boundary_noise_px=10.0,
             seed=0,
+            return_metrics=True,
             verbose=self.verbose
         )
-        _update_pb("Filtering targets by point counts...")
+        _update_pb("Filtering targets by 2D aspect/area...")
 
         unique_id_list = list(label_masks.keys())
         rp(f"length of unique id list: {len(unique_id_list)} \n {unique_id_list}")
@@ -204,6 +216,18 @@ class RenderStage(BaseStage):
         ref_xyz = np.asarray(self.app.down_pcd.points)
         min_overlap = 0.1
         bin_pcd = None
+
+        # 2D candidate filter (mirrors real Mask2Former post-filter): per-part aspect-ratio
+        # and area-ratio ranges auto-derived in RaycastStage. area_ratio scales as 1/d^2, so
+        # rescale the scene measurement to the reference camera distance before comparing.
+        aspect_range = getattr(self.app, "aspect_ratio_range", None)
+        area_range   = getattr(self.app, "area_ratio_range", None)
+        ref_cam_d    = getattr(self.app, "ref_cam_distance", None)
+        if (aspect_range is None or area_range is None or ref_cam_d is None):
+            print("[WARN] 2D filter ranges unavailable (run RAYCAST) — skipping aspect/area gate.")
+            area_scale = 1.0
+        else:
+            area_scale = (self.app.mj_scene.camera_distance / ref_cam_d) ** 2
         for _, inst_id in enumerate(unique_id_list):
             inst_pts = pts[label_masks[inst_id]]
             inst_nrm = nrm[label_masks[inst_id]]
@@ -227,12 +251,26 @@ class RenderStage(BaseStage):
                 overlap = 0.0
             precheck_pass = True
 
-            if not (min(self.app.point_count_range)<=len(xyz_inst)<=max(self.app.point_count_range)):
-                print(f"[skip] Instance {inst_id} point count out of threshold {self.app.point_count_range}: {len(xyz_inst)}")
+            # --- Legacy 3D gates (point count + overlap) — kept for reference, disabled. ---
+            # if not (min(self.app.point_count_range)<=len(xyz_inst)<=max(self.app.point_count_range)):
+            #     print(f"[skip] Instance {inst_id} point count out of threshold {self.app.point_count_range}: {len(xyz_inst)}")
+            #     precheck_pass = False
+            # if overlap < min_overlap:
+            #     print(f"[skip] Instance {inst_id}: overlap={overlap:.2f} < {min_overlap}")
+            #     precheck_pass = False
+
+            # --- 2D candidate filter (aspect-ratio + area-ratio), as the real network does. ---
+            m = seg_metrics.get(inst_id)
+            if m is None:
+                print(f"[skip] Instance {inst_id}: no 2D mask metrics")
                 precheck_pass = False
-            if overlap < min_overlap:
-                print(f"[skip] Instance {inst_id}: overlap={overlap:.2f} < {min_overlap}")
-                precheck_pass = False
+            elif (aspect_range is not None and area_range is not None):
+                aspect     = m["aspect_ratio"]
+                area_ratio = m["area_ratio"] * area_scale
+                if not _passes_2d_filter(aspect, area_ratio, aspect_range, area_range):
+                    print(f"[skip] Instance {inst_id}: aspect={aspect:.2f} range={tuple(round(v,2) for v in aspect_range)}, "
+                          f"area_ratio={area_ratio:.5f} range={tuple(round(v,5) for v in area_range)}")
+                    precheck_pass = False
             if not precheck_pass: continue
             valid_count += 1
             inst_name = f"synthetic_sample_{valid_count}"

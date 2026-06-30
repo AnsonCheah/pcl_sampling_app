@@ -129,6 +129,69 @@ def _expand_to_full(crop: _Crop, H: int, W: int) -> np.ndarray:
     return out
 
 
+def _tight_bbox_metrics(arr) -> "tuple[int, int, int]":
+    """
+    (pixel_area, height, width) of the TRUE pixels in a 2D bool array.
+
+    `arr` is a NumPy or CuPy array (e.g. a padded _Crop.arr); the height/width are
+    the tight extent of the True region, ignoring the surrounding padding. Returns
+    (0, 0, 0) for an empty mask. Uses the same np.any(...argmax...) pattern as
+    `_bbox_of`, on the host.
+    """
+    a = _to_cpu(arr)
+    rows = np.any(a, axis=1)
+    cols = np.any(a, axis=0)
+    if not rows.any():
+        return 0, 0, 0
+    r0 = int(np.argmax(rows)); r1 = int(len(rows) - np.argmax(rows[::-1]))
+    c0 = int(np.argmax(cols)); c1 = int(len(cols) - np.argmax(cols[::-1]))
+    return int(a.sum()), r1 - r0, c1 - c0
+
+
+def _metrics_from_mask(arr, H: int, W: int) -> "dict | None":
+    """
+    {pixel_area, aspect_ratio, area_ratio} for a single 2D bool mask, or None if
+    the mask is empty. `arr` may be a padded crop array or a full-frame mask —
+    only the tight extent of the True region matters. area_ratio is normalised by
+    the full image (H * W).
+    """
+    area, h, w = _tight_bbox_metrics(arr)
+    if area == 0:
+        return None
+    long_side  = max(h, w)
+    short_side = max(min(h, w), 1)
+    return {
+        "pixel_area":   area,
+        "aspect_ratio": long_side / short_side,
+        "area_ratio":   area / float(H * W),
+    }
+
+
+def compute_2d_instance_metrics(
+    crops: "dict[int, _Crop]", H: int, W: int,
+) -> "dict[int, dict]":
+    """
+    Per-instance 2D mask statistics for the (perturbed) crops, measured in image
+    space exactly as a real 2D segmentation network's post-filter would see them.
+
+    Returns
+    -------
+    dict[geom_id] -> {
+        "pixel_area"   : int    count of True pixels in the mask,
+        "aspect_ratio" : float  max(h, w) / max(min(h, w), 1)  — elongation (>= 1),
+                                 orientation-agnostic,
+        "area_ratio"   : float  pixel_area / (H * W)  — fraction of the full image.
+    }
+    Empty masks are skipped.
+    """
+    out: "dict[int, dict]" = {}
+    for g, c in crops.items():
+        m = _metrics_from_mask(c.arr, H, W)
+        if m is not None:
+            out[g] = m
+    return out
+
+
 def _influence_margin(
     erosion_px: float, dilation_px: float, confusion_boundary_px: int,
     boundary_noise_px: float,
@@ -691,8 +754,9 @@ def segment_point_cloud(
     points:    np.ndarray,
     pixel_idx: np.ndarray,
     verbose: bool = False,
+    return_metrics: bool = False,
     **kwargs,
-) -> "dict[int, np.ndarray]":
+) -> "dict[int, np.ndarray] | tuple[dict[int, np.ndarray], dict[int, dict]]":
     """
     Assign per-instance boolean masks to a point cloud using perturbed 2D masks.
 
@@ -712,6 +776,9 @@ def segment_point_cloud(
                   For canonical points: render["pixel_idx"][keep_mask]
                   For injected points (flying pixels, outliers): use -1.
                   Injected points (pixel_idx == -1) are False in all masks.
+    return_metrics : bool
+        If True, also return per-instance 2D mask metrics (see
+        compute_2d_instance_metrics) measured on the perturbed image-space masks.
     **kwargs  : forwarded to build_perturbed_masks()
 
     Returns
@@ -720,6 +787,8 @@ def segment_point_cloud(
         {geom_id: (N,) bool} — one boolean mask per instance.
         A point may be True in multiple masks (overlap at boundaries).
         Points with pixel_idx == -1 are False in every mask.
+    metrics : dict[int, dict]  (only when return_metrics=True)
+        {geom_id: {pixel_area, aspect_ratio, area_ratio}} from the 2D masks.
     """
     start = time.time()
 
@@ -735,6 +804,12 @@ def segment_point_cloud(
             arr[valid] = m.ravel()[pidx[valid]]
             instance_masks[g] = arr
         if verbose: rp(f"{sys._getframe().f_code.co_name} took {np.round(time.time() - start, 6)}s")
+        if return_metrics:
+            H, W = render["res"]
+            metrics = {g: m_ for g, m_ in (
+                (g, _metrics_from_mask(m, H, W)) for g, m in masks.items())
+                if m_ is not None}
+            return instance_masks, metrics
         return instance_masks
 
     crops, geom_img = _build_perturbed_crops(render, **kwargs)
@@ -758,6 +833,8 @@ def segment_point_cloud(
         instance_masks[g] = full
 
     if verbose: rp(f"{sys._getframe().f_code.co_name} took {np.round(time.time() - start, 6)}s")
+    if return_metrics:
+        return instance_masks, compute_2d_instance_metrics(crops, H, W)
     return instance_masks
 
 

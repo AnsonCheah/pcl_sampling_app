@@ -14,6 +14,9 @@ class RaycastStage(BaseStage):
         "cropped_pcd": lambda: None,
         "point_count_mean": lambda: None,
         "point_count_range": lambda: None,
+        "aspect_ratio_range": lambda: None,
+        "area_ratio_range": lambda: None,
+        "ref_cam_distance": lambda: None,
     }
 
     def __init__(self, app):
@@ -96,6 +99,12 @@ class RaycastStage(BaseStage):
         all_points = []
         all_cam_pos = []
         self.point_counts = np.zeros((self.num_views))
+        # Per-view 2D silhouette metrics of the isolated part — used to auto-derive the
+        # aspect-ratio / area-ratio candidate filter in RenderStage (mirrors the real
+        # Mask2Former post-filter, which gates the network's 2D mask output per part).
+        aspects     = np.zeros((self.num_views))
+        area_ratios = np.zeros((self.num_views))
+        total_px    = float(self.res_width * self.res_height)
         raycast_dict = {"ref_mesh": O3DSceneObject(geom=self.app.target_mesh, T_gt=np.eye(4))}
         mesh_center = np.asarray(self.app.target_mesh.get_center())
         for view_index, view_dir in enumerate(self.view_sphere):
@@ -109,13 +118,40 @@ class RaycastStage(BaseStage):
             all_cam_pos.append(cam_pos_arr)
             self.point_counts[view_index] = len(o3d.geometry.PointCloud(o3d.utility.Vector3dVector(hit_points)).voxel_down_sample(self.ray_spacing).points)
 
+            # Single isolated part -> its 2D mask is exactly the set of hit pixels.
+            pidx = initial_render["pixel_idx"]
+            H, W = initial_render["res"]
+            if len(pidx):
+                rows = pidx // W
+                cols = pidx % W
+                h = int(rows.max() - rows.min()) + 1
+                w = int(cols.max() - cols.min()) + 1
+                aspects[view_index]     = max(h, w) / max(min(h, w), 1)
+                area_ratios[view_index] = len(pidx) / total_px
+
             if not self.app.headless:
                 self.app.update_progress((view_index + 1) / self.num_views)
         self.app.point_count_mean = self.point_count_mean = int(np.mean(self.point_counts))
         print(f"[RAYCAST] Point count per view: mean={self.point_count_mean}, min={np.min(self.point_counts)}, max={np.max(self.point_counts)}")
-        self.app.point_count_range = self.point_count_range = (int(np.min(self.point_counts * (1-self.point_count_tolerance))), 
+        self.app.point_count_range = self.point_count_range = (int(np.min(self.point_counts * (1-self.point_count_tolerance))),
                                                                int(np.max(self.point_counts * (1+self.point_count_tolerance))))
         print(f"[RAYCAST] Point count range with tolerance {self.point_count_tolerance*100}%: {self.point_count_range}")
+
+        # Auto-derived 2D candidate-filter ranges (tolerance widens [min, max] like the
+        # point-count range). aspect_ratio is distance-invariant; area_ratio is recorded
+        # at this camera distance and rescaled by (1/d^2) at filter time in RenderStage.
+        valid = area_ratios > 0
+        if valid.any():
+            a = aspects[valid]; ar = area_ratios[valid]
+            self.app.aspect_ratio_range = self.aspect_ratio_range = (
+                float(a.min() * (1 - self.point_count_tolerance)),
+                float(a.max() * (1 + self.point_count_tolerance)))
+            self.app.area_ratio_range = self.area_ratio_range = (
+                float(ar.min() * (1 - self.point_count_tolerance)),
+                float(ar.max() * (1 + self.point_count_tolerance)))
+            self.app.ref_cam_distance = self.camera_distance
+            print(f"[RAYCAST] Aspect ratio range (tol {self.point_count_tolerance*100}%): {self.app.aspect_ratio_range}")
+            print(f"[RAYCAST] Area ratio range  (tol {self.point_count_tolerance*100}%): {self.app.area_ratio_range}  @ cam_distance={self.camera_distance}")
         if not all_points:
             logging.warning(f"No points generated from mesh")
             return
