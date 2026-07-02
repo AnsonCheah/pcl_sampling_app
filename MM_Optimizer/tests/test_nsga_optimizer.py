@@ -32,7 +32,7 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 warnings.filterwarnings("ignore", category=optuna.exceptions.ExperimentalWarning)
 
 from MM_Optimizer.mesh_analysis    import analyze_mesh, load_reference_pcd
-from MM_Optimizer.optimizer        import MM_MODEL_ROOT
+from MM_Optimizer.mv_evaluator     import MM_MODEL_ROOT
 from MM_Optimizer.optimizer_utils  import list_synthetic_scenes
 from MM_Optimizer.optuna_optimizer import (
     OptunaOptimizer,

@@ -222,11 +222,12 @@ SCORE_WORST_CASE = 2.0   # = 1.0 + SCORE_COV_NORM; denominator for quality
 # Optuna settings  (used by optuna_optimizer.py)
 # ---------------------------------------------------------------------------
 
-# Fully joint TPE study (16D: all coarse + fine params in one study)
-OPTUNA_N_TRIALS_JOINT        = 150  # round 0: 30 grid warm-starts + 120 TPE-guided
-OPTUNA_N_TRIALS_JOINT_REFINE = 50   # round 1+: extend same study (TPE keeps density model)
+# Fully joint study (18D: all coarse + fine params in one study). The same search
+# space and warm-start seed are shared by all three samplers (NSGA-II / TPE / GP).
+OPTUNA_N_TRIALS_JOINT        = 150  # round 0: 30 grid warm-starts + 120 model-guided
+OPTUNA_N_TRIALS_JOINT_REFINE = 50   # round 1+: extend same study (sampler keeps its model)
 OPTUNA_N_ROUNDS              = 2    # 1 = single pass, no refinement round
-OPTUNA_N_STARTUP_JOINT       = 20   # startup trials before TPE uses joint kernel (16D needs ≥20)
+OPTUNA_N_STARTUP_JOINT       = 20   # startup random trials before TPE/GP use their model (18D needs ≥20)
 OPTUNA_SCORE_IMPROVE_MIN     = 0.01 # stop rounds early if improvement < this (normalised score)
 
 # Time guard: prune if running mean_time > best × RATIO.
@@ -237,31 +238,37 @@ OPTUNA_TIME_INITIAL_CAP = 5.0  # seconds; replaces float("inf") at study start
 # Coverage prune floor: prune if running_cov < this after 3+ scenes (step ≥ 2, 0-indexed).
 OPTUNA_COV_PRUNE_FLOOR = 0.10
 
-# NSGA-II sampler settings (replaces TPESampler)
+# NSGA-II sampler settings
 OPTUNA_NSGA_POPULATION_SIZE = 100   # 18D needs larger population than default 50
+# GP (Gaussian process) sampler reuses OPTUNA_N_STARTUP_JOINT for its n_startup_trials;
+# it needs no extra knobs (deterministic_objective=False, constraints_func wired in code).
 
-# Optuna integer/float bounds — derived from existing phase tables so
-# suggest_params functions never hard-code numbers.
-REFSTEP_BOUNDS           = (1, 20)   # MechMind hard limit: integer 1–20 for both refStep and referredStep
-OPTUNA_DISTQ_BOUNDS      = (min(PHASE2A_DISTQ_VALUES), max(PHASE2A_DISTQ_VALUES))
-OPTUNA_VOTERATIO_BOUNDS  = (min(PHASE2B_PARAMS["maxVoteRatio"]["candidates"]),
-                             max(PHASE2B_PARAMS["maxVoteRatio"]["candidates"]))
-OPTUNA_OUTPUTNUM_BOUNDS  = (min(PHASE2B_PARAMS["outputNum"]["candidates"]),
-                             max(PHASE2B_PARAMS["outputNum"]["candidates"]))
-OPTUNA_CONFTHRESH_BOUNDS = (min(PHASE3_PARAMS["confidenceThreshold"]),
-                             max(PHASE3_PARAMS["confidenceThreshold"]))
+# ---------------------------------------------------------------------------
+# OPTUNA SEARCH SPACE — single source of truth for all three samplers
+# ---------------------------------------------------------------------------
+# These bounds/choices define what suggest_params_joint() explores and are shared
+# verbatim by NSGA-II, TPE, and GP. They are declared explicitly here (no longer
+# derived from the deprecated CD PHASE* tables) so the Optuna space stands on its
+# own. Values intentionally match the historical CD-derived ranges; edit here to
+# change the joint search space without touching optimizer.py.
 
-# Optuna categorical / integer bounds — all derived from PHASE tables (no hardcoding).
-OPTUNA_ANGLQ_CHOICES     = PHASE2B_PARAMS["angleQuantification"]["candidates"]
-OPTUNA_ANGLETHRESH_BOUNDS = (min(PHASE2B_PARAMS["angleThreshold"]["candidates"]),
-                              max(PHASE2B_PARAMS["angleThreshold"]["candidates"]))
-OPTUNA_OPAPP_BOUNDS      = (int(min(PHASE3_PARAMS["operationApproach"])),
-                             int(max(PHASE3_PARAMS["operationApproach"])))
-OPTUNA_DEVCAP_BOUNDS     = (int(min(PHASE3_PARAMS["deviationCorrectionCapacity"])),
-                             int(max(PHASE3_PARAMS["deviationCorrectionCapacity"])))
-OPTUNA_OPAPP_CHOICES     = PHASE3_PARAMS["operationApproach"]
-OPTUNA_DEVCAP_CHOICES    = PHASE3_PARAMS["deviationCorrectionCapacity"]
-OPTUNA_SCORELV_CHOICES   = PHASE3_PARAMS["scoreLevel"]
+REFSTEP_BOUNDS            = (1, 20)          # MechMind hard limit: int 1–20 for refStep & referredStep
+OPTUNA_DISTQ_BOUNDS       = (0.5, 3.0)       # distQuantification factor (½×–3× around 1.0)
+OPTUNA_VOTERATIO_BOUNDS   = (0.5, 0.9)       # maxVoteRatio (Hough threshold)
+OPTUNA_OUTPUTNUM_BOUNDS   = (1, 3)           # coarse outputNum
+OPTUNA_CONFTHRESH_BOUNDS  = (0.0, 0.6)       # fine confidenceThreshold
 
-# 360.0 = disabled (MechVision convention); included so NSGA-II can choose "no rotation"
+OPTUNA_ANGLQ_CHOICES      = [180, 120, 90, 60]   # angleQuantification (Hough angle bins)
+OPTUNA_ANGLETHRESH_BOUNDS = (45, 135)            # edge-only axis angleThreshold
+OPTUNA_OPAPP_BOUNDS       = (0, 3)               # operationApproach (int)
+OPTUNA_DEVCAP_BOUNDS      = (0, 2)               # deviationCorrectionCapacity (int)
+OPTUNA_OPAPP_CHOICES      = [0.0, 1.0, 2.0, 3.0]
+OPTUNA_DEVCAP_CHOICES     = [0.0, 1.0, 2.0]
+OPTUNA_SCORELV_CHOICES    = [0.0, 1.0, 2.0, 3.0]
+
+# Multipliers for maxNumOfPointPairsPerFeature relative to the warm-start value.
+# (Optuna's own copy of PHASE2B_PAIRS_SCALES so the joint study owns its pairs grid.)
+OPTUNA_PAIRS_SCALES       = [0.25, 0.5, 1.0, 2.0, 4.0]
+
+# 360.0 = disabled (MechVision convention); included so a sampler can choose "no rotation"
 OPTUNA_ANGLE_STEP_SYM_CHOICES = [30.0, 45.0, 60.0, 90.0, 120.0, 180.0, 360.0]

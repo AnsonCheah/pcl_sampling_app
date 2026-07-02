@@ -85,7 +85,7 @@ def _build_params(scene_dir, H, use_nms=True):
     ply_path   = os.path.join(model_dir, f"{PART}_{model_type}.ply")
     geo_path   = os.path.join(model_dir, "geo_center.json")
 
-    scene  = EasyCreateStringList(strings=(scene_dir, "string", ""))
+    scene  = EasyCreateStringList(name="Scene_Path", strings=(scene_dir, "string", ""))
     coarse = CoarseMatchingV2(
         name              = "Coarse_Match_Synthetics",
         modelSelection    = (f"{PART}_{model_type}", "string", ""),

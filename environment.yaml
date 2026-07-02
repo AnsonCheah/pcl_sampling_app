@@ -25,6 +25,9 @@ dependencies:
       - rtree==1.4.1
       - grpcio==1.80.0
       - rich==14.3.3
+      # MechMind Vision Hub gRPC client — standalone private package (was vendored under mm_adapter/).
+      # Consume pinned by tag; for local co-development use `pip install -e ../mm-adapter`.
+      - mm-adapter @ git+https://github.com/AnsonCheah/mm-adapter.git@v0.1.0
       # Optional GPU acceleration for sensor/segment_instances.py (cupyx.scipy.ndimage).
       # Absent/unsupported GPU -> code falls back to SciPy/NumPy automatically.
       # cupy-cuda12x requires a CUDA 12.x driver (12.8+ for Blackwell / sm_120).
