@@ -38,24 +38,18 @@ class CropStage(BaseStage):
         self.btn_reset = self.register_widget(gui.Button("Reset Crop"), lambda: len(self.app.cropped_pcd.points)<len(self.app.raw_pcd.points))
         self.btn_reset.set_on_clicked(self.reset)
 
-        self.btn_next = self.register_widget(gui.Button("Next: Downsample"), lambda: self.app.cropped_pcd is not None)
-        self.btn_next.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value + 1)))
-        self.btn_back = self.register_widget(gui.Button("Back: Raycast"))
-        self.btn_back.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value - 1)))
-
         v.add_child(gui.Label("Crop Point Cloud"))
         v.add_child(gui.Label(""))
         v.add_child(gui.Label("Controls"))
         v.add_child(self.btn_box_select)
         v.add_child(self.delete_btn)
         v.add_child(self.btn_reset)
-        v.add_child(gui.Label(""))
-        v.add_child(gui.Label(""))
-        v.add_child(self.btn_back)
-        v.add_child(self.btn_next)
         print("loaded crop panel")
 
         return v
+
+    def next_enabled(self) -> bool:
+        return self.app.cropped_pcd is not None
 
     def _refresh_ui(self):
         if self.app.headless:
@@ -71,14 +65,15 @@ class CropStage(BaseStage):
         self.enable_widgets()
 
     def reset(self):
-        self.app.down_pcd = None
+        # CROP owns no app state; it restores cropped_pcd from raw_pcd (rather than
+        # nulling it) and clears strictly-downstream products.
         self.app.cropped_pcd = copy.deepcopy(self.app.raw_pcd)
-        self.app.output_pcd_path = None
-
+        self.app.clear_state_from(self.stage_key, inclusive=False)
         self._refresh_ui()
 
     def worker(self):
         """Deletes selected points from pointcloud"""
+        self.app.clear_state_from(self.stage_key, inclusive=False)
         mask = np.ones(len(self.app.cropped_pcd.points), dtype=bool)
         mask[self.selected_indices] = False
         self.app.cropped_pcd = mask_point_cloud(self.app.cropped_pcd, mask)

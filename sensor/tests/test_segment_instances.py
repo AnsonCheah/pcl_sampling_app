@@ -25,6 +25,9 @@ from sensor.segment_instances import (
     build_perturbed_masks,
     segment_point_cloud,
     segmentation_stats,
+    compute_2d_instance_metrics,
+    _build_perturbed_crops,
+    _tight_bbox_metrics,
     _apply_erosion_bias,
     _apply_dilation_into_background,
     _apply_boundary_noise,
@@ -511,6 +514,53 @@ def test_scaling_smoke():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  2D instance metrics (aspect ratio / area ratio candidate-filter inputs)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_tight_bbox_metrics_known_mask():
+    # 3-row x 6-col solid block embedded (with padding) in a larger frame.
+    arr = np.zeros((10, 12), dtype=bool)
+    arr[2:5, 3:9] = True            # height 3, width 6, area 18
+    area, h, w = _tight_bbox_metrics(arr)
+    _check("tight_bbox_area", area == 18, f"area={area}")
+    _check("tight_bbox_height", h == 3, f"h={h}")
+    _check("tight_bbox_width", w == 6, f"w={w}")
+    _check("tight_bbox_empty_is_zero", _tight_bbox_metrics(np.zeros((4, 4), bool)) == (0, 0, 0))
+
+
+def test_compute_2d_instance_metrics_ranges():
+    render, _ = make_multi_instance_render_dict(layout="grid")
+    crops, geom_img = _build_perturbed_crops(render, seed=0)
+    H, W = geom_img.shape
+    metrics = compute_2d_instance_metrics(crops, H, W)
+    _check("metrics_nonempty", len(metrics) > 0, f"n={len(metrics)}")
+    _check("metrics_keys_match_crops", set(metrics.keys()) <= set(crops.keys()))
+    for g, m in metrics.items():
+        _check(f"metrics_gid{g}_has_keys",
+               {"pixel_area", "aspect_ratio", "area_ratio"} <= set(m.keys()))
+        _check(f"metrics_gid{g}_aspect_ge_1", m["aspect_ratio"] >= 1.0,
+               f"aspect={m['aspect_ratio']:.3f}")
+        _check(f"metrics_gid{g}_area_ratio_in_unit", 0.0 < m["area_ratio"] <= 1.0,
+               f"area_ratio={m['area_ratio']:.5f}")
+
+
+def test_segment_point_cloud_return_metrics_aligns_with_masks():
+    render, keep = make_multi_instance_render_dict(layout="grid")
+    pts  = render["points"][keep]
+    pidx = render["pixel_idx"][keep]
+    masks, metrics = segment_point_cloud(render, pts, pidx, return_metrics=True, seed=0)
+    _check("return_metrics_is_tuple", isinstance(masks, dict) and isinstance(metrics, dict))
+    # Every instance with a metric is a real instance; pixel_area matches its 2D mask.
+    crops, geom_img = _build_perturbed_crops(render, seed=0)
+    H, W = geom_img.shape
+    for g, m in metrics.items():
+        expected_area = int(_tight_bbox_metrics(crops[g].arr)[0])
+        _check(f"return_metrics_gid{g}_area_matches_mask",
+               m["pixel_area"] == expected_area,
+               f"got={m['pixel_area']} expected={expected_area}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  Runner
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -543,6 +593,10 @@ if __name__ == "__main__":
         test_cpu_fallback_without_gpu,
         test_gpu_cpu_parity,
         test_scaling_smoke,
+        # 2D instance metrics
+        test_tight_bbox_metrics_known_mask,
+        test_compute_2d_instance_metrics_ranges,
+        test_segment_point_cloud_return_metrics_aligns_with_masks,
     ]
 
     print(f"\n{'='*60}")

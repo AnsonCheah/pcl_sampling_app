@@ -17,6 +17,10 @@ class DecomposeStage(BaseStage):
     ``app.convex_meshes`` is guaranteed populated before SYNTHETIC consumes it.
     """
 
+    downstream = {
+        "convex_meshes": lambda: [],
+    }
+
     def __init__(self, app):
         self.name = Stage.DECOMPOSE.name
         super().__init__(app)
@@ -30,12 +34,9 @@ class DecomposeStage(BaseStage):
                                                   enabled_if=lambda: self.app.target_mesh is not None)
         self.btn_decompose.set_on_clicked(self.start)
 
-        self.btn_back = self.register_widget(gui.Button("Back: Save"))
-        self.btn_back.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value - 1)))
-        # Only advance once decomposition has produced convex hulls.
-        self.btn_next = self.register_widget(gui.Button("Next: Synthetic Target"),
-                                            enabled_if=lambda: len(self.app.convex_meshes) > 0)
-        self.btn_next.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value + 1)))
+        self.btn_reset = self.register_widget(gui.Button("Clear Decomposition"),
+                                              enabled_if=lambda: len(self.app.convex_meshes) > 0)
+        self.btn_reset.set_on_clicked(self.reset)
 
         self.btn_restart = self.register_widget(gui.Button("Restart"))
         self.btn_restart.set_on_clicked(lambda: self.app._restart())
@@ -43,16 +44,16 @@ class DecomposeStage(BaseStage):
         v.add_child(gui.Label("Convex Decomposition"))
         v.add_child(gui.Label(""))
         v.add_child(self.btn_decompose)
+        v.add_child(self.btn_reset)
         v.add_child(gui.Label(""))
-        v.add_child(gui.Label(""))
-        v.add_child(gui.Label(""))
-        v.add_child(gui.Label(""))
-        v.add_child(self.btn_back)
-        v.add_child(self.btn_next)
         v.add_child(self.btn_restart)
 
         print("loaded decompose panel")
         return v
+
+    # Only advance once decomposition has produced convex hulls.
+    def next_enabled(self) -> bool:
+        return len(self.app.convex_meshes) > 0
 
     def _display_convex_meshes(self):
         """GUI helper: show each convex hull in a distinct HSV colour."""
@@ -78,7 +79,6 @@ class DecomposeStage(BaseStage):
             # On stage entry, before decomposition: show the original mesh.
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry(
                 "mesh", self.app.target_mesh, self.app.default_material))
-        self.app.main_thread(self.app._reframe)
         self.app.scene.force_redraw()
         self.enable_widgets()
 
@@ -86,8 +86,8 @@ class DecomposeStage(BaseStage):
         if self.app.target_mesh is None:
             print("[WARN] No mesh to decompose")
             return
+        self.app.clear_state_from(self.stage_key)
         self.app.update_progress(0.1, "Preparing mesh for decomposition...")
-        self.app.convex_meshes = []
         part_mesh = o3d_to_trimesh(self.app.target_mesh)
         verts = np.asarray(part_mesh.vertices)
         faces = np.asarray(part_mesh.faces)
@@ -109,6 +109,3 @@ class DecomposeStage(BaseStage):
                                      f"Building convex hulls ({i + 1}/{n})...")
         print(f"[DECOMPOSE] decomposed mesh into {len(self.app.convex_meshes)} convex hulls")
 
-    def reset(self):
-        self.app.convex_meshes = []
-        self._refresh_ui()

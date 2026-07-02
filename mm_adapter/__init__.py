@@ -1,1 +1,0 @@
-from mm_adapter.mm_adapter import MechVisionClient

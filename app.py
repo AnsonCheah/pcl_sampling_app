@@ -35,7 +35,8 @@ from stages.crop_stage import CropStage
 from stages.downsample_stage import DownsampleStage
 from stages.save_stage import SaveStage
 from stages.decompose_stage import DecomposeStage
-from stages.synthetic_stage import SyntheticStage
+from stages.scene_stage import SceneStage
+from stages.render_stage import RenderStage
 import threading
 import time
 from pathlib import Path
@@ -60,8 +61,13 @@ class MeshSamplingApp:
             Stage.DOWNSAMPLE: DownsampleStage(self),
             Stage.SAVE: SaveStage(self),
             Stage.DECOMPOSE: DecomposeStage(self),
-            Stage.SYNTHETIC: SyntheticStage(self),
+            Stage.SCENE: SceneStage(self),
+            Stage.RENDER: RenderStage(self),
         }
+        # Give each stage a back-reference to its own enum key so reset()/clear_state_from
+        # can locate it without a reverse lookup.
+        for st, inst in self.stages.items():
+            inst.stage_key = st
         if not self.headless:
             # === Scene widget ===
             self.window_width = 1440
@@ -97,6 +103,21 @@ class MeshSamplingApp:
                 stage_class.panel.visible = False
                 self.panel.add_child(stage_class.panel)
 
+            # === Unified Back/Next navigation (pinned to panel bottom) ===
+            # The buttons are declared once here, not per stage. set_stage drives their
+            # labels/visibility from pipeline order; the leading stretch pushes them down.
+            self._back_target = None
+            self._next_target = None
+            self.panel.add_stretch()
+            self.nav_panel = gui.Vert(0.25 * em)
+            self.btn_back = gui.Button("Back")
+            self.btn_back.set_on_clicked(self._go_back)
+            self.btn_next = gui.Button("Next")
+            self.btn_next.set_on_clicked(self._go_next)
+            self.nav_panel.add_child(self.btn_back)
+            self.nav_panel.add_child(self.btn_next)
+            self.panel.add_child(self.nav_panel)
+
             # === Progress Bar widget ===
             self.progress_panel = gui.Vert(0, gui.Margins(10, 10, 10, 10))
             self.progress_panel.visible = False
@@ -118,27 +139,28 @@ class MeshSamplingApp:
         self._restart()
 
     def _restart(self):
-        self.target_mesh = None
-        self.raw_pcd = None
-        self.down_pcd = None
-        self.down_pcd_surface = None
-        self.down_pcd_edge = None
-        self.visible_target_pcd = None
-        self.occluders_pcd = None
-        self.mesh_basename = None
-        self.convex_meshes = []
-        self.synthetic_targets = {}
-        self.synthetic_scenes = {}
-        self.feature_pcd = None
-        self.pcd_flat = None
-        self.output_pcd_path = None
-        self.geocenter = np.eye(4)
-        self.point_count_mean = None
-        self.point_count_range = None
+        # Single source of truth: every app.* pipeline attribute is declared in some
+        # stage's `downstream` map (see stages/*.py). reset_all_state() applies them all,
+        # so adding/removing state means editing one stage, never this method.
+        self.reset_all_state()
         self.stage = Stage.IMPORT_MESH
-        if not self.headless and Stage.SYNTHETIC in self.stages:
-            self.stages[Stage.SYNTHETIC].combobox_targets.clear_items()
         self.set_stage(Stage.IMPORT_MESH)
+
+    # ===============================
+    # State clearing (driven by per-stage `downstream` declarations)
+    # ===============================
+    def clear_state_from(self, stage: Stage, inclusive: bool = True):
+        """Reset the owned state of `stage` (when inclusive) and every later stage to
+        defaults, by strict pipeline order (Stage enum value)."""
+        start = stage.value if inclusive else stage.value + 1
+        for st, inst in self.stages.items():
+            if st.value >= start:
+                inst.clear_downstream()
+
+    def reset_all_state(self):
+        """Reset every stage's owned state to defaults."""
+        for inst in self.stages.values():
+            inst.clear_downstream()
 
     def set_stage(self, stage: Stage):
         self.stage = stage
@@ -153,6 +175,49 @@ class MeshSamplingApp:
         self.stages[stage]._refresh_ui()
         self.stages[stage].enable_widgets()
         self._update_title()
+
+    # ===============================
+    # Unified Back/Next navigation
+    # ===============================
+    @staticmethod
+    def _stage_label(stage: Stage) -> str:
+        """Human-readable button label derived from the stage enum name."""
+        return stage.name.replace("_", " ").title()
+
+    def _go_back(self):
+        if self._back_target is not None:
+            self.set_stage(self._back_target)
+
+    def _go_next(self):
+        if self._next_target is not None:
+            self.set_stage(self._next_target)
+
+    def _update_nav_buttons(self):
+        """Re-derive Back/Next labels, visibility and the Next-enabled state from the
+        current stage's position in the pipeline. Called on every enable_widgets pass."""
+        if self.headless:
+            return
+        order = list(self.stages.keys())          # insertion order == Stage enum order
+        idx = order.index(self.stage)
+
+        if idx > 0:
+            self._back_target = order[idx - 1]
+            self.btn_back.text = f"Back: {self._stage_label(self._back_target)}"
+            self.btn_back.visible = True
+        else:
+            self._back_target = None
+            self.btn_back.visible = False
+
+        if idx < len(order) - 1:
+            self._next_target = order[idx + 1]
+            self.btn_next.text = f"Next: {self._stage_label(self._next_target)}"
+            self.btn_next.visible = True
+            self.btn_next.enabled = bool(self.stages[self.stage].next_enabled())
+        else:
+            self._next_target = None
+            self.btn_next.visible = False
+
+        self.window.set_needs_layout()
 
     def _on_layout(self, layout_context):
         r = self.window.content_rect
@@ -175,8 +240,8 @@ class MeshSamplingApp:
         if self.target_mesh is None:
             return
         else:
-            if self.stage == Stage.SYNTHETIC:
-                mj_scene = self.stages[Stage.SYNTHETIC].mj_scene
+            if self.stage in (Stage.SCENE, Stage.RENDER) and self.mj_scene is not None:
+                mj_scene = self.mj_scene
                 look_at, cam_pos, up = mj_scene._get_camera_lookat()
                 bbox = mj_scene.bin_mesh.get_axis_aligned_bounding_box()
             else:
@@ -300,6 +365,7 @@ class MeshSamplingApp:
         # Block the button immediately; cleared in the worker's finally (done or failed).
         self.express_sampling_busy = True
         self.stages[Stage.IMPORT_MESH].enable_widgets()
+        self.stages[Stage.IMPORT_MESH].center_mesh()
         self._express_sampling_thread = threading.Thread(target=self._express_sampling_worker)
         self._express_sampling_thread.start()
 
@@ -309,7 +375,7 @@ class MeshSamplingApp:
             self.down_pcd=self.raw_pcd
             self.stages[Stage.DOWNSAMPLE].worker()
             self.stages[Stage.DOWNSAMPLE].recenter_mesh_pcd()
-            self.set_stage(Stage.SAVE)
+            self.main_thread(lambda: self.set_stage(Stage.SAVE))
             self.hide_progress()
         finally:
             self.express_sampling_busy = False
@@ -338,6 +404,7 @@ class MeshSamplingApp:
                 print(f"[INFO] Processing {stl_path.name}")
                 self.stages[Stage.IMPORT_MESH].file_path = stl_path
                 self.stages[Stage.IMPORT_MESH].worker()
+                self.stages[Stage.IMPORT_MESH].center_mesh()
                 self._express_sampling_worker()
                 pointcloud_to_ply(self.down_pcd, str(dst_dir / (stl_path.stem + ".ply")))
 
@@ -456,19 +523,21 @@ def run_sampling(app, express):
 
 
 def generate_one_scene(app, scene_label):
-    synth = app.stages[Stage.SYNTHETIC]
+    scene = app.stages[Stage.SCENE]
+    render = app.stages[Stage.RENDER]
     rp(f"[bold]Generating {scene_label}...[/bold]")
     t0 = time.time()
-    synth._run_worker()
+    scene._run_worker()      # build + settle the physical scene -> app.o3d_scene / app.mj_scene
+    render._run_worker()     # sensor sim + segmentation -> app.synthetic_targets
     rp(f"  {len(app.synthetic_targets)} valid targets in {time.time() - t0:.1f}s")
-    synth.save_synthetic_targets()
+    render.save_synthetic_targets()
 
 
 def run_synthetic(app, express):
-    synth = app.stages[Stage.SYNTHETIC]
-    # Required so save_synthetic_targets() -> SaveStage.worker takes the SYNTHETIC
+    scene = app.stages[Stage.SCENE]
+    # Required so save_synthetic_targets() -> SaveStage.worker takes the RENDER
     # branch and writes reference_cloud.ply into each scene directory.
-    app.set_stage(Stage.SYNTHETIC)
+    app.set_stage(Stage.RENDER)
 
     banner("Synthetic scene generation")
     # Arrangement is asked in BOTH express and custom modes.
@@ -482,16 +551,32 @@ def run_synthetic(app, express):
         part_mesh = o3d_to_trimesh(app.target_mesh)
         poses = MujocoBinScene.get_stable_poses(part_mesh)
         rp(f"[cyan]Found {len(poses)} stable pose(s); generating one scene each.[/cyan]")
-        synth.arrangement = "structured"
+        scene.arrangement = "structured"
+        structure = ask_choice(
+            "Structure", ["none", "partition", "tray"], "none",
+            hint="none = bare grid (static); partition = cardboard egg-crate dividers; "
+                 "tray = injection-molded pockets tracing the part footprint. partition/tray settle "
+                 "the parts under gravity.")
+        scene.structure_type = structure
+        if structure != "none":
+            pct = ask(
+                "Structure height (% of part height)", scene.structure_height_pct, int,
+                hint="partition = divider height; tray = pocket depth. 50-100% of part height "
+                     "(higher = more enclosed / less exposed).")
+            scene.structure_height_pct = max(50, min(100, pct))
+            scene.clearance_mode = ask_choice(
+                "Fit clearance", ["snug", "medium", "loose"], scene.clearance_mode,
+                hint="part-to-wall running clearance; snug (~1 mm) holds tighter, "
+                     "loose (~5% of footprint) settles more easily.")
         for i, (R_stable, prob) in enumerate(poses):
-            synth.stable_pose_R = R_stable
+            scene.stable_pose_R = R_stable
             generate_one_scene(app, f"structured scene {i + 1}/{len(poses)} (p={prob:.2f})")
-        synth.stable_pose_R = None
+        scene.stable_pose_R = None
         return
 
     # arrangement == "random"
-    synth.arrangement = "random"
-    synth.stable_pose_R = None
+    scene.arrangement = "random"
+    scene.stable_pose_R = None
     n_scenes = ask(
         "Number of scenes to generate", 1, int,
         hint="Each scene is a full physics sim + sensor-noise render (can take minutes). "
@@ -500,33 +585,33 @@ def run_synthetic(app, express):
 
     if express:
         if n_scenes == 1:
-            synth.generate_mode = "fill_rate"
-            synth.fill_rate = 0.6
+            scene.generate_mode = "fill_rate"
+            scene.fill_rate = 0.6
             generate_one_scene(app, "scene 1/1 (fill 60%)")
         else:
             # Sweep fill rate 20% -> 100% across the scenes.
             for i, fr in enumerate(np.linspace(0.2, 1.0, n_scenes)):
-                synth.generate_mode = "fill_rate"
-                synth.fill_rate = float(fr)
+                scene.generate_mode = "fill_rate"
+                scene.fill_rate = float(fr)
                 generate_one_scene(app, f"scene {i + 1}/{n_scenes} (fill {fr:.0%})")
     else:
         # Custom: prompt per scene.
         for i in range(n_scenes):
             banner(f"Scene {i + 1}/{n_scenes} settings")
             mode = ask_choice(
-                "Generate mode", ["fill_rate", "count"], synth.generate_mode,
+                "Generate mode", ["fill_rate", "count"], scene.generate_mode,
                 hint="fill_rate = auto-size the part count to a target bin fill %; "
                      "count = drop an exact number of parts.")
-            synth.generate_mode = mode
+            scene.generate_mode = mode
             if mode == "fill_rate":
                 pct = ask(
-                    "Fill rate (%)", int(round(synth.fill_rate * 100)), int,
+                    "Fill rate (%)", int(round(scene.fill_rate * 100)), int,
                     hint="Target volumetric fill of the bin; higher = more parts, "
                          "more clutter and occlusion.")
-                synth.fill_rate = max(0.0, min(1.0, pct / 100.0))
+                scene.fill_rate = max(0.0, min(1.0, pct / 100.0))
             else:
-                synth.num_targets = ask(
-                    "Part count", synth.num_targets, int,
+                scene.num_targets = ask(
+                    "Part count", scene.num_targets, int,
                     hint="Exact number of parts to drop into the bin.")
             generate_one_scene(app, f"scene {i + 1}/{n_scenes}")
 
@@ -554,6 +639,12 @@ def run_headless(mesh_arg=None):
         rp("[red]Failed to import mesh. Aborting.[/red]")
         return
     rp(f"[green]Imported {app.mesh_basename}[/green]")
+
+    # 1b. Centering
+    if ask_yes_no("Center mesh at origin before raycasting?", default=True,
+                  hint="Translates the mesh centroid to the world origin. "
+                       "Recommended for consistent view-sphere coverage."):
+        app.stages[Stage.IMPORT_MESH].center_mesh()
 
     # 2. Top-level mode
     mode = ask_choice(

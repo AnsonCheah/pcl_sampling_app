@@ -81,7 +81,7 @@ def realistic_part_count(part_mesh, requested: int, bin_dim=(0.76, 0.585, 0.25, 
                          fill: float = 0.6) -> int:
     """
     Cap a requested part count to a physically realistic fill for the part/bin, mirroring the
-    shape-aware packing heuristic in SyntheticStage._auto_part_count. This keeps the big-part
+    shape-aware packing heuristic in SceneStage._auto_part_count. This keeps the big-part
     drop test from pathologically over-filling the bin (e.g. 10 large cubes → unstable tower
     that spills), while leaving room for many thin parts. Returns min(requested, auto_count).
     """

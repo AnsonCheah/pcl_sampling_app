@@ -66,11 +66,12 @@ app.stages[Stage.DOWNSAMPLE].use_adaptive = True
 app._express_sampling_worker()
 
 # Default: auto-size part count to ~60% volumetric fill of the bin.
-app.stages[Stage.SYNTHETIC].fill_rate = 0.6
+app.stages[Stage.SCENE].fill_rate = 0.6
 # To force an exact count instead:
-#   app.stages[Stage.SYNTHETIC].generate_mode = "count"
-#   app.stages[Stage.SYNTHETIC].num_targets = 6
-app.stages[Stage.SYNTHETIC]._run_worker()
+#   app.stages[Stage.SCENE].generate_mode = "count"
+#   app.stages[Stage.SCENE].num_targets = 6
+app.stages[Stage.SCENE]._run_worker()     # build + settle physical scene
+app.stages[Stage.RENDER]._run_worker()    # sensor sim + segmentation -> synthetic targets
 ```
 
 See [headless_app_example.py](headless_app_example.py) for a runnable example.

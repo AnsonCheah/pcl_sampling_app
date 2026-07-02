@@ -8,6 +8,15 @@ from geometry.math_utils import find_cdf_knee
 import copy
 
 class DownsampleStage(BaseStage):
+    downstream = {
+        "down_pcd": lambda: None,
+        "down_pcd_surface": lambda: None,
+        "down_pcd_edge": lambda: None,
+        "feature_pcd": lambda: None,
+        "pcd_flat": lambda: None,
+        "geocenter": lambda: np.eye(4),
+    }
+
     def __init__(self, app):
         self.name = Stage.DOWNSAMPLE.name
         self.use_adaptive = False
@@ -31,10 +40,6 @@ class DownsampleStage(BaseStage):
 
         self.btn_reset = self.register_widget(gui.Button("Restart Downsample"), lambda: self.app.down_pcd is not None)
         self.btn_reset.set_on_clicked(self.reset)
-        self.btn_next = self.register_widget(gui.Button("Next: Save"), lambda: self.app.down_pcd is not None)
-        self.btn_next.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value + 1)))
-        self.btn_back = self.register_widget(gui.Button("Back: Crop"))
-        self.btn_back.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value - 1)))
 
         self.radio_cloud = self.register_widget(
             gui.RadioButton(gui.RadioButton.HORIZ),
@@ -53,12 +58,12 @@ class DownsampleStage(BaseStage):
         v.add_child(gui.Label(""))
         v.add_child(gui.Label("Show Cloud:"))
         v.add_child(self.radio_cloud)
-        v.add_child(gui.Label(""))
-        v.add_child(self.btn_back)
-        v.add_child(self.btn_next)
         print("loaded downsample panel")
 
         return v
+
+    def next_enabled(self) -> bool:
+        return self.app.down_pcd is not None
 
     def _on_cloud_radio_changed(self, idx):
         self.cloud_radio_idx = idx
@@ -82,15 +87,9 @@ class DownsampleStage(BaseStage):
         elif self.app.cropped_pcd is not None:
             self.app.main_thread(lambda: self.app._clear_scene())
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry("cropped_pcd", self.app.cropped_pcd, self.app.default_point_material))
-        self.app.scene.force_redraw()
-        self.enable_widgets()
+        self.app.main_thread(lambda: self.app.scene.force_redraw())
+        self.app.main_thread(self.enable_widgets)
 
-    def reset(self):
-        self.app.down_pcd = None
-        self.app.down_pcd_surface = None
-        self.app.down_pcd_edge = None
-        self.app.output_pcd_path = None
-        self._refresh_ui()
 
     def worker(self):
         if not self.app.headless:
@@ -99,6 +98,7 @@ class DownsampleStage(BaseStage):
         if self.app.cropped_pcd is None:
             print("cropped pcd is none")
             return
+        self.app.clear_state_from(self.stage_key)
 
         bbox = self.app.cropped_pcd.get_minimal_oriented_bounding_box()
         self.voxel_size = np.round(np.clip((np.asarray(bbox.volume()) / 3), 0.001, 0.005), 4)
@@ -180,4 +180,5 @@ class DownsampleStage(BaseStage):
             mesh.transform(T)
         self.app.geocenter = np.round(pcd_geocenter(self.app.down_pcd_surface), decimals=5)
         print("recentered mesh and pointcloud")
+        self.app.main_thread(self.app._reframe)
         self._refresh_ui()

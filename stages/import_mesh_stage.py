@@ -8,6 +8,11 @@ from stages.stage_base import BaseStage
 from enums import Stage
 
 class ImportMeshStage(BaseStage):
+    downstream = {
+        "target_mesh": lambda: None,
+        "mesh_basename": lambda: None,
+    }
+
     def __init__(self, app):
         self.name = Stage.IMPORT_MESH.name
         self.file_path = None  # may be pre-set by caller to skip the dialog
@@ -20,9 +25,11 @@ class ImportMeshStage(BaseStage):
         title = gui.Label("Import Mesh")
         
         self.btn_load = self.register_widget(gui.Button("Load STL"))
-        self.btn_load.set_on_clicked(lambda: self.start(run_on_main=True))
+        self.btn_load.set_on_clicked(self._interactive_load)
         self.btn_reset = self.register_widget(gui.Button("Clear Mesh"), enabled_if=lambda: self.app.target_mesh is not None)
         self.btn_reset.set_on_clicked(self.reset)
+        self.btn_center = self.register_widget(gui.Button("Center Mesh"), enabled_if=lambda: self.app.target_mesh is not None)
+        self.btn_center.set_on_clicked(self.center_mesh)
 
         self.btn_express = self.register_widget(gui.Button("Express Sampling"), enabled_if=lambda: self.app.target_mesh is not None and not self.app.express_sampling_busy)
         self.btn_express.set_on_clicked(self.app.start_express_sampling)
@@ -30,22 +37,20 @@ class ImportMeshStage(BaseStage):
         self.btn_batch = self.register_widget(gui.Button("Batch Sampling"))
         self.btn_batch.set_on_clicked(self.app.start_batch_sampling)
 
-        self.btn_next = self.register_widget(gui.Button("Next: Raycast"), enabled_if=lambda: self.app.target_mesh is not None)
-        self.btn_next.set_on_clicked(lambda: self.app.set_stage(Stage.RAYCAST))
-
         v.add_child(title)
         v.add_child(gui.Label(""))
         v.add_child(self.btn_load)
         v.add_child(self.btn_reset)
+        v.add_child(self.btn_center)
         v.add_child(gui.Label(""))
         v.add_child(self.btn_express)
         v.add_child(self.btn_batch)
-        # v.add_child(gui.Label(""))
-        # v.add_child(gui.Label(""))
-        v.add_child(self.btn_next)
 
         print(f"[Import Mesh] panel loaded")
         return v
+
+    def next_enabled(self) -> bool:
+        return self.app.target_mesh is not None
 
     def _refresh_ui(self):
         """Refresh scene and button states"""
@@ -67,22 +72,13 @@ class ImportMeshStage(BaseStage):
         self.app.scene.force_redraw()
         self.enable_widgets()
 
-    def reset(self):
-        """Clear mesh-related data"""
-        # self.app.main_thread(self.app._clear_scene)
-        self.app.target_mesh = None
-        self.app.raw_pcd = None
-        self.app.cropped_pcd = None
-        self.app.down_pcd = None
-        self.app.output_pcd_path = None
-        self.app.mesh_basename = None
-        self.app.convex_meshes = []
-
-        self._refresh_ui()
-
     # ===============================
     # Worker
     # ===============================
+    def _interactive_load(self):
+        self.file_path = None
+        self.start(run_on_main=True)
+
     def _on_worker_start(self):
         if not self.file_path:
             if self.app.headless:
@@ -104,6 +100,8 @@ class ImportMeshStage(BaseStage):
             print("[WARN] Empty mesh")
             return
 
+        self.app.clear_state_from(self.stage_key)  # new mesh is valid; wipe all stale downstream state
+
         bbox = mesh.get_axis_aligned_bounding_box()
         extent_max = bbox.get_extent().max()
         if 5.0 < extent_max < 5000.0:
@@ -111,19 +109,29 @@ class ImportMeshStage(BaseStage):
             mesh.scale(0.001, center=(0, 0, 0))
 
         mesh.compute_vertex_normals()
-        mesh.translate(-mesh.get_center())
         self.app.target_mesh = mesh
         self.app.mesh_basename = self.file_path.stem
-
-        # self.app.main_thread(self.app._clear_scene)
-
-        self.app.raw_pcd = None
-        self.app.cropped_pcd = None
-        self.app.down_pcd = None
-        # Convex decomposition now runs in DecomposeStage (between SAVE and SYNTHETIC),
-        # so convex_meshes is rebuilt fresh there. Clear any stale hulls here.
-        self.app.convex_meshes = []
         print(f"mesh loaded")
+
+    def center_mesh(self):
+        """Translate mesh (and all downstream clouds) so mesh centroid is at world origin."""
+        if self.app.target_mesh is None:
+            return
+        center = np.asarray(self.app.target_mesh.get_center())
+        if np.linalg.norm(center) < 1e-9:
+            return
+        offset = -center
+        self.app.target_mesh.translate(offset)
+        seen = set()
+        for attr in ("raw_pcd", "cropped_pcd", "down_pcd", "down_pcd_surface",
+                     "down_pcd_edge", "feature_pcd", "pcd_flat"):
+            obj = getattr(self.app, attr, None)
+            if obj is not None and id(obj) not in seen:
+                obj.translate(offset)
+                seen.add(id(obj))
+        for mesh in self.app.convex_meshes:
+            mesh.translate(offset)
+        self._refresh_ui()
 
     def _open_stl_dialog(self):
         Tk().withdraw()

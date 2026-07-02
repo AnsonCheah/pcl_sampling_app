@@ -31,12 +31,15 @@ _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+import warnings
+
 import optuna
 optuna.logging.set_verbosity(optuna.logging.WARNING)
+warnings.filterwarnings("ignore", category=optuna.exceptions.ExperimentalWarning)
 
 from mm_adapter.mm_adapter        import MechVisionClient
 from MM_Optimizer.mesh_analysis   import analyze_mesh, load_reference_pcd
-from MM_Optimizer.optimizer       import PROJ_NAME, MM_MODEL_ROOT
+from MM_Optimizer.mv_evaluator    import PROJ_NAME, MM_MODEL_ROOT
 from MM_Optimizer.optimizer_utils import list_synthetic_scenes
 from MM_Optimizer.mesh_analysis import WarmStart
 from MM_Optimizer.optuna_optimizer import (
@@ -374,6 +377,24 @@ def test_sampler_factory_tpe():
     log.info("PASS: test_sampler_factory_tpe")
 
 
+def test_sampler_factory_gp():
+    """sampler='gp' → GPSampler with the referredStep constraint hooked up (MOO parity)."""
+    opt = _make_optimizer_for_factory("gp")
+    try:
+        study = opt._create_study_joint("smoke_gp")
+        assert isinstance(study.sampler, optuna.samplers.GPSampler), \
+            f"expected GPSampler, got {type(study.sampler).__name__}"
+        assert study.sampler._constraints_func is _referredstep_constraint, \
+            "GP sampler must have _referredstep_constraint wired (parity with NSGA-II)"
+        assert study.directions == [
+            optuna.study.StudyDirection.MAXIMIZE,
+            optuna.study.StudyDirection.MINIMIZE,
+        ]
+    finally:
+        opt.cleanup()
+    log.info("PASS: test_sampler_factory_gp")
+
+
 def test_sampler_invalid():
     """Unknown sampler name → ValueError at construction time."""
     try:
@@ -445,6 +466,69 @@ def test_dry_run_joint_study():
     finally:
         SC.M_FULL  = orig_full
         SC.M_SMALL = orig_small
+        opt.cleanup()
+
+
+def test_dry_run_gp_study():
+    """GP-sampler joint study in dry_run — zero MV calls, result not None, study populated.
+
+    Requires torch (GPSampler backend). Kept small (GP is O(n^3) in trials).
+    """
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        log.warning("SKIP test_dry_run_gp_study — torch not installed (GPSampler needs it)")
+        return
+    if not os.path.exists(MODEL_PATH):
+        log.warning(f"SKIP test_dry_run_gp_study — model not found: {MODEL_PATH}")
+        return
+    groups = list_synthetic_scenes(SCENES_DIR)
+    if not groups:
+        log.warning(f"SKIP test_dry_run_gp_study — no scenes under: {SCENES_DIR}")
+        return
+
+    pcd = load_reference_pcd(MODEL_PATH)
+    ws  = analyze_mesh(pcd)
+
+    orig_full, orig_small = SC.M_FULL, SC.M_SMALL
+    orig_startup = SC.OPTUNA_N_STARTUP_JOINT
+    SC.M_FULL  = 3
+    SC.M_SMALL = 2
+    SC.OPTUNA_N_STARTUP_JOINT = 5   # let the GP model kick in within the small budget
+    try:
+        opt = OptunaOptimizer(
+            part_name      = PART,
+            client         = None,
+            project_id     = -1,
+            scene_groups   = groups,
+            warm_start     = ws,
+            cache          = None,
+            dry_run        = True,
+            n_trials_joint = 10,
+            n_rounds       = 1,
+            seed           = 0,
+            storage_path   = None,
+            sampler        = "gp",
+        )
+        result = opt.run()
+
+        assert result is not None,    "GP dry run must return an EvalResult"
+        assert result.coverage  >= 0.0
+        assert opt.opt._n_evals == 0, f"dry_run: zero MV calls expected, got {opt.opt._n_evals}"
+        assert opt._study is not None
+        assert isinstance(opt._study.sampler, optuna.samplers.GPSampler)
+
+        n_complete = sum(1 for t in opt._study.trials
+                         if t.state == optuna.trial.TrialState.COMPLETE)
+        assert n_complete >= 1, "GP joint study has no complete trials"
+
+        log.info(f"  GP dry run: complete={n_complete}  cov={result.coverage:.2f}  "
+                 f"time={result.mean_time:.3f}s")
+        log.info("PASS: test_dry_run_gp_study")
+    finally:
+        SC.M_FULL  = orig_full
+        SC.M_SMALL = orig_small
+        SC.OPTUNA_N_STARTUP_JOINT = orig_startup
         opt.cleanup()
 
 
@@ -585,10 +669,12 @@ if __name__ == "__main__":
     print("\n--- Sampler dispatch ---")
     test_sampler_factory_nsgaii()
     test_sampler_factory_tpe()
+    test_sampler_factory_gp()
     test_sampler_invalid()
 
     print("\n--- Dry-run integration tests ---")
     test_dry_run_joint_study()
+    test_dry_run_gp_study()
     test_multi_round_early_stop()
 
     if args.live:

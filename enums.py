@@ -7,7 +7,8 @@ class Stage(Enum):
     DOWNSAMPLE = 3
     SAVE = 4
     DECOMPOSE = 5
-    SYNTHETIC = 6
+    SCENE = 6
+    RENDER = 7
 
 class ToolMode(Enum):
     NONE = 0

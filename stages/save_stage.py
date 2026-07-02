@@ -10,6 +10,10 @@ from scipy.spatial.transform import Rotation as R
 _IDENTITY_POSE = [0, 0, 0, 1, 0, 0, 0]
 
 class SaveStage(BaseStage):
+    downstream = {
+        "output_pcd_path": lambda: None,
+    }
+
     def __init__(self, app):
         self.name = Stage.SAVE.name
         super().__init__(app)
@@ -22,11 +26,6 @@ class SaveStage(BaseStage):
         self.btn_save = self.register_widget(gui.Button("Export Point Cloud"))
         self.btn_save.set_on_clicked(self.start)
 
-        self.btn_next = self.register_widget(gui.Button("Next: Decompose"))
-        self.btn_next.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value + 1)))
-        self.btn_back = self.register_widget(gui.Button("Back: Downsample"))
-        self.btn_back.set_on_clicked(lambda: self.app.set_stage(Stage(self.app.stage.value - 1)))
-
         self.btn_restart = self.register_widget(gui.Button("Restart"))
         self.btn_restart.set_on_clicked(lambda: self.app._restart())
 
@@ -34,12 +33,6 @@ class SaveStage(BaseStage):
         v.add_child(gui.Label(""))
         v.add_child(self.btn_save)
         v.add_child(gui.Label(""))
-        v.add_child(gui.Label(""))
-        v.add_child(gui.Label(""))
-        v.add_child(gui.Label(""))
-        v.add_child(gui.Label(""))
-        v.add_child(self.btn_back)
-        v.add_child(self.btn_next)
         v.add_child(self.btn_restart)
 
         print("loaded save panel")
@@ -121,9 +114,9 @@ class SaveStage(BaseStage):
 
                 self.app.output_pcd_path = base_path / f"{stem}_surface" / f"{stem}_surface.ply"
 
-            elif self.app.stage == Stage.SYNTHETIC:
+            elif self.app.stage == Stage.RENDER:
                 if path is None:
-                    print(f"[SAVE] worker: path is not provided in synthetic stage.")
+                    print(f"[SAVE] worker: path is not provided in render stage.")
                 pcd_path = path / "reference_cloud.ply"
 
                 center_quat = R.from_matrix(self.app.geocenter[:3, :3]).as_quat()
@@ -142,6 +135,3 @@ class SaveStage(BaseStage):
         except Exception as e:
             print(f"[ERROR] Failed to save PLY: {e}")
             return
-
-    def reset(self):
-        pass

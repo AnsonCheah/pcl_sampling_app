@@ -1,8 +1,14 @@
 """
-optuna_optimizer.py — Fully Joint NSGA-II optimizer for MechVision pose estimation
+optuna_optimizer.py — Fully Joint Optuna optimizer for MechVision pose estimation
 ------------------------------------------------------------------------------------
 Replaces all three staged studies (Stage 1a/1b/2) with a single joint study covering
-all 16–18 coarse+fine parameters at once using multi-objective NSGA-II.
+all 16–18 coarse+fine parameters at once using multi-objective Optuna. Three samplers
+share the same search space and warm-start seed: NSGA-II (default), TPE, and GP
+(Gaussian process). Select via --sampler / the `sampler` constructor arg.
+
+The MechVision evaluation harness (scene sampling, config evaluation, Phase-1 regime
+gate, Phase-4 symmetry, export) is provided by MVEvaluator in mv_evaluator.py; this
+module owns only the joint-study sampler orchestration.
 
 Architecture
 ------------
@@ -62,7 +68,7 @@ for _p in [_ROOT, _DIR]:
 from mm_adapter.mm_adapter import MechVisionClient
 from MM_Optimizer.eval_cache    import EvalCache
 from MM_Optimizer.mesh_analysis import analyze_mesh, load_reference_pcd
-from MM_Optimizer.optimizer     import (Optimizer, EvalResult,
+from MM_Optimizer.mv_evaluator  import (MVEvaluator, EvalResult,
                                         PROJ_NAME, MM_MODEL_ROOT,
                                         RESULTS_DIR, ENABLE_CACHE)
 from MM_Optimizer.optimizer_utils import list_synthetic_scenes
@@ -387,7 +393,7 @@ def _select_pareto_winner(study: optuna.Study) -> optuna.trial.FrozenTrial:
 # OptunaOptimizer
 # ─────────────────────────────────────────────────────────────────────────────
 
-SAMPLER_CHOICES = ("nsgaii", "tpe")
+SAMPLER_CHOICES = ("nsgaii", "tpe", "gp")
 
 
 class OptunaOptimizer:
@@ -411,11 +417,15 @@ class OptunaOptimizer:
     storage_path   : SQLite DB prefix for crash-resume, e.g. "results/optuna".
                      DB created as {prefix}_{part}_joint.db.
                      None = in-memory study (no persistence).
-    sampler        : Joint-study sampler — "nsgaii" (default) or "tpe".
-                     Both samplers run multi-objective (coverage, mean_time).
+    sampler        : Joint-study sampler — "nsgaii" (default), "tpe", or "gp".
+                     All three run multi-objective (coverage, mean_time) over the
+                     same suggest_params_joint search space and warm-start seed.
                      "nsgaii" enforces referredStep ≤ refStep via constraints_func;
                      "tpe" uses multivariate=True, group=True to handle the
-                     conditional edge-only params.
+                     conditional edge-only params;
+                     "gp" (Gaussian process) also enforces the referredStep
+                     constraint via constraints_func — strong in the low-trial
+                     regime but requires torch (CPU build is sufficient).
     """
 
     def __init__(
@@ -439,7 +449,7 @@ class OptunaOptimizer:
             raise ValueError(
                 f"sampler={sampler!r} not in {SAMPLER_CHOICES}")
         self._sampler = sampler
-        self.opt = Optimizer(
+        self.opt = MVEvaluator(
             part_name    = part_name,
             client       = client,
             project_id   = project_id,
@@ -460,7 +470,7 @@ class OptunaOptimizer:
         warm_pairs = ws.maxNumOfPointPairsPerFeature
         self._pairs_candidates: List[int] = sorted(set(
             max(1, min(10000, int(warm_pairs * s)))
-            for s in SC.PHASE2B_PAIRS_SCALES
+            for s in SC.OPTUNA_PAIRS_SCALES
         ))
         self._voxel_bounds: Tuple[float, float, float, float] = (
             max(0.1, ws.minVoxelLength_mm * 0.2),
@@ -536,12 +546,24 @@ class OptunaOptimizer:
                 n_startup_trials=SC.OPTUNA_N_STARTUP_JOINT,
                 seed=self._seed,
             )
+        elif self._sampler == "gp":
+            # Gaussian-process sampler at full parity with NSGA-II: constrained
+            # multi-objective (coverage, mean_time). GPSampler enforces
+            # referredStep ≤ refStep via the same constraints_func + objective guard.
+            # deterministic_objective=False: the objective is stochastic (random
+            # scene sampling + MechVision timing jitter). Requires torch (CPU is fine).
+            sampler = optuna.samplers.GPSampler(
+                seed=self._seed,
+                n_startup_trials=SC.OPTUNA_N_STARTUP_JOINT,
+                deterministic_objective=False,
+                constraints_func=_referredstep_constraint,
+            )
         else:
             raise ValueError(f"Unknown sampler: {self._sampler!r}")
         # trial.report/should_prune are not supported in multi-objective mode;
         # pruning is handled explicitly via time guard + coverage floor in _objective_joint.
-        # NSGA-II enforces referredStep ≤ refStep via constraints_func + objective guard;
-        # TPE ignores the constraint_violation user-attr (it is harmless metadata).
+        # NSGA-II and GP enforce referredStep ≤ refStep via constraints_func + objective
+        # guard; TPE ignores the constraint_violation user-attr (it is harmless metadata).
         storage = None
         if self._storage_path and storage_suffix:
             storage = f"sqlite:///{self._storage_path}{storage_suffix}.db"
@@ -793,7 +815,8 @@ class OptunaOptimizer:
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="OptunaOptimizer — fully joint multivariate TPE for MechVision")
+        description="OptunaOptimizer — fully joint MechVision tuning "
+                    "(NSGA-II / TPE / GP samplers)")
     p.add_argument("--part",           required=True)
     p.add_argument("--scenes_dir",     default=None)
     p.add_argument("--n_trials_joint", type=int, default=None,
