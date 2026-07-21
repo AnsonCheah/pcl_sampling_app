@@ -36,16 +36,30 @@ def o3d_display(geometries:list, width:int=1280, height:int=720, dynamic_color:b
     Display a list of Open3D geometries with a black background.
 
     Args:
-        geometries (list): List of open3d.geometry objects.
+        geometries (list): List of open3d.geometry objects, OR a list of such
+            lists (groups) — e.g. two hull sets being compared side by side.
         width (int): Window width.
         height (int): Window height.
+        dynamic_color (bool): Paint every geometry a distinct HSV colour. Each
+            group gets its own full [0, 1) hue wheel, so a group painted in a
+            single dynamic_color=True call as part of a bigger concatenated
+            list would otherwise only get a contiguous *slice* of the wheel
+            (proportional to its size) rather than the full rainbow — and a
+            slice landing in the perceptually-compressed blue/magenta region
+            reads as "all the same colour" even though every item did get a
+            unique hue. Passing groups keeps every group fully distinct
+            regardless of its size.
     """
+    grouped = bool(geometries) and isinstance(geometries[0], (list, tuple))
+    groups = geometries if grouped else [geometries]
+
     vis = o3d.visualization.Visualizer()
     vis.create_window(width=width, height=height)
     frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.05)
     vis.add_geometry(frame)
-    for g in geometries:
-        vis.add_geometry(g)
+    for group in groups:
+        for g in group:
+            vis.add_geometry(g)
 
     render_opt = vis.get_render_option()
     render_opt.background_color = [0, 0, 0]  # black background
@@ -56,10 +70,10 @@ def o3d_display(geometries:list, width:int=1280, height:int=720, dynamic_color:b
 
     if dynamic_color:
         saturation, value = 0.4, 0.9
-        hues = np.linspace(0, 1, len(geometries), endpoint=False)
-        colors = [colorsys.hsv_to_rgb(h, saturation, value) for h in hues]
-        for g, c in zip(geometries, colors):
-            g.paint_uniform_color(c)
+        for group in groups:
+            hues = np.linspace(0, 1, len(group), endpoint=False)
+            for g, h in zip(group, hues):
+                g.paint_uniform_color(colorsys.hsv_to_rgb(h, saturation, value))
 
     return vis
 

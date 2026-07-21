@@ -407,6 +407,74 @@ def test_sampler_invalid():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Pruning policy — absolute time cap, no competitive time pruning
+# ─────────────────────────────────────────────────────────────────────────────
+
+_FEASIBLE_JOINT_P = {
+    "refStep": 8, "referredStep": 3,          # feasible: referredStep ≤ refStep
+    "distQuantification": 1.0, "angleQuantification": 90,
+    "pairs_idx": 2, "maxNumOfPointPairsPerFeature": 5000,
+    "maxVoteRatio": 0.5, "useDistanceNMS": True, "outputNum": 1,
+    "minVoxelLength_mm": 0.7, "voxel_width_mm": 2.1,
+    "minVoxelLength": 0.7, "maxVoxelLength": 2.8,
+    "filterCandidatePoseByAxis": True, "angleThreshold": 135,
+    "coarse_mode": 0.0, "fine_mode": 0.0,
+    "operationApproach": 1.0, "deviationCorrectionCapacity": 0.0,
+    "onlyConsiderVisibleSurfaceOfModel": False,
+    "considerErrorofNormalAngles": False,
+}
+
+
+def _run_objective_with(mean_time, coverage):
+    """Drive _objective_joint with a fixed feasible config and a mocked per-scene
+    EvalResult (constant mean_time, coverage). Returns (result_or_None, was_pruned)."""
+    from unittest.mock import patch
+    from MM_Optimizer.mv_evaluator import EvalResult
+
+    opt    = _make_optimizer_for_factory("nsgaii")
+    regime = {"id": "A", "coarse_mode": 0.0, "fine_mode": 0.0, "needs_edge": False}
+    study  = _make_study_multi()
+    trial  = study.ask()
+    er     = EvalResult(score=0.0, coverage=coverage, mean_time=mean_time)
+    scenes = [(f"scene_{i}", []) for i in range(3)]
+
+    orig_full = SC.M_FULL
+    SC.M_FULL = 3
+    try:
+        with patch("MM_Optimizer.optuna_optimizer.suggest_params_joint",
+                   return_value=dict(_FEASIBLE_JOINT_P)), \
+             patch.object(opt.opt, "_sample_scenes", return_value=scenes), \
+             patch.object(opt.opt, "evaluate_config", return_value=er):
+            try:
+                return opt._objective_joint(trial, regime), False
+            except optuna.TrialPruned:
+                return None, True
+    finally:
+        SC.M_FULL = orig_full
+        opt.cleanup()
+
+
+def test_abs_time_cap_prunes():
+    """A config whose running mean_time exceeds OPTUNA_TIME_ABS_CAP is pruned (safety valve)."""
+    ret, pruned = _run_objective_with(mean_time=SC.OPTUNA_TIME_ABS_CAP + 5.0, coverage=1.0)
+    assert pruned, "config above OPTUNA_TIME_ABS_CAP must be pruned"
+    assert ret is None
+    log.info("PASS: test_abs_time_cap_prunes")
+
+
+def test_slow_but_accurate_not_pruned():
+    """A slow-but-accurate config (under the abs cap) completes — proving the old
+    competitive time-ratio pruning is gone and the precision-first region survives."""
+    slow = SC.OPTUNA_TIME_ABS_CAP * 0.5    # well above a 'fast' config, still under the cap
+    assert slow > SC.SCORE_TIME_NORM, "test assumes 'slow' exceeds the reference cycle time"
+    ret, pruned = _run_objective_with(mean_time=slow, coverage=1.0)
+    assert not pruned, "slow-but-accurate config must NOT be pruned on time"
+    cov, mean_time = ret
+    assert cov == 1.0 and abs(mean_time - slow) < 1e-9, f"got {ret}"
+    log.info("PASS: test_slow_but_accurate_not_pruned")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Dry-run integration tests
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -671,6 +739,10 @@ if __name__ == "__main__":
     test_sampler_factory_tpe()
     test_sampler_factory_gp()
     test_sampler_invalid()
+
+    print("\n--- Pruning policy ---")
+    test_abs_time_cap_prunes()
+    test_slow_but_accurate_not_pruned()
 
     print("\n--- Dry-run integration tests ---")
     test_dry_run_joint_study()

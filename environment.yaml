@@ -9,6 +9,13 @@ dependencies:
       - open3d==0.19.0
       - scipy==1.16.3
       - optuna==4.8.0
+      # PyTorch (CPU build) — backend for Optuna's GPSampler, i.e. the 'gp' joint-study
+      # sampler in MM_Optimizer/optuna_optimizer.py. GPSampler pins its GP math to CPU
+      # (torch.device("cpu")), so the CPU wheel is sufficient; a CUDA build would sit idle
+      # for the sampler and add Blackwell/sm_120 wheel friction. NSGA-II and TPE need no torch.
+      # The +cpu local tag is served from the PyTorch CPU index, not PyPI.
+      - --extra-index-url https://download.pytorch.org/whl/cpu
+      - torch==2.13.0+cpu
       - scikit-learn==1.8.0
       - matplotlib==3.10.8
       - trimesh==4.11.0

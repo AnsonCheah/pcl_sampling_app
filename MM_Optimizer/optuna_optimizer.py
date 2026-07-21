@@ -28,10 +28,14 @@ Key design decisions
   (int/float/bool/categorical) natively via genetic crossover.
 - create_study(directions=["maximize","minimize"]): multi-objective (coverage, mean_time).
   Winner selected from Pareto front: max coverage first, min time as tiebreaker.
-- Three-level pruning: (0) referredStep guard (early-return, no MV call),
-  (1) time guard, (2) coverage floor — trial.report not supported in MOO.
-- Scoring (pruning signal only): raw_score = mean_time/SCORE_TIME_NORM + (1-cov)*SCORE_COV_NORM.
-  Multi-objective objective returns (cov_loss, mean_time) tuple — not the scalarized score.
+- Minimal pruning (MOO can't use trial.report/should_prune): (0) referredStep
+  constraint short-circuit (early-return, no MV call), (1) coverage floor, and
+  (2) a FIXED absolute time safety cap. There is deliberately NO competitive time
+  pruning — the old best_mean_time × RATIO guard ratcheted down after a fast
+  low-quality trial and cascaded into pruning ~90% of trials, starving the sampler
+  and biasing away from the slow-but-accurate (precision-first) region.
+- The multi-objective objective returns (coverage, mean_time); the sampler resolves
+  the time/accuracy trade-off via the Pareto front, not via pruning.
 - Phases 0 (mesh analysis warm-start), 1 (regime gate), and 4 (symmetry) are unchanged and
   delegate to the wrapped Optimizer instance.
 - Visualization: after run(), exports all Optuna plots to a timestamped folder.
@@ -353,15 +357,14 @@ def _budget_audit_callback(
                       for t in study.trials
                       if t.state == optuna.trial.TrialState.PRUNED]
         cov_p  = sum(1 for r in reasons if r.startswith("cov"))
-        med_p  = sum(1 for r in reasons if r.startswith("median"))
-        time_p = sum(1 for r in reasons if r.startswith("time"))
+        time_p = sum(1 for r in reasons if r.startswith("time"))   # absolute cap only
         best_str = ""
         if study.best_trials:
             best = max(study.best_trials, key=lambda t: (t.values[0], -t.values[1]))
             best_str = (f"  best=({best.values[0]:.3f}cov, "
                         f"{best.values[1]:.2f}s)")
         log.info(f"  [budget] trial={trial.number:3d}  complete={n_complete}  "
-                 f"pruned={n_pruned} (cov:{cov_p} median:{med_p} time:{time_p})"
+                 f"pruned={n_pruned} (cov:{cov_p} time:{time_p})"
                  f"{best_str}")
 
 
@@ -414,8 +417,9 @@ class OptunaOptimizer:
     n_trials_joint : Round 0 trial budget (default: SC.OPTUNA_N_TRIALS_JOINT).
     n_rounds       : Number of optimization rounds (default: SC.OPTUNA_N_ROUNDS).
     seed           : Random seed for reproducibility.
-    storage_path   : SQLite DB prefix for crash-resume, e.g. "results/optuna".
-                     DB created as {prefix}_{part}_joint.db.
+    storage_path   : SQLite DB path prefix for crash-resume, e.g. "results/"
+                     (include a trailing separator to keep DBs in a directory).
+                     DB created as {prefix}{part}_{sampler}.db.
                      None = in-memory study (no persistence).
     sampler        : Joint-study sampler — "nsgaii" (default), "tpe", or "gp".
                      All three run multi-objective (coverage, mean_time) over the
@@ -464,7 +468,6 @@ class OptunaOptimizer:
         self.n_rounds        = n_rounds if n_rounds is not None else SC.OPTUNA_N_ROUNDS
         self._seed           = seed
         self._storage_path   = storage_path
-        self._best_mean_time: float = SC.OPTUNA_TIME_INITIAL_CAP
 
         ws = warm_start
         warm_pairs = ws.maxNumOfPointPairsPerFeature
@@ -561,19 +564,21 @@ class OptunaOptimizer:
         else:
             raise ValueError(f"Unknown sampler: {self._sampler!r}")
         # trial.report/should_prune are not supported in multi-objective mode;
-        # pruning is handled explicitly via time guard + coverage floor in _objective_joint.
+        # pruning is handled explicitly (coverage floor + absolute time cap) in _objective_joint.
         # NSGA-II and GP enforce referredStep ≤ refStep via constraints_func + objective
         # guard; TPE ignores the constraint_violation user-attr (it is harmless metadata).
         storage = None
         if self._storage_path and storage_suffix:
             storage = f"sqlite:///{self._storage_path}{storage_suffix}.db"
-        return optuna.create_study(
+        study = optuna.create_study(
             directions     = ["maximize", "minimize"],
             sampler        = sampler,
             storage        = storage,
             study_name     = name,
             load_if_exists = True,
         )
+        study.set_metric_names(["coverage", "mean_time"])
+        return study
 
     # ─────────────────────────────────────────────────────────────────────
     # ─────────────────────────────────────────────────────────────────────
@@ -585,10 +590,12 @@ class OptunaOptimizer:
         trial: optuna.Trial,
         regime: dict,
     ) -> Tuple[float, float]:
-        """Scene-by-scene evaluation with three-level pruning.
+        """Scene-by-scene evaluation returning (coverage, mean_time) for MOO.
 
-        Returns (coverage, mean_time) for multi-objective optimization.
-        Pruning uses a scalarized running_score so trial.report() receives a scalar.
+        Pruning is minimal and non-competitive: (0) referredStep feasibility
+        short-circuit, (1) coverage floor after ≥3 scenes, (2) a fixed absolute
+        time safety cap after ≥3 scenes. No time-ratio pruning — the sampler owns
+        the time/accuracy trade-off via the Pareto front.
         """
         p        = suggest_params_joint(trial, regime, self._pairs_candidates,
                                         self._voxel_bounds)
@@ -618,21 +625,22 @@ class OptunaOptimizer:
             # logging.info(f"  Trial {trial.number:3d}  Scene {step+1}/{SC.M_FULL}  "
             #              f"cov={res.coverage:.3f}  mean_time={res.mean_time:.2f}s  "
             #              f"running_cov={running_cov:.3f}  running_time={running_time:.2f}s")
-            # Level 2: Time guard  (trial.report/should_prune not available in multi-objective)
-            if running_time > self._best_mean_time * SC.OPTUNA_TIME_RATIO:
+            # Level 1: Absolute time safety cap (after ≥3 scenes to avoid first-scene noise).
+            # A FIXED ceiling — not competitive — so only pathological configs are pruned,
+            # never the slow-but-accurate (precision-first) region. This replaces the old
+            # best_mean_time × RATIO guard, which ratcheted down after a fast low-quality
+            # trial and cascaded into pruning ~90% of trials, starving the sampler.
+            if step >= 2 and running_time > SC.OPTUNA_TIME_ABS_CAP:
                 trial.set_user_attr("prune_reason", f"time@{step}")
                 raise optuna.TrialPruned()
 
-            # Level 3: Coverage floor (after 3rd scene)
+            # Level 2: Coverage floor (after 3rd scene)
             if step >= 2 and running_cov < SC.OPTUNA_COV_PRUNE_FLOOR:
                 trial.set_user_attr("prune_reason", f"cov@{step}, running_cov={running_cov:.2f}")
                 raise optuna.TrialPruned()
 
         final_cov  = total_cov  / SC.M_FULL
         final_time = total_time / SC.M_FULL
-
-        if final_cov > 0.0:
-            self._best_mean_time = min(self._best_mean_time, final_time)
 
         return (final_cov, final_time)
 
@@ -680,11 +688,11 @@ class OptunaOptimizer:
 
         # ── Joint study ───────────────────────────────────────────────────
         log.info("=" * 60)
-        log.info("JOINT STUDY — fully joint coarse+fine NSGA-II (multi-objective)")
-        self._best_mean_time = SC.OPTUNA_TIME_INITIAL_CAP
+        log.info(f"JOINT STUDY — fully joint coarse+fine {self._sampler.upper()} "
+                 f"(multi-objective)")
 
         self._study = self._create_study_joint(
-            f"{part}_joint", f"_{part}_joint")
+            f"{part}_{self._sampler}", f"{part}_{self._sampler}")
 
         if not self._study.trials:
             warm_p = _build_warm_joint(
@@ -829,16 +837,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed",           type=int, default=42)
     p.add_argument("--export_best",    default=True, action="store_true")
     p.add_argument("--storage",        default=None,
-                   help="SQLite path prefix (e.g. MM_Optimizer/results/optuna); "
-                        "creates {prefix}_{part}_joint.db")
+                   help="SQLite path prefix (e.g. MM_Optimizer/results/); "
+                        "creates {prefix}{part}_{sampler}.db")
     p.add_argument("--no_adaptive_thresh", dest="adaptive_thresh", action="store_false",
                    help="Disable adaptive study threshold; use fixed POS_THRESH_TIGHT=2mm.")
     p.set_defaults(adaptive_thresh=True)
     p.add_argument("--pos_thresh_k",   type=float, default=0.01,
                    help="k for adaptive study threshold: clip(k × longest_OBB_m, 2mm, 5mm). "
                         "Only used when adaptive_thresh is enabled (default: 0.01).")
-    p.add_argument("--sampler",        choices=list(SAMPLER_CHOICES), default="nsgaii",
-                   help="Optuna sampler for the joint study (default: nsgaii)")
+    p.add_argument("--sampler",        choices=list(SAMPLER_CHOICES), default="gp",
+                   help="Optuna sampler for the joint study (default: gp)")
     return p
 
 
@@ -889,7 +897,7 @@ def main() -> None:
 
     storage_path = args.storage
     if storage_path is None and not args.dry_run:
-        storage_path = os.path.join(RESULTS_DIR, "optuna")
+        storage_path = os.path.join(RESULTS_DIR, "")
 
     opt = OptunaOptimizer(
         part_name      = args.part,

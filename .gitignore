@@ -26,6 +26,7 @@ MM_Optimizer/backup_task_records.json
 *.zip
 *.cgr
 *.stp
+*.obj
 *.png
 *.npz
 

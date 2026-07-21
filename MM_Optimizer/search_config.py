@@ -230,10 +230,15 @@ OPTUNA_N_ROUNDS              = 2    # 1 = single pass, no refinement round
 OPTUNA_N_STARTUP_JOINT       = 20   # startup random trials before TPE/GP use their model (18D needs ≥20)
 OPTUNA_SCORE_IMPROVE_MIN     = 0.01 # stop rounds early if improvement < this (normalised score)
 
-# Time guard: prune if running mean_time > best × RATIO.
-# OPTUNA_TIME_INITIAL_CAP seeds _best_mean_time so the very first trial is guarded.
-OPTUNA_TIME_RATIO       = 3.0
-OPTUNA_TIME_INITIAL_CAP = 5.0  # seconds; replaces float("inf") at study start
+# Absolute per-trial time safety cap (seconds). A trial is pruned only if its running
+# mean cycle time exceeds this FIXED ceiling after ≥3 scenes — a pure safety valve for
+# pathological configs, NOT competitive pruning. Deliberately generous (≈5× a typical
+# good config) so slow-but-accurate configs — the precision-first region — are never
+# pruned on time. The referredStep blowup (the main pathology) is already blocked by the
+# Level-0 constraint guard, so this rarely fires. Tunable.
+OPTUNA_TIME_ABS_CAP     = 20.0
+# Sentinel "worst-case" time returned (with coverage=0) for infeasible referredStep trials.
+OPTUNA_TIME_INITIAL_CAP = 5.0
 
 # Coverage prune floor: prune if running_cov < this after 3+ scenes (step ≥ 2, 0-indexed).
 OPTUNA_COV_PRUNE_FLOOR = 0.10

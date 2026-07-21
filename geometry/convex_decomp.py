@@ -10,6 +10,7 @@ This module deliberately imports only numpy + vhacdx (no Open3D / trimesh / GUI)
 child process stays cheap to start.
 """
 import numpy as np
+from vhacdx import compute_vhacd
 
 
 def vhacd_decompose(vertices, faces, **kwargs):
@@ -24,7 +25,6 @@ def vhacd_decompose(vertices, faces, **kwargs):
     Returns a list of ``(vertices, faces)`` tuples, one per convex hull. Plain numpy
     arrays are returned (not Open3D geometry) so the result pickles back to the parent.
     """
-    from vhacdx import compute_vhacd
 
     vertices = np.asarray(vertices, dtype=np.float64)
     faces = np.asarray(faces)

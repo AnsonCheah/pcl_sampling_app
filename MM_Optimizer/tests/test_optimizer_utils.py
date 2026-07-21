@@ -101,6 +101,31 @@ def test_cache_different_configs():
     log.info("PASS: test_cache_different_configs")
 
 
+def test_cache_key_content_sensitive():
+    """Regenerating a scene dir's sample_*.ply must change the key (guards against the stale
+    path-keyed cache that masked the world-Z matching offset behind a high cached coverage)."""
+    cache  = EvalCache("unused.json", enabled=True)
+    config = {"coarse": {"refStep": 5}, "fine": {}}
+    with tempfile.TemporaryDirectory() as d:
+        scene = os.path.join(d, "scene_00000")
+        os.makedirs(scene)
+        ply = os.path.join(scene, "sample_0.ply")
+        with open(ply, "w") as f:
+            f.write("ply-v1")
+        key1 = cache.make_key(config, [scene])
+        # Same content, recomputed -> same key.
+        assert cache.make_key(config, [scene]) == key1, "Key must be stable for unchanged scenes"
+        # Regenerate the scene with different content -> different key.
+        import time as _t
+        _t.sleep(0.01)
+        with open(ply, "w") as f:
+            f.write("ply-v2-regenerated-longer")
+        os.utime(ply, None)
+        key2 = cache.make_key(config, [scene])
+        assert key2 != key1, "Regenerated scene content must change the cache key"
+    log.info("PASS: test_cache_key_content_sensitive")
+
+
 def test_cache_persistence():
     """Entries written and saved are readable after a fresh EvalCache load."""
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
