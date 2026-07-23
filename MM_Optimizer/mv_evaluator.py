@@ -169,6 +169,12 @@ class MVEvaluator:
         self.use_two_pass = use_two_pass
         self.dry_run      = dry_run
 
+        # Optional live-eval hook. When set, called after every real MechVision
+        # run in _run_one_scene with the raw matched poses, so a GUI can render a
+        # per-instance overlay as the search proceeds. Default None → CLI unchanged.
+        # Signature: (scene_dir, coarse_params, fine_params, fine_poses, gt_poses).
+        self.on_scene_eval = None
+
         self._model_root   = MM_MODEL_ROOT
         self._n_evals      = 0   # total MechVision calls
         self._n_gate_stops = 0   # phase gate activations
@@ -374,6 +380,16 @@ class MVEvaluator:
                     "coarse_time_s": 0.0, "fine_time_s": 0.0}
 
         fine_poses = result.get("fine_poses", [])
+
+        # Live-eval hook (GUI overlay): fire with the raw matched poses before they
+        # are reduced to error scalars. Guarded so a preview error never breaks tuning.
+        if self.on_scene_eval is not None:
+            try:
+                self.on_scene_eval(scene_dir, coarse_params, fine_params,
+                                   fine_poses, gt_poses)
+            except Exception as e:
+                log.debug(f"on_scene_eval hook failed (ignored): {e}")
+
         matched    = match_poses_to_gt(fine_poses, gt_poses)
         pos_errors = [m[0] for m in matched]
         ang_errors = [m[1] for m in matched]

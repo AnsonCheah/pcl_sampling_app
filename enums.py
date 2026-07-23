@@ -9,6 +9,7 @@ class Stage(Enum):
     DECOMPOSE = 5
     SCENE = 6
     RENDER = 7
+    TUNING = 8
 
 class ToolMode(Enum):
     NONE = 0

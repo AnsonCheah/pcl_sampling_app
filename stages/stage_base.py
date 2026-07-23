@@ -80,6 +80,9 @@ class BaseStage(ABC):
             # Background computation
             self.worker_thread = threading.Thread(target=self._run_worker, daemon=True)
             self.worker_thread.start()
+            # Lock Back/Next now that the worker is alive (re-enabled in _on_worker_done).
+            if not self.app.headless:
+                self.app._update_nav_buttons()
 
     def _on_worker_start(self):
         pass
@@ -116,6 +119,27 @@ class BaseStage(ABC):
         """Whether the unified Next button is clickable while on this stage.
         Override in stages that require produced state before advancing."""
         return True
+
+    def request_next(self, proceed):
+        """Called by app._go_next before advancing to the next stage. Default: advance
+        immediately. Stages override to intercept — e.g. show a confirm dialog and call
+        `proceed()` only on OK (used to confirm skipping a stage)."""
+        proceed()
+
+    def worker_running(self) -> bool:
+        """True while this stage's background worker thread is alive."""
+        return self.worker_thread is not None and self.worker_thread.is_alive()
+
+    def nav_enabled(self) -> bool:
+        """Whether Back/Next navigation is allowed while on this stage. Locked automatically
+        while a background worker is running so the user can't leave mid-run."""
+        return not self.worker_running()
+
+    def on_enter(self):
+        """Hook fired once by app.set_stage when this stage becomes active (after _refresh_ui).
+        Unlike _refresh_ui it is NOT called on worker completion, so it is the safe place to set
+        up an initial 3D preview without clobbering a worker's result. Default no-op."""
+        pass
 
     def enable_widgets(self):
         """
