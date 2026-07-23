@@ -7,11 +7,45 @@ import trimesh
 from enums import Stage
 from stages.stage_base import BaseStage
 from geometry.geom_utils import o3d_to_trimesh, trimesh_to_o3d, O3DSceneObject
+from geometry.file_utils import list_scene_dirs
 from physics.mujoco_bin_scene import MujocoBinScene, MAX_BIN_DIM
+import os
 import copy
 import colorsys
+from pathlib import Path
 from rich import print as rp
 np.set_printoptions(precision=6, suppress=True)
+
+
+def _box(center, size):
+    """An axis-aligned box mesh of `size` (sx,sy,sz) centred at `center` (world)."""
+    size = np.asarray(size, dtype=float)
+    b = o3d.geometry.TriangleMesh.create_box(size[0], size[1], size[2])
+    b.translate(-size / 2.0)                 # create_box has its min corner at origin
+    b.translate(np.asarray(center, dtype=float))
+    return b
+
+
+def _reconstruct_bin_mesh(bin_dim, bin_transform):
+    """Rebuild an open-top bin box (floor + 4 walls) from `bin_dim`
+    (width, length, height, wall_thickness) + `bin_transform`, for the disk-scene mesh
+    preview. Note: partition/tray fixtures are NOT saved to scene_state.npz, so structured
+    scenes preview with the outer bin only (documented approximation)."""
+    w, l, h, t = [float(x) for x in np.asarray(bin_dim).ravel()[:4]]
+    hw, hl = w / 2.0, l / 2.0
+    pieces = [
+        _box((0.0, 0.0, -t / 2.0), (w, l, t)),           # floor (top at z=0)
+        _box(( hw - t / 2.0, 0.0, h / 2.0), (t, l, h)),  # +x wall
+        _box((-hw + t / 2.0, 0.0, h / 2.0), (t, l, h)),  # -x wall
+        _box((0.0,  hl - t / 2.0, h / 2.0), (w, t, h)),  # +y wall
+        _box((0.0, -hl + t / 2.0, h / 2.0), (w, t, h)),  # -y wall
+    ]
+    mesh = pieces[0]
+    for p in pieces[1:]:
+        mesh += p
+    mesh.transform(np.asarray(bin_transform, dtype=float))
+    mesh.compute_vertex_normals()
+    return mesh
 
 SCENE_FILL_RATE     = 0.2    # default fill rate (fraction of safe capacity)
 # Shape-aware random-packing efficiency for part OBB volumes. A fixed factor is only valid for
@@ -103,6 +137,13 @@ class SceneStage(BaseStage):
         self.btn_reset = self.register_widget(gui.Button("Clear Scene"), lambda: self.app.mj_scene is not None)
         self.btn_reset.set_on_clicked(self.reset)
 
+        # --- Preview an already-saved scene (mesh form) from output/synthetic_target/<part>/ ---
+        self.combo_disk_scenes = self.register_widget(
+            gui.Combobox(), lambda: self._has_disk_scenes())
+        self.combo_disk_scenes.set_on_selection_changed(self._on_disk_scene_selected)
+        self.btn_disk_refresh = self.register_widget(gui.Button("Refresh Saved Scenes"))
+        self.btn_disk_refresh.set_on_clicked(self._refresh_disk_scenes)
+
         self.btn_restart = self.register_widget(gui.Button("Restart"))
         self.btn_restart.set_on_clicked(lambda: self.app._restart())
         v.add_child(gui.Label("Generate Physical Scene"))
@@ -120,13 +161,106 @@ class SceneStage(BaseStage):
         v.add_child(self.btn_generate)
         v.add_child(self.btn_reset)
         v.add_child(gui.Label(""))
+        v.add_child(gui.Label("Preview Saved Scene (mesh)"))
+        v.add_child(self.combo_disk_scenes)
+        v.add_child(self.btn_disk_refresh)
+        v.add_child(gui.Label(""))
         v.add_child(self.btn_restart)
 
         print("loaded scene panel")
         return v
 
     def next_enabled(self) -> bool:
-        return len(self.app.o3d_scene) > 0
+        # Advance if a scene was generated this session, OR on-disk scenes already exist
+        # for this part (so the operator can skip straight to tuning).
+        return len(self.app.o3d_scene) > 0 or self._has_disk_scenes()
+
+    def request_next(self, proceed):
+        # Skipping = advancing without a scene generated this session but with scenes on disk.
+        if len(self.app.o3d_scene) == 0 and self._has_disk_scenes():
+            self.app.confirm_dialog(
+                "No scene was generated this session.\nSkip to the next stage using the "
+                "existing on-disk scenes for this part?", on_ok=proceed)
+        else:
+            proceed()
+
+    # ─────────────────────────────────────────────────────────────────────
+    # On-disk saved-scene mesh preview
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _synth_dir(self):
+        part = getattr(self.app, "mesh_basename", None)
+        return (Path.cwd() / "output" / "synthetic_target" / part) if part else None
+
+    def _has_disk_scenes(self) -> bool:
+        d = self._synth_dir()
+        return bool(list_scene_dirs(d)) if d else False
+
+    def _populate_disk_scenes(self):
+        if self.app.headless:
+            return
+        prev = self.combo_disk_scenes.selected_text
+        self.combo_disk_scenes.clear_items()
+        d = self._synth_dir()
+        names = list_scene_dirs(d) if d else []
+        for name in names:
+            self.combo_disk_scenes.add_item(name)
+        if prev and prev in names:
+            self.combo_disk_scenes.selected_text = prev
+
+    def _refresh_disk_scenes(self):
+        self._populate_disk_scenes()
+        self.enable_widgets()
+
+    def _on_disk_scene_selected(self, text, idx):
+        self._preview_disk_scene(text)
+
+    def _build_disk_scene_geoms(self, scene_dir):
+        """Reconstruct a saved scene as meshes: a copy of the part mesh at each stored GT pose
+        plus the outer bin box (from scene_state.npz). Returns [(name, mesh), …]; empty when
+        the mesh isn't imported or the npz is missing/unreadable. Pure geometry — no GUI."""
+        npz_path = os.path.join(str(scene_dir), "scene_state.npz")
+        if self.app.target_mesh is None or not os.path.exists(npz_path):
+            return []
+        try:
+            state = np.load(npz_path, allow_pickle=True)
+            T_gt = np.asarray(state["T_gt"], dtype=float)   # (n,4,4) part->world
+            bin_geom = _reconstruct_bin_mesh(state["bin_dim"], state["bin_transform"])
+        except Exception as e:
+            print(f"[SCENE] failed to read {npz_path}: {e}")
+            return []
+
+        part_mesh = o3d.geometry.TriangleMesh(self.app.target_mesh)
+        part_mesh.compute_vertex_normals()
+        geoms = []
+        for i in range(len(T_gt)):
+            m = copy.deepcopy(part_mesh)
+            m.transform(T_gt[i])
+            geoms.append((f"disk_part_{i}", m))
+        geoms.append(("disk_bin", bin_geom))
+        return geoms
+
+    def _preview_disk_scene(self, scene_name):
+        if self.app.headless or not scene_name:
+            return
+        if self.app.target_mesh is None:
+            print("[SCENE] Import a mesh before previewing saved scenes.")
+            return
+        scene_dir = os.path.join(str(self._synth_dir()), scene_name)
+        geoms = self._build_disk_scene_geoms(scene_dir)
+        if not geoms:
+            print(f"[SCENE] nothing to preview for {scene_dir}")
+            return
+
+        def apply():
+            self.app._clear_scene()
+            for name, g in geoms:
+                self.app.scene.scene.add_geometry(name, g, self.app.default_material)
+            bbox = geoms[-1][1].get_axis_aligned_bounding_box()   # bin box frames the view
+            if not bbox.is_empty():
+                self.app.scene.setup_camera(60.0, bbox, bbox.get_center())
+            self.app.scene.force_redraw()
+        self.app.main_thread(apply)
 
     def _is_random(self) -> bool:
         return self.arrangement_combo.selected_text == "Random"
@@ -226,6 +360,7 @@ class SceneStage(BaseStage):
     def _refresh_ui(self):
         if self.app.headless:
             return
+        self._populate_disk_scenes()
         if self.app.scene_mesh is not None:
             # Scene already generated — keep the settled physical scene on screen.
             self._show_scene_mesh()

@@ -492,6 +492,13 @@ class OptunaOptimizer:
             if adaptive_thresh else SC.POS_THRESH_TIGHT
         )
         self._study: Optional[optuna.Study] = None
+        # Regime chosen by Phase 1, stored in run() so iter_pareto_configs() can
+        # expand Pareto trial params after the study finishes.
+        self._best_regime: dict = {}
+        # Optional per-trial hook (GUI progress). When set, appended to the study
+        # callbacks; Optuna calls it (study, trial) after each trial. Default None
+        # → CLI unchanged.
+        self.on_trial_complete = None
 
     # ─────────────────────────────────────────────────────────────────────
     # Default param helpers
@@ -665,6 +672,7 @@ class OptunaOptimizer:
             log.error("Optimization failed at Phase 1 — no regime passes.")
             return None
         best_regime = passing[0]
+        self._best_regime = best_regime   # kept for iter_pareto_configs() after run()
         log.info(f"Phase 1 done: best regime = {best_regime['id']}  "
                  f"(cov={best_regime['coverage']:.2f})")
 
@@ -719,10 +727,13 @@ class OptunaOptimizer:
                      f"(total target {n_target})")
 
             if remaining > 0:
+                callbacks = [_budget_audit_callback]
+                if self.on_trial_complete is not None:
+                    callbacks.append(self.on_trial_complete)
                 self._study.optimize(
                     lambda t: self._objective_joint(t, best_regime),
                     n_trials=remaining,
-                    callbacks=[_budget_audit_callback],
+                    callbacks=callbacks,
                 )
 
             if not self._study.best_trials:
@@ -800,6 +811,30 @@ class OptunaOptimizer:
         ts = int(time.time())
         self._log_result_json(final_result, ts=ts)
         return final_result
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Pareto front access (for the GUI TUNING stage)
+    # ─────────────────────────────────────────────────────────────────────
+
+    def iter_pareto_configs(self) -> List[Tuple[optuna.trial.FrozenTrial, dict, dict]]:
+        """Return the Pareto front as [(trial, coarse, fine), …].
+
+        Each trial's short params are expanded into full coarse/fine config dicts
+        (ready for evaluate_config / _run_one_scene) using the Phase-1 regime and
+        pairs candidates. Sorted by coverage desc, then time asc — the same order
+        _select_pareto_winner prefers. Empty if no study has run yet.
+        """
+        if self._study is None or not self._best_regime:
+            return []
+        trials = sorted(self._study.best_trials,
+                        key=lambda t: (-t.values[0], t.values[1]))
+        out: List[Tuple[optuna.trial.FrozenTrial, dict, dict]] = []
+        for t in trials:
+            expanded = _expand_winner_params(t.params, self._best_regime,
+                                             self._pairs_candidates)
+            coarse, fine = _split_joint_params(expanded)
+            out.append((t, coarse, fine))
+        return out
 
     # ─────────────────────────────────────────────────────────────────────
     # Export / logging

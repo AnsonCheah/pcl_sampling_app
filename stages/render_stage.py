@@ -6,7 +6,7 @@ import open3d.visualization.rendering as rendering
 from enums import Stage
 from stages.stage_base import BaseStage
 from pathlib import Path
-from geometry.file_utils import pointcloud_to_ply
+from geometry.file_utils import pointcloud_to_ply, list_scene_dirs
 from geometry.geom_utils import camera_view_matrix, compute_overlap, O3DSceneObject
 from sensor.scene_render import (
     scene_render,
@@ -109,6 +109,24 @@ class RenderStage(BaseStage):
             self.combobox_targets.clear_items()
             self.combobox_scenes.clear_items()
         self.worker_step = 0
+
+    def _has_disk_scenes(self) -> bool:
+        part = getattr(self.app, "mesh_basename", None)
+        if not part:
+            return False
+        return bool(list_scene_dirs(Path.cwd() / "output" / "synthetic_target" / part))
+
+    def next_enabled(self) -> bool:
+        # Advance to TUNING if data was rendered this session, OR scenes already exist on disk.
+        return len(self.app.synthetic_targets) > 0 or self._has_disk_scenes()
+
+    def request_next(self, proceed):
+        if len(self.app.synthetic_targets) == 0 and self._has_disk_scenes():
+            self.app.confirm_dialog(
+                "No data was generated this session.\nSkip to tuning using the existing "
+                "on-disk scenes for this part?", on_ok=proceed)
+        else:
+            proceed()
 
     def worker(self):
         TOTAL_STEPS = 9

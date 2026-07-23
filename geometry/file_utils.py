@@ -1,8 +1,21 @@
 
 from tkinter import Tk, filedialog
 from pathlib import Path
+import os
 import numpy as np
 import struct
+
+
+def list_scene_dirs(part_dir):
+    """Sorted `scene_NNNNN` subdirectory names under `part_dir` (a synthetic_target/<part>
+    directory). Returns [] if the directory is missing. Base-layer scanner shared by the
+    stages that browse on-disk scenes."""
+    part_dir = str(part_dir)
+    if not os.path.isdir(part_dir):
+        return []
+    return sorted(
+        name for name in os.listdir(part_dir)
+        if name.startswith("scene_") and os.path.isdir(os.path.join(part_dir, name)))
 
 def save_ply_dialog(default_name=None):
     Tk().withdraw()

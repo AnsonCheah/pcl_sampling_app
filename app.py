@@ -37,6 +37,7 @@ from stages.save_stage import SaveStage
 from stages.decompose_stage import DecomposeStage
 from stages.scene_stage import SceneStage
 from stages.render_stage import RenderStage
+from stages.tuning_stage import TuningStage, SAMPLER_CHOICES
 import threading
 import time
 from pathlib import Path
@@ -63,6 +64,7 @@ class MeshSamplingApp:
             Stage.DECOMPOSE: DecomposeStage(self),
             Stage.SCENE: SceneStage(self),
             Stage.RENDER: RenderStage(self),
+            Stage.TUNING: TuningStage(self),
         }
         # Give each stage a back-reference to its own enum key so reset()/clear_state_from
         # can locate it without a reverse lookup.
@@ -124,9 +126,12 @@ class MeshSamplingApp:
             self.progress_label = gui.Label("Processing...")
             self.progress_bar = gui.ProgressBar()
             self.progress_bar.value = 0.0  # range [0, 1]
+            # Optional second line for per-step detail (e.g. current-eval error); any stage may set it.
+            self.progress_detail = gui.Label("")
             self.progress_panel.add_child(self.progress_label)
             self.progress_panel.add_child(self.progress_bar)
-            self.pb_panel_size = (400, 50)
+            self.progress_panel.add_child(self.progress_detail)
+            self.pb_panel_size = (400, 72)
             x=(self.window_width - self.pb_panel_size[0])>>1
             y=(self.window_height - self.pb_panel_size[1])>>1
             self.progress_panel.frame = gui.Rect(x, y, self.pb_panel_size[0], self.pb_panel_size[1])
@@ -174,6 +179,7 @@ class MeshSamplingApp:
         self.window.set_needs_layout()
         self.stages[stage]._refresh_ui()
         self.stages[stage].enable_widgets()
+        self.stages[stage].on_enter()   # entry-only hook (safe for initial previews)
         self._update_title()
 
     # ===============================
@@ -190,7 +196,9 @@ class MeshSamplingApp:
 
     def _go_next(self):
         if self._next_target is not None:
-            self.set_stage(self._next_target)
+            target = self._next_target
+            # Let the current stage intercept (e.g. confirm a skip) before advancing.
+            self.stages[self.stage].request_next(lambda: self.set_stage(target))
 
     def _update_nav_buttons(self):
         """Re-derive Back/Next labels, visibility and the Next-enabled state from the
@@ -199,11 +207,14 @@ class MeshSamplingApp:
             return
         order = list(self.stages.keys())          # insertion order == Stage enum order
         idx = order.index(self.stage)
+        # A stage can lock navigation while busy (e.g. an active tuning study).
+        nav_ok = bool(self.stages[self.stage].nav_enabled())
 
         if idx > 0:
             self._back_target = order[idx - 1]
             self.btn_back.text = f"Back: {self._stage_label(self._back_target)}"
             self.btn_back.visible = True
+            self.btn_back.enabled = nav_ok
         else:
             self._back_target = None
             self.btn_back.visible = False
@@ -212,7 +223,7 @@ class MeshSamplingApp:
             self._next_target = order[idx + 1]
             self.btn_next.text = f"Next: {self._stage_label(self._next_target)}"
             self.btn_next.visible = True
-            self.btn_next.enabled = bool(self.stages[self.stage].next_enabled())
+            self.btn_next.enabled = bool(nav_ok and self.stages[self.stage].next_enabled())
         else:
             self._next_target = None
             self.btn_next.visible = False
@@ -260,22 +271,29 @@ class MeshSamplingApp:
         self.scene.force_redraw()
         print("reframed")
 
-    def show_progress(self, text="Processing..."):
+    def show_progress(self, text="Processing...", detail=""):
         if self.headless:
             return
         def _show():
             self.progress_label.text = text
+            self.progress_detail.text = detail
             self.progress_bar.value = 0.0
             self.progress_panel.visible = True
         gui.Application.instance.post_to_main_thread(self.window, _show)
 
-    def update_progress(self, value, text="Processing..."):
+    def update_progress(self, value=None, text=None, detail=None):
+        """Update any subset of the progress panel. A None argument leaves that part
+        unchanged, so callers can drive the bar/text and the detail line independently."""
         if self.headless:
             return
-        value = max(0.0, min(1.0, value))
+        clamped = None if value is None else max(0.0, min(1.0, value))
         def _update():
-            self.progress_label.text = text
-            self.progress_bar.value = value
+            if clamped is not None:
+                self.progress_bar.value = clamped
+            if text is not None:
+                self.progress_label.text = text
+            if detail is not None:
+                self.progress_detail.text = detail
         gui.Application.instance.post_to_main_thread(self.window, _update)
 
     def hide_progress(self):
@@ -332,6 +350,55 @@ class MeshSamplingApp:
         if self.headless:
             return
         gui.Application.instance.post_to_main_thread(self.window, fn)
+
+    # ===============================
+    # Reusable modal dialogs
+    # ===============================
+    def choice_dialog(self, message, options, title="Confirm"):
+        """Modal dialog with one button per (label, callback) in `options`, plus Cancel.
+        Each button closes the dialog, then runs its callback. Headless runs the first
+        option's callback (no dialog)."""
+        if self.headless:
+            if options:
+                options[0][1]()
+            return
+        em  = self.window.theme.font_size
+        dlg = gui.Dialog(title)
+        v = gui.Vert(em, gui.Margins(em, em, em, em))
+        v.add_child(gui.Label(message))
+        h = gui.Horiz(0.5 * em)
+        h.add_stretch()
+
+        def _make(cb):
+            def _clicked():
+                self.window.close_dialog()
+                if cb is not None:
+                    try:
+                        cb()
+                    except Exception as e:
+                        print(f"[UI] dialog action failed: {e}")
+            return _clicked
+
+        for label, cb in options:
+            btn = gui.Button(label)
+            btn.set_on_clicked(_make(cb))
+            h.add_child(btn)
+        cancel = gui.Button("Cancel")
+        cancel.set_on_clicked(lambda: self.window.close_dialog())
+        h.add_child(cancel)
+
+        v.add_child(gui.Label(""))
+        v.add_child(h)
+        dlg.add_child(v)
+        self.window.show_dialog(dlg)
+
+    def confirm_dialog(self, message, on_ok, title="Confirm"):
+        """Modal OK/Cancel confirm. Headless just runs on_ok (no dialog)."""
+        if self.headless:
+            on_ok()
+            return
+        # Reuse choice_dialog; its Cancel button already closes the dialog and does nothing.
+        self.choice_dialog(message, [("OK", on_ok)], title=title)
 
     # ===============================
     # Keybindings
@@ -673,7 +740,24 @@ def run_headless(mesh_arg=None):
              "custom = set fill-rate or exact count per scene.")
     run_synthetic(app, synth_mode == "express")
 
-    # 8. Report output locations.
+    # 8. Optional MechVision tuning (whole-pipeline end-to-end, headless).
+    if ask_yes_no("\nRun MechVision tuning now?", default=express,
+                  hint="Runs the joint Optuna study against a live MechVision instance for the "
+                       "scenes just generated. Requires MechMind Hub running at 127.0.0.1:5307."):
+        banner("MechVision tuning")
+        tuning = app.stages[Stage.TUNING]
+        # Headless callers set the study budget directly on the stage (no GUI sliders).
+        tuning.n_trials = ask("Trial budget", tuning.n_trials, int,
+                              hint="Number of round-0 Optuna trials.")
+        tuning.n_rounds = ask("Rounds", tuning.n_rounds, int)
+        tuning.sampler  = ask_choice("Sampler", list(SAMPLER_CHOICES), tuning.sampler)
+        app.set_stage(Stage.TUNING)
+        t0 = time.time()
+        tuning._run_worker()
+        rp(f"[green]Tuning took {time.time() - t0:.0f}s[/green]")
+        rp(f"Pareto front : {len(tuning._pareto)} configs")
+
+    # 9. Report output locations.
     banner("Done")
     rp(f"Reference bundle : output/reference_pcd/{app.mesh_basename}/")
     rp(f"Synthetic scenes : output/synthetic_target/{app.mesh_basename}/scene_*/")
