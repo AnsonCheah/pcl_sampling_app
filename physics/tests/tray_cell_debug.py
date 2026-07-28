@@ -64,8 +64,10 @@ def _synthetic_L():
 
 
 def load_part_and_collision(mesh_path, shape):
-    """Return (part_mesh trimesh, convex_pieces list[trimesh]) using the SAME VHACD the app's
-    DecomposeStage uses (geometry.convex_decomp.vhacd_decompose with defaults)."""
+    """Return (part_mesh trimesh, convex_pieces list[trimesh]) via VHACD
+    (geometry.convex_decomp.vhacd_decompose with defaults). NOTE: the app's DecomposeStage
+    now decomposes with CoACD instead; this debug helper stays on VHACD for a fast, deterministic
+    tray-cell repro and does not need to match the stage's collision-mesh fidelity."""
     if mesh_path:
         part_mesh, _ = load_part(mesh_path=mesh_path)            # scales mm->m, centres, decomposes
     else:
