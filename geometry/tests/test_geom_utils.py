@@ -9,8 +9,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 import numpy as np
 import pytest
+import trimesh
 
-from geometry.geom_utils import rotation_aligning_vector_to_axis
+from geometry.geom_utils import rotation_aligning_vector_to_axis, face_facet_map
 
 
 def _is_rotation(R):
@@ -54,3 +55,27 @@ def test_input_not_mutated():
 def test_parallel_returns_identity():
     R = rotation_aligning_vector_to_axis((0.0, 0.0, 5.0), (0.0, 0.0, 1.0))
     assert np.allclose(R, np.eye(3), atol=1e-6)
+
+
+def test_face_facet_map_box_groups_coplanar_faces():
+    box = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+    box.merge_vertices()
+    face_to_facet, facets, facets_normal = face_facet_map(box)
+
+    assert len(facets) == 6                                   # a box has 6 flat sides
+    assert all(len(grp) == 2 for grp in facets)               # each side = 2 coplanar triangles
+    assert (face_to_facet >= 0).all()                         # every triangle is grouped
+    assert facets_normal.shape == (6, 3)
+    # facet normals are axis-aligned, and match each member triangle's own normal direction
+    axis_sorted = np.sort(np.abs(facets_normal), axis=1)
+    assert np.allclose(axis_sorted[:, :2], 0.0, atol=1e-6)
+    for f, fi in enumerate(face_to_facet):
+        assert abs(abs(np.dot(facets_normal[fi], box.face_normals[f])) - 1.0) < 1e-6
+
+
+def test_face_facet_map_curved_is_all_singletons():
+    sphere = trimesh.creation.icosphere(subdivisions=1)       # no coplanar-adjacent faces
+    sphere.merge_vertices()
+    face_to_facet, facets, _ = face_facet_map(sphere)
+    assert len(facets) == 0
+    assert (face_to_facet == -1).all()

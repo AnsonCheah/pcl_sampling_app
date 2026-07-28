@@ -6,7 +6,7 @@ import open3d.visualization.rendering as rendering
 import trimesh
 from enums import Stage
 from stages.stage_base import BaseStage
-from geometry.geom_utils import o3d_to_trimesh, trimesh_to_o3d, O3DSceneObject, rotation_aligning_vector_to_axis
+from geometry.geom_utils import o3d_to_trimesh, trimesh_to_o3d, O3DSceneObject, rotation_aligning_vector_to_axis, face_facet_map
 from geometry.file_utils import list_scene_dirs
 from physics.mujoco_bin_scene import MujocoBinScene, MAX_BIN_DIM
 import os
@@ -97,6 +97,13 @@ class SceneStage(BaseStage):
         self.picked_normal = None   # unit normal (mesh frame) of the last picked face
         self.user_R = None          # 3x3 rotation mapping picked_normal -> world +Z
         self._pick_down_xy = None    # mouse-down pixel, to tell a click from a camera drag
+        # Pick-mode caches (built once in _enter_pick_mode): a reusable raycast scene + coplanar
+        # facet grouping so hover/click highlight a whole flat patch, not a lone triangle.
+        self._pick_rc = None
+        self._pick_facets = None
+        self._pick_facet_normal = None
+        self._face_to_facet = None
+        self._hover_facet = None     # last hovered facet key, so we only redraw on change
 
     def build_panel(self):
         if self.app.headless:
@@ -348,8 +355,9 @@ class SceneStage(BaseStage):
     # Manual face-up picking (structured modes)
     # ─────────────────────────────────────────────────────────────────────
     def _enter_pick_mode(self):
-        """Show the bare part mesh and arm click-to-pick. A click selects the face to point
-        up; a drag still rotates the camera (see _on_mouse_event)."""
+        """Show the bare part mesh, build the pick caches, and arm hover+click picking. Hovering
+        highlights the coplanar patch under the cursor; a click sets it as 'up'; a drag still
+        rotates the camera (see _on_mouse_event)."""
         if self.app.headless or self.app.target_mesh is None:
             print("[SCENE] import a mesh before picking a face-up direction.")
             return
@@ -359,23 +367,101 @@ class SceneStage(BaseStage):
         mesh.compute_vertex_normals()
         self.app.scene.scene.add_geometry("pick_mesh", mesh, self.app.default_material)
         self.app._reframe()
+
+        # Built once, reused for every hover/click: a raycast scene + coplanar facet grouping.
+        self.pick_status_label.text = "Preparing pick…"
+        self._pick_rc = o3d.t.geometry.RaycastingScene()
+        self._pick_rc.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(self.app.target_mesh))
+        tri = o3d_to_trimesh(self.app.target_mesh)
+        tri.merge_vertices()   # restore adjacency on split-vertex STL meshes (no face reorder)
+        self._face_to_facet, self._pick_facets, self._pick_facet_normal = face_facet_map(tri)
+        self._hover_facet = None
         self.pick_mode = True
         self._pick_down_xy = None
-        self.pick_status_label.text = "Click the face that should point up…"
+        self.pick_status_label.text = "Hover a face; click to set it as 'up'."
 
     def _exit_pick_mode(self):
         """Stop the picking interaction (keeps any already-picked result and its overlay)."""
         self.pick_mode = False
         self._pick_down_xy = None
+        self._hover_facet = None
         if not self.app.headless and getattr(self.app, "scene", None) is not None:
+            self._remove_hover()
             self.app.scene.set_view_controls(gui.SceneWidget.Controls.ROTATE_CAMERA)
 
     def _remove_pick_overlays(self):
         if self.app.headless:
             return
-        for name in ("picked_face", "pick_arrow"):
+        for name in ("hover_face", "picked_face", "pick_arrow"):
             if self.app.scene.scene.has_geometry(name):
                 self.app.scene.scene.remove_geometry(name)
+
+    def _remove_hover(self):
+        if self.app.scene.scene.has_geometry("hover_face"):
+            self.app.scene.scene.remove_geometry("hover_face")
+            self.app.scene.force_redraw()
+
+    def _faces_normal_for(self, prim_id, ray_dir, tri_normal):
+        """Resolve a hit triangle to its coplanar facet (faces + facet normal), or the single
+        triangle for a curved surface. Returns (face_indices, unit up-normal facing the camera,
+        facet_index) where facet_index is -1 for a singleton triangle."""
+        fi = int(self._face_to_facet[prim_id])
+        if fi >= 0:
+            faces = np.asarray(self._pick_facets[fi])
+            n = self._pick_facet_normal[fi].astype(float)
+        else:
+            faces = np.array([prim_id])
+            n = np.asarray(tri_normal, dtype=float)
+        norm = np.linalg.norm(n)
+        n = n / norm if norm > 1e-9 else np.array([0.0, 0.0, 1.0])
+        if np.dot(n, ray_dir) > 0:   # geometric normal can point either way; face the camera
+            n = -n
+        return faces, n, fi
+
+    def _add_facet_overlay(self, name, faces, normal, color):
+        """Overlay the given faces of target_mesh in a flat `color`, nudged out along `normal` to
+        avoid z-fighting. Only the used vertices are uploaded (cheap enough for per-hover redraw)."""
+        verts = np.asarray(self.app.target_mesh.vertices)
+        tris = np.asarray(self.app.target_mesh.triangles)[np.asarray(faces)]
+        extent = float(np.linalg.norm(self.app.target_mesh.get_axis_aligned_bounding_box().get_extent()))
+        offset = 0.002 * max(extent, 1e-6) * np.asarray(normal, dtype=float)
+        used = np.unique(tris)
+        hl = o3d.geometry.TriangleMesh(
+            o3d.utility.Vector3dVector(verts[used] + offset),
+            o3d.utility.Vector3iVector(np.searchsorted(used, tris)))
+        hl.compute_vertex_normals()
+        mat = rendering.MaterialRecord()
+        mat.shader = "defaultUnlit"
+        mat.base_color = list(color) + [1.0]
+        if self.app.scene.scene.has_geometry(name):
+            self.app.scene.scene.remove_geometry(name)
+        self.app.scene.scene.add_geometry(name, hl, mat)
+
+    def _hover_face_at(self, x, y):
+        """Highlight the coplanar patch under the cursor. Cheap (prebuilt raycast scene) and only
+        redraws when the hovered facet changes, so it stays smooth on dense meshes."""
+        if self._pick_rc is None:
+            return
+        ray = self._build_pick_ray(x, y)
+        if ray is None:
+            return
+        cam_pos, ray_dir = ray
+        rays = o3d.core.Tensor([[*cam_pos, *ray_dir]], dtype=o3d.core.Dtype.Float32)
+        ans = self._pick_rc.cast_rays(rays)
+        if not np.isfinite(float(ans["t_hit"].numpy()[0])):
+            if self._hover_facet is not None:
+                self._hover_facet = None
+                self._remove_hover()
+            return
+        prim_id = int(ans["primitive_ids"].numpy()[0])
+        tri_n = ans["primitive_normals"].numpy()[0].astype(float)
+        faces, n_up, fi = self._faces_normal_for(prim_id, ray_dir, tri_n)
+        key = fi if fi >= 0 else (-1 - prim_id)   # distinct key per singleton triangle
+        if key == self._hover_facet:
+            return
+        self._hover_facet = key
+        self._add_facet_overlay("hover_face", faces, n_up, (1.0, 0.85, 0.2))
+        self.app.scene.force_redraw()
 
     def _build_pick_ray(self, x, y):
         """World-space (origin, direction) for the click at window pixel (x, y). Mirrors the
@@ -403,71 +489,61 @@ class SceneStage(BaseStage):
         return cam_pos, ray_dir / length
 
     def _pick_face_at(self, x, y):
-        """Ray-cast the click into the part mesh, take the hit triangle's normal as the new
-        'up' direction, store the aligning rotation, and highlight the face for confirmation."""
-        if self.app.target_mesh is None:
+        """Ray-cast the click, resolve its coplanar facet, take the facet normal as the new 'up'
+        direction, store the aligning rotation, and draw the confirmation patch + arrow."""
+        if self.app.target_mesh is None or self._pick_rc is None:
             return
         ray = self._build_pick_ray(x, y)
         if ray is None:
             return
         cam_pos, ray_dir = ray
-
-        rc = o3d.t.geometry.RaycastingScene()
-        rc.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(self.app.target_mesh))
         rays = o3d.core.Tensor([[*cam_pos, *ray_dir]], dtype=o3d.core.Dtype.Float32)
-        ans = rc.cast_rays(rays)
+        ans = self._pick_rc.cast_rays(rays)
         if not np.isfinite(float(ans["t_hit"].numpy()[0])):
             self.pick_status_label.text = "Missed the part — click on a face."
             return
 
         prim_id = int(ans["primitive_ids"].numpy()[0])
-        n_up = ans["primitive_normals"].numpy()[0].astype(float)
-        # RaycastingScene's geometric normal can point either way; make it face the camera
-        # (the visible side the user clicked) so "up" = toward the viewer.
-        if np.dot(n_up, ray_dir) > 0:
-            n_up = -n_up
-        n_up /= np.linalg.norm(n_up)
+        tri_n = ans["primitive_normals"].numpy()[0].astype(float)
+        faces, n_up, _ = self._faces_normal_for(prim_id, ray_dir, tri_n)
 
         self.picked_normal = n_up
         self.user_R = rotation_aligning_vector_to_axis(n_up, (0.0, 0.0, 1.0))
         self.pick_mode = False   # one click = one pick; drag to rotate, click again to re-pick
-        self._highlight_picked_face(prim_id, n_up)
+        self._hover_facet = None
+        self._highlight_picked_face(faces, n_up)
         self.pick_status_label.text = f"Face-up set: n=[{n_up[0]:+.2f} {n_up[1]:+.2f} {n_up[2]:+.2f}]"
 
-    def _highlight_picked_face(self, prim_id, n_up):
-        """Overlay the picked triangle (orange) plus an arrow along the chosen up direction."""
-        verts = np.asarray(self.app.target_mesh.vertices)
-        tris = np.asarray(self.app.target_mesh.triangles)
-        tri_v = verts[tris[prim_id]]
-        centroid = tri_v.mean(axis=0)
-        extent = float(np.linalg.norm(self.app.target_mesh.get_axis_aligned_bounding_box().get_extent()))
-        arrow_len = 0.5 * extent if extent > 1e-9 else 1.0
-
+    def _highlight_picked_face(self, faces, n_up):
+        """Overlay the picked coplanar patch (orange) plus a 3D arrow from the part centre along the
+        chosen up direction."""
         self._remove_pick_overlays()
+        self._add_facet_overlay("picked_face", faces, n_up, (0.0, 0.7, 0.7))
 
-        hl = o3d.geometry.TriangleMesh()
-        hl.vertices = o3d.utility.Vector3dVector(tri_v)
-        hl.triangles = o3d.utility.Vector3iVector([[0, 1, 2]])
-        hl.compute_vertex_normals()
-        hl_mat = rendering.MaterialRecord()
-        hl_mat.shader = "defaultUnlit"
-        hl_mat.base_color = [1.0, 0.4, 0.1, 1.0]
-        self.app.scene.scene.add_geometry("picked_face", hl, hl_mat)
-
-        arrow = o3d.geometry.LineSet()
-        arrow.points = o3d.utility.Vector3dVector([centroid, centroid + n_up * arrow_len])
-        arrow.lines = o3d.utility.Vector2iVector([[0, 1]])
-        arrow.colors = o3d.utility.Vector3dVector([[1.0, 0.4, 0.1]])
+        bbox = self.app.target_mesh.get_axis_aligned_bounding_box()
+        L = 0.6 * float(np.linalg.norm(bbox.get_extent()))
+        if L < 1e-9:
+            L = 1.0
+        r = 0.02 * L
+        arrow = o3d.geometry.TriangleMesh.create_arrow(
+            cylinder_radius=r, cone_radius=2 * r, cylinder_height=0.7 * L, cone_height=0.3 * L)
+        arrow.rotate(rotation_aligning_vector_to_axis((0.0, 0.0, 1.0), n_up), center=(0.0, 0.0, 0.0))
+        arrow.translate(self.app.target_mesh.get_center())
+        arrow.compute_vertex_normals()
         arrow_mat = rendering.MaterialRecord()
-        arrow_mat.shader = "unlitLine"
-        arrow_mat.line_width = 3.0
+        arrow_mat.shader = "defaultLit"
+        arrow_mat.base_color = [0.0, 0.0, 1.0, 1.0]
         self.app.scene.scene.add_geometry("pick_arrow", arrow, arrow_mat)
         self.app.scene.force_redraw()
 
     def _on_mouse_event(self, event):
-        # Only active while picking a face-up direction. A near-stationary press-release is a
-        # pick; anything with drag falls through so the camera controller can rotate the view.
+        # Only active while picking a face-up direction. Hover highlights the patch under the
+        # cursor; a near-stationary press-release is a pick; anything with drag falls through so
+        # the camera controller can rotate the view.
         if not self.pick_mode:
+            return gui.Widget.EventCallbackResult.IGNORED
+        if event.type == gui.MouseEvent.Type.MOVE:
+            self._hover_face_at(event.x, event.y)
             return gui.Widget.EventCallbackResult.IGNORED
         if event.type == gui.MouseEvent.Type.BUTTON_DOWN:
             self._pick_down_xy = (event.x, event.y)
@@ -584,6 +660,8 @@ class SceneStage(BaseStage):
         self.picked_normal = None
         self.user_R = None
         self._pick_down_xy = None
+        self._pick_rc = None
+        self._hover_facet = None
         self.orient_radio.selected_index = 0
         self.pick_status_label.text = "Face-up: auto"
         self._remove_pick_overlays()
