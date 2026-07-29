@@ -99,6 +99,7 @@ class RenderStage(BaseStage):
             self.app.main_thread(lambda: self.app._clear_scene())
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry(
                 "scene_mesh", self.app.scene_mesh, self.app.default_material))
+            self.app.main_thread(self.app._reframe)   # content swap -> reframe
         else:
             self.app.main_thread(lambda: self.app._clear_scene())
         self.enable_widgets()
@@ -139,6 +140,7 @@ class RenderStage(BaseStage):
         if not self.app.headless:
             self.app.show_progress("Rendering synthetic scene...")
             self.app.main_thread(lambda: self.app._clear_scene())
+        self._framed = False   # frame once, on the first cloud (see add_to_render_scene)
 
         def add_to_render_scene(name: str, geom):
             self.app.synthetic_scenes[name] = O3DSceneObject(geom)
@@ -153,6 +155,14 @@ class RenderStage(BaseStage):
                 material = self.app.default_material
             self.app.synthetic_scenes[name].material = material
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry(name, geom, material))
+            # Frame the first cloud only. Later noise steps add outliers that would otherwise
+            # keep widening the bounds and walk the camera backwards on every step. The later
+            # steps still need an explicit repaint — they run with no input events to piggyback on.
+            if not self._framed:
+                self._framed = True
+                self.app.main_thread(self.app._reframe)
+            else:
+                self.app.main_thread(self.app.redraw)
 
         def _update_pb(message: str):
             if not self.app.headless:
@@ -164,8 +174,6 @@ class RenderStage(BaseStage):
         look_at = np.asarray([0.0, 0.0, 0.0])                                # bin floor centre
         T_cam = camera_view_matrix(cam_pos, look_at, up=np.array([0.0, 1.0, 0.0]))
         self.T_cam = T_cam   # kept for scene-state export in save_synthetic_targets
-
-        self.app._reframe()
 
         render = scene_render(self.app.o3d_scene, T_cam, look_at, self.fov_deg, self.res_width, self.res_height, verbose=self.verbose)
         pts = render["points"]
@@ -382,7 +390,7 @@ class RenderStage(BaseStage):
             selected_text,
             self.app.synthetic_targets[selected_text].geom,
             self.app.synthetic_targets[selected_text].material))
-        self.app.scene.force_redraw()
+        self.app.main_thread(self.app._reframe)   # content swap -> reframe
 
     def preview_synthetic_scenes(self, selected_text: str, selected_index: int) -> None:
         if self.app.headless: return
@@ -393,7 +401,7 @@ class RenderStage(BaseStage):
                 selected_text,
                 self.app.synthetic_scenes[selected_text].geom,
                 self.app.synthetic_scenes[selected_text].material))
-        self.app.scene.force_redraw()
+            self.app.main_thread(self.app._reframe)   # content swap -> reframe
 
     def show_segmented_scene(self):
         if self.app.headless: return
@@ -411,3 +419,4 @@ class RenderStage(BaseStage):
                 self.app.synthetic_scenes["bin_pcd"].material
             )
         self.app.main_thread(add_geoms)
+        self.app.main_thread(self.app._reframe)   # content swap -> reframe

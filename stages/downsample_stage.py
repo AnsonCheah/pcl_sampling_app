@@ -72,7 +72,7 @@ class DownsampleStage(BaseStage):
             self.app.scene.scene.add_geometry("surface_pcd", self.app.down_pcd_surface, self.app.default_point_material)
         elif idx == 1 and self.app.down_pcd_edge is not None:
             self.app.scene.scene.add_geometry("edge_pcd", self.app.down_pcd_edge, self.app.default_point_material)
-        self.app.scene.force_redraw()
+        self.app._reframe()   # content swap -> reframe (posts a redraw too)
 
     def _refresh_ui(self):
         if self.app.headless:
@@ -87,7 +87,7 @@ class DownsampleStage(BaseStage):
         elif self.app.cropped_pcd is not None:
             self.app.main_thread(lambda: self.app._clear_scene())
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry("cropped_pcd", self.app.cropped_pcd, self.app.default_point_material))
-        self.app.main_thread(lambda: self.app.scene.force_redraw())
+        self.app.main_thread(self.app._reframe)   # content swap -> reframe (posts a redraw too)
         self.app.main_thread(self.enable_widgets)
 
 
@@ -180,5 +180,4 @@ class DownsampleStage(BaseStage):
             mesh.transform(T)
         self.app.geocenter = np.round(pcd_geocenter(self.app.down_pcd_surface), decimals=5)
         print("recentered mesh and pointcloud")
-        self.app.main_thread(self.app._reframe)
-        self._refresh_ui()
+        self._refresh_ui()   # swaps the geometry, then reframes — do not reframe before this

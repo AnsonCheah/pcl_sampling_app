@@ -297,10 +297,7 @@ class SceneStage(BaseStage):
             self.app._clear_scene()
             for name, g in geoms:
                 self.app.scene.scene.add_geometry(name, g, self.app.default_material)
-            bbox = geoms[-1][1].get_axis_aligned_bounding_box()   # bin box frames the view
-            if not bbox.is_empty():
-                self.app.scene.setup_camera(60.0, bbox, bbox.get_center())
-            self.app.scene.force_redraw()
+            self.app._reframe()
         self.app.main_thread(apply)
 
     # Merged scene-mode combo -> (arrangement, structure_type). Cluttered is the only
@@ -399,7 +396,7 @@ class SceneStage(BaseStage):
     def _remove_hover(self):
         if self.app.scene.scene.has_geometry("hover_face"):
             self.app.scene.scene.remove_geometry("hover_face")
-            self.app.scene.force_redraw()
+            self.app.redraw()
 
     def _faces_normal_for(self, prim_id, ray_dir, tri_normal):
         """Resolve a hit triangle to its coplanar facet (faces + facet normal), or the single
@@ -461,7 +458,7 @@ class SceneStage(BaseStage):
             return
         self._hover_facet = key
         self._add_facet_overlay("hover_face", faces, n_up, (1.0, 0.85, 0.2))
-        self.app.scene.force_redraw()
+        self.app.redraw()
 
     def _build_pick_ray(self, x, y):
         """World-space (origin, direction) for the click at window pixel (x, y). Mirrors the
@@ -515,10 +512,10 @@ class SceneStage(BaseStage):
         self.pick_status_label.text = f"Face-up set: n=[{n_up[0]:+.2f} {n_up[1]:+.2f} {n_up[2]:+.2f}]"
 
     def _highlight_picked_face(self, faces, n_up):
-        """Overlay the picked coplanar patch (orange) plus a 3D arrow from the part centre along the
+        """Overlay the picked coplanar patch (cyan) plus a 3D arrow (blue) from the part centre along the
         chosen up direction."""
         self._remove_pick_overlays()
-        self._add_facet_overlay("picked_face", faces, n_up, (0.0, 0.7, 0.7))
+        self._add_facet_overlay("picked_face", faces, n_up, (0.0, 1.0, 1.0))
 
         bbox = self.app.target_mesh.get_axis_aligned_bounding_box()
         L = 0.6 * float(np.linalg.norm(bbox.get_extent()))
@@ -534,7 +531,7 @@ class SceneStage(BaseStage):
         arrow_mat.shader = "defaultLit"
         arrow_mat.base_color = [0.0, 0.0, 1.0, 1.0]
         self.app.scene.scene.add_geometry("pick_arrow", arrow, arrow_mat)
-        self.app.scene.force_redraw()
+        self.app.redraw()
 
     def _on_mouse_event(self, event):
         # Only active while picking a face-up direction. Hover highlights the patch under the
@@ -628,8 +625,7 @@ class SceneStage(BaseStage):
                     if obj.T_gt is not None:
                         g.transform(obj.T_gt)
                     self.app.scene.scene.add_geometry(name, g, self.app.default_material)
-            self.app.main_thread(self.app._reframe)
-            self.app.scene.force_redraw()
+            self.app._reframe()
         self.app.main_thread(show)
 
     def _refresh_ui(self):
@@ -647,6 +643,7 @@ class SceneStage(BaseStage):
             elif self.app.target_mesh is not None:
                 self.app.main_thread(lambda: self.app.scene.scene.add_geometry(
                     "mesh", self.app.target_mesh, self.app.default_material))
+            self.app.main_thread(self.app._reframe)   # content swap -> reframe
         self._apply_structure_label()
         self._apply_option_visibility()
         self.enable_widgets()
@@ -676,7 +673,8 @@ class SceneStage(BaseStage):
         self.o3d_scene = {}
         self.mj_scene = None
         self.worker_step = 0
-        self.app.main_thread(self.app._reframe)
+        # No reframe here: this fires against a stale/empty scene. _refresh_ui reframes once the
+        # replacement geometry is actually on screen.
 
     def worker(self):
         TOTAL_STEPS = 4
@@ -718,7 +716,9 @@ class SceneStage(BaseStage):
         # MujocoBinScene requires mesh centered at its own origin: every rotation, spawn-height,
         # stable-pose, and tray-pocket calculation rotates vertices around (0,0,0). Center a
         # local copy without modifying app.target_mesh so the user's centering choice is preserved.
-        mesh_center = np.asarray(self.app.target_mesh.get_center())
+        # Anchored on the AABB centre (not the vertex mean) so r_max and bounding_sphere — both
+        # measured about the body origin — are not skewed by tessellation density.
+        mesh_center = np.asarray(self.app.target_mesh.get_axis_aligned_bounding_box().get_center())
         needs_centering = np.linalg.norm(mesh_center) > 1e-9
         part_mesh = o3d_to_trimesh(self.app.target_mesh)
         if needs_centering:
@@ -743,7 +743,7 @@ class SceneStage(BaseStage):
                                        structure_type=self.structure_type,
                                        structure_height_frac=self.structure_height_pct / 100.0,
                                        clearance_mode=self.clearance_mode)
-        self.app.mj_scene = self.mj_scene   # handoff to RenderStage + app._reframe
+        self.app.mj_scene = self.mj_scene   # handoff to RenderStage
 
         # Live mesh preview: shown whenever the scene actually simulates (random, or structured
         # partition/tray which now settle under gravity). Structured/none is static → no preview.
@@ -832,6 +832,9 @@ class SceneStage(BaseStage):
                         body_name, self._pose_to_T(pos, bd["quaternion"]))
             self.app.scene.scene.add_geometry("bin", bin_mesh, self.app.default_material)
         self.app.main_thread(add_all)
+        # Scene bounds work here even though parked bodies are hidden and still counted: they keep
+        # an identity transform (see add_all above), so they sit at the part's own origin, and the
+        # bin dominates the box either way.
         self.app.main_thread(self.app._reframe)   # GUI op → main thread (Open3D not thread-safe)
 
     def _live_preview_update(self):
@@ -851,5 +854,5 @@ class SceneStage(BaseStage):
                 self.app.scene.scene.show_geometry(name, not parked)
                 if not parked:
                     self.app.scene.scene.set_geometry_transform(name, T)
-            self.app.scene.force_redraw()
+            self.app.redraw()
         self.app.main_thread(apply)
