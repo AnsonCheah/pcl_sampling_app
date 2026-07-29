@@ -6,7 +6,7 @@ import open3d.visualization.rendering as rendering
 import trimesh
 from enums import Stage
 from stages.stage_base import BaseStage
-from geometry.geom_utils import o3d_to_trimesh, trimesh_to_o3d, O3DSceneObject
+from geometry.geom_utils import o3d_to_trimesh, trimesh_to_o3d, O3DSceneObject, rotation_aligning_vector_to_axis, face_facet_map
 from geometry.file_utils import list_scene_dirs
 from physics.mujoco_bin_scene import MujocoBinScene, MAX_BIN_DIM
 import os
@@ -91,17 +91,38 @@ class SceneStage(BaseStage):
         self.o3d_scene = {}
         self.mj_scene = None
         self.stable_pose_R = None   # optional forced stable orientation (structured mode, set per-pose by headless driver)
+        # Manual face-up picking (GUI structured modes): user picks the face to point up,
+        # overriding the auto stable pose. See _pick_face_at / _enter_pick_mode.
+        self.pick_mode = False
+        self.picked_normal = None   # unit normal (mesh frame) of the last picked face
+        self.user_R = None          # 3x3 rotation mapping picked_normal -> world +Z
+        self._pick_down_xy = None    # mouse-down pixel, to tell a click from a camera drag
+        # Pick-mode caches (built once in _enter_pick_mode): a reusable raycast scene + coplanar
+        # facet grouping so hover/click highlight a whole flat patch, not a lone triangle.
+        self._pick_rc = None
+        self._pick_facets = None
+        self._pick_facet_normal = None
+        self._face_to_facet = None
+        self._hover_facet = None     # last hovered facet key, so we only redraw on change
 
     def build_panel(self):
         if self.app.headless:
             return
         v = gui.Vert(4)
 
+        # Single scene-mode selector. Drives BOTH self.arrangement (random vs structured)
+        # and self.structure_type (none/partition/tray) — see the _is_random() /
+        # _structure_type() helpers. Cluttered = random pile; Arranged = static grid at a
+        # single pose; Partition = egg-crate dividers; Tray = molded pockets.
         self.arrangement_combo = self.register_widget(gui.Combobox())
-        self.arrangement_combo.add_item("Random")
-        self.arrangement_combo.add_item("Structured")
+        for item in ("Cluttered", "Arranged", "Partition", "Tray"):
+            self.arrangement_combo.add_item(item)
         self.arrangement_combo.selected_index = 0
         self.arrangement_combo.set_on_selection_changed(self._on_arrangement_changed)
+
+        # --- Cluttered (random) options: fill-rate % or override count ---
+        # Grouped in a Vert so the whole block can be hidden when not in Cluttered mode.
+        self.random_opts = gui.Vert(4)
         # One slider, repurposed by the radio: fill-rate % (auto) or override count.
         self.radio_mode = self.register_widget(gui.RadioButton(gui.RadioButton.HORIZ),
                                                enabled_if=lambda: self._is_random())
@@ -112,13 +133,30 @@ class SceneStage(BaseStage):
         self.gen_slider = self.register_widget(gui.Slider(gui.Slider.INT),
                                                enabled_if=lambda: self._is_random())
         self._apply_slider_mode(0)                     # init in fill-rate mode
+        self.random_opts.add_child(self.radio_mode)
+        self.random_opts.add_child(self.gen_label)
+        self.random_opts.add_child(self.gen_slider)
 
-        # --- Structured-scene structure (partition / tray) ---
-        self.structure_radio = self.register_widget(gui.RadioButton(gui.RadioButton.HORIZ),
-                                                    enabled_if=lambda: not self._is_random())
-        self.structure_radio.set_items(["None", "Partition", "Tray"])
-        self.structure_radio.selected_index = 0
-        self.structure_radio.set_on_selection_changed(self._on_structure_changed)
+        # --- Structured orientation: auto stable pose vs manual face-up pick ---
+        # Visible for every structured mode (Arranged/Partition/Tray).
+        self.orient_opts = gui.Vert(4)
+        self.orient_radio = self.register_widget(gui.RadioButton(gui.RadioButton.HORIZ),
+                                                 enabled_if=lambda: not self._is_random())
+        self.orient_radio.set_items(["Auto pose", "Manual face-up"])
+        self.orient_radio.selected_index = 0
+        self.orient_radio.set_on_selection_changed(self._on_orient_changed)
+        self.btn_pick_face = self.register_widget(
+            gui.Button("Pick Face-Up"),
+            lambda: (not self._is_random()) and self.orient_radio.selected_index == 1)
+        self.btn_pick_face.set_on_clicked(self._enter_pick_mode)
+        self.pick_status_label = gui.Label("Face-up: auto")   # plain label, not registered
+        self.orient_opts.add_child(gui.Label("Part Orientation"))
+        self.orient_opts.add_child(self.orient_radio)
+        self.orient_opts.add_child(self.btn_pick_face)
+        self.orient_opts.add_child(self.pick_status_label)
+
+        # --- Partition / tray fixture options: height/depth + fit clearance ---
+        self.structure_opts = gui.Vert(4)
         self.structure_slider_label = gui.Label("Structure Height (%)")   # plain label, not registered
         self.structure_slider = self.register_widget(
             gui.Slider(gui.Slider.INT),
@@ -131,6 +169,10 @@ class SceneStage(BaseStage):
             enabled_if=lambda: (not self._is_random()) and self._structure_type() != "none")
         self.clearance_radio.set_items(["Snug", "Medium", "Loose"])
         self.clearance_radio.selected_index = 1        # medium
+        self.structure_opts.add_child(self.structure_slider_label)
+        self.structure_opts.add_child(self.structure_slider)
+        self.structure_opts.add_child(self.clearance_label)
+        self.structure_opts.add_child(self.clearance_radio)
 
         self.btn_generate = self.register_widget(gui.Button("Generate Scene"))
         self.btn_generate.set_on_clicked(self.start)
@@ -148,16 +190,11 @@ class SceneStage(BaseStage):
         self.btn_restart.set_on_clicked(lambda: self.app._restart())
         v.add_child(gui.Label("Generate Physical Scene"))
         v.add_child(gui.Label(""))
+        v.add_child(gui.Label("Scene Mode"))
         v.add_child(self.arrangement_combo)
-        v.add_child(self.radio_mode)
-        v.add_child(self.gen_label)
-        v.add_child(self.gen_slider)
-        v.add_child(gui.Label("Structure"))
-        v.add_child(self.structure_radio)
-        v.add_child(self.structure_slider_label)
-        v.add_child(self.structure_slider)
-        v.add_child(self.clearance_label)
-        v.add_child(self.clearance_radio)
+        v.add_child(self.random_opts)
+        v.add_child(self.orient_opts)
+        v.add_child(self.structure_opts)
         v.add_child(self.btn_generate)
         v.add_child(self.btn_reset)
         v.add_child(gui.Label(""))
@@ -166,6 +203,10 @@ class SceneStage(BaseStage):
         v.add_child(self.btn_disk_refresh)
         v.add_child(gui.Label(""))
         v.add_child(self.btn_restart)
+
+        # Initial visibility matches the default selection (Cluttered). set_needs_layout is
+        # skipped here because the window doesn't exist yet at panel-build time.
+        self._apply_option_visibility()
 
         print("loaded scene panel")
         return v
@@ -256,32 +297,263 @@ class SceneStage(BaseStage):
             self.app._clear_scene()
             for name, g in geoms:
                 self.app.scene.scene.add_geometry(name, g, self.app.default_material)
-            bbox = geoms[-1][1].get_axis_aligned_bounding_box()   # bin box frames the view
-            if not bbox.is_empty():
-                self.app.scene.setup_camera(60.0, bbox, bbox.get_center())
-            self.app.scene.force_redraw()
+            self.app._reframe()
         self.app.main_thread(apply)
 
-    def _is_random(self) -> bool:
-        return self.arrangement_combo.selected_text == "Random"
+    # Merged scene-mode combo -> (arrangement, structure_type). Cluttered is the only
+    # random mode; the other three are structured with an increasing amount of fixture.
+    _SCENE_MODES = {
+        "Cluttered": ("random", "none"),
+        "Arranged":  ("structured", "none"),
+        "Partition": ("structured", "partition"),
+        "Tray":      ("structured", "tray"),
+    }
 
-    def _on_arrangement_changed(self, text, idx):
-        # Predicates drive enable/disable; just re-evaluate them.
-        self.enable_widgets()
+    def _is_random(self) -> bool:
+        return self._SCENE_MODES[self.arrangement_combo.selected_text][0] == "random"
 
     def _structure_type(self) -> str:
-        return ["none", "partition", "tray"][self.structure_radio.selected_index]
+        return self._SCENE_MODES[self.arrangement_combo.selected_text][1]
 
     def _clearance_mode(self) -> str:
         return ["snug", "medium", "loose"][self.clearance_radio.selected_index]
 
-    def _apply_structure_label(self, idx: int):
+    def _apply_structure_label(self):
         self.structure_slider_label.text = {
-            0: "Structure Height (%)", 1: "Partition Height (%)", 2: "Pocket Depth (%)"}[idx]
+            "none": "Structure Height (%)", "partition": "Partition Height (%)",
+            "tray": "Pocket Depth (%)"}[self._structure_type()]
 
-    def _on_structure_changed(self, idx: int):
-        self._apply_structure_label(idx)
+    def _apply_option_visibility(self):
+        """Show only the option block(s) relevant to the current scene mode. Hides (not just
+        greys out) so the panel stays uncluttered. set_needs_layout is skipped until the
+        window exists (panel is built before app.window in MeshSamplingApp.__init__)."""
+        is_random = self._is_random()
+        self.random_opts.visible    = is_random
+        self.orient_opts.visible    = not is_random                              # any structured mode
+        self.structure_opts.visible = (not is_random) and self._structure_type() != "none"
+        if getattr(self.app, "window", None) is not None:
+            self.app.window.set_needs_layout()
+
+    def _on_arrangement_changed(self, text, idx):
+        # The single combo now drives both arrangement and structure, so update the fixture
+        # label, re-flow which option blocks are visible, and re-evaluate enable predicates.
+        self._exit_pick_mode()          # a mode switch cancels any in-progress face pick
+        self._apply_structure_label()
+        self._apply_option_visibility()
         self.enable_widgets()
+
+    def _on_orient_changed(self, idx: int):
+        # Leaving manual mode cancels an in-progress pick; the Pick button enables in manual.
+        if idx == 0:
+            self._exit_pick_mode()
+        self.enable_widgets()
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Manual face-up picking (structured modes)
+    # ─────────────────────────────────────────────────────────────────────
+    def _enter_pick_mode(self):
+        """Show the bare part mesh, build the pick caches, and arm hover+click picking. Hovering
+        highlights the coplanar patch under the cursor; a click sets it as 'up'; a drag still
+        rotates the camera (see _on_mouse_event)."""
+        if self.app.headless or self.app.target_mesh is None:
+            print("[SCENE] import a mesh before picking a face-up direction.")
+            return
+        self._remove_pick_overlays()
+        self.app._clear_scene()
+        mesh = o3d.geometry.TriangleMesh(self.app.target_mesh)
+        mesh.compute_vertex_normals()
+        self.app.scene.scene.add_geometry("pick_mesh", mesh, self.app.default_material)
+        self.app._reframe()
+
+        # Built once, reused for every hover/click: a raycast scene + coplanar facet grouping.
+        self.pick_status_label.text = "Preparing pick…"
+        self._pick_rc = o3d.t.geometry.RaycastingScene()
+        self._pick_rc.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(self.app.target_mesh))
+        tri = o3d_to_trimesh(self.app.target_mesh)
+        tri.merge_vertices()   # restore adjacency on split-vertex STL meshes (no face reorder)
+        self._face_to_facet, self._pick_facets, self._pick_facet_normal = face_facet_map(tri)
+        self._hover_facet = None
+        self.pick_mode = True
+        self._pick_down_xy = None
+        self.pick_status_label.text = "Hover a face; click to set it as 'up'."
+
+    def _exit_pick_mode(self):
+        """Stop the picking interaction (keeps any already-picked result and its overlay)."""
+        self.pick_mode = False
+        self._pick_down_xy = None
+        self._hover_facet = None
+        if not self.app.headless and getattr(self.app, "scene", None) is not None:
+            self._remove_hover()
+            self.app.scene.set_view_controls(gui.SceneWidget.Controls.ROTATE_CAMERA)
+
+    def _remove_pick_overlays(self):
+        if self.app.headless:
+            return
+        for name in ("hover_face", "picked_face", "pick_arrow"):
+            if self.app.scene.scene.has_geometry(name):
+                self.app.scene.scene.remove_geometry(name)
+
+    def _remove_hover(self):
+        if self.app.scene.scene.has_geometry("hover_face"):
+            self.app.scene.scene.remove_geometry("hover_face")
+            self.app.redraw()
+
+    def _faces_normal_for(self, prim_id, ray_dir, tri_normal):
+        """Resolve a hit triangle to its coplanar facet (faces + facet normal), or the single
+        triangle for a curved surface. Returns (face_indices, unit up-normal facing the camera,
+        facet_index) where facet_index is -1 for a singleton triangle."""
+        fi = int(self._face_to_facet[prim_id])
+        if fi >= 0:
+            faces = np.asarray(self._pick_facets[fi])
+            n = self._pick_facet_normal[fi].astype(float)
+        else:
+            faces = np.array([prim_id])
+            n = np.asarray(tri_normal, dtype=float)
+        norm = np.linalg.norm(n)
+        n = n / norm if norm > 1e-9 else np.array([0.0, 0.0, 1.0])
+        if np.dot(n, ray_dir) > 0:   # geometric normal can point either way; face the camera
+            n = -n
+        return faces, n, fi
+
+    def _add_facet_overlay(self, name, faces, normal, color):
+        """Overlay the given faces of target_mesh in a flat `color`, nudged out along `normal` to
+        avoid z-fighting. Only the used vertices are uploaded (cheap enough for per-hover redraw)."""
+        verts = np.asarray(self.app.target_mesh.vertices)
+        tris = np.asarray(self.app.target_mesh.triangles)[np.asarray(faces)]
+        extent = float(np.linalg.norm(self.app.target_mesh.get_axis_aligned_bounding_box().get_extent()))
+        offset = 0.002 * max(extent, 1e-6) * np.asarray(normal, dtype=float)
+        used = np.unique(tris)
+        hl = o3d.geometry.TriangleMesh(
+            o3d.utility.Vector3dVector(verts[used] + offset),
+            o3d.utility.Vector3iVector(np.searchsorted(used, tris)))
+        hl.compute_vertex_normals()
+        mat = rendering.MaterialRecord()
+        mat.shader = "defaultUnlit"
+        mat.base_color = list(color) + [1.0]
+        if self.app.scene.scene.has_geometry(name):
+            self.app.scene.scene.remove_geometry(name)
+        self.app.scene.scene.add_geometry(name, hl, mat)
+
+    def _hover_face_at(self, x, y):
+        """Highlight the coplanar patch under the cursor. Cheap (prebuilt raycast scene) and only
+        redraws when the hovered facet changes, so it stays smooth on dense meshes."""
+        if self._pick_rc is None:
+            return
+        ray = self._build_pick_ray(x, y)
+        if ray is None:
+            return
+        cam_pos, ray_dir = ray
+        rays = o3d.core.Tensor([[*cam_pos, *ray_dir]], dtype=o3d.core.Dtype.Float32)
+        ans = self._pick_rc.cast_rays(rays)
+        if not np.isfinite(float(ans["t_hit"].numpy()[0])):
+            if self._hover_facet is not None:
+                self._hover_facet = None
+                self._remove_hover()
+            return
+        prim_id = int(ans["primitive_ids"].numpy()[0])
+        tri_n = ans["primitive_normals"].numpy()[0].astype(float)
+        faces, n_up, fi = self._faces_normal_for(prim_id, ray_dir, tri_n)
+        key = fi if fi >= 0 else (-1 - prim_id)   # distinct key per singleton triangle
+        if key == self._hover_facet:
+            return
+        self._hover_facet = key
+        self._add_facet_overlay("hover_face", faces, n_up, (1.0, 0.85, 0.2))
+        self.app.redraw()
+
+    def _build_pick_ray(self, x, y):
+        """World-space (origin, direction) for the click at window pixel (x, y). Mirrors the
+        inverse proj@view unprojection in CropStage._get_selection_frustum_corners."""
+        cam = self.app.scene.scene.camera
+        view = np.asarray(cam.get_view_matrix())
+        proj = np.asarray(cam.get_projection_matrix())
+        inv_view = np.linalg.inv(view)
+        inv_proj_view = np.linalg.inv(proj @ view)
+        cam_pos = inv_view[:3, 3]
+
+        # Widget-local pixel -> NDC (y flips). frame.x/y are 0 in this layout but subtract anyway.
+        lx = x - self.app.scene.frame.x
+        ly = y - self.app.scene.frame.y
+        ndc_x = (2.0 * lx / self.app.scene.frame.width) - 1.0
+        ndc_y = 1.0 - (2.0 * ly / self.app.scene.frame.height)
+        near_world_h = inv_proj_view @ np.array([ndc_x, ndc_y, -1.0, 1.0])
+        if abs(near_world_h[3]) < 1e-6:
+            return None
+        near_world = near_world_h[:3] / near_world_h[3]
+        ray_dir = near_world - cam_pos
+        length = np.linalg.norm(ray_dir)
+        if length < 1e-6:
+            return None
+        return cam_pos, ray_dir / length
+
+    def _pick_face_at(self, x, y):
+        """Ray-cast the click, resolve its coplanar facet, take the facet normal as the new 'up'
+        direction, store the aligning rotation, and draw the confirmation patch + arrow."""
+        if self.app.target_mesh is None or self._pick_rc is None:
+            return
+        ray = self._build_pick_ray(x, y)
+        if ray is None:
+            return
+        cam_pos, ray_dir = ray
+        rays = o3d.core.Tensor([[*cam_pos, *ray_dir]], dtype=o3d.core.Dtype.Float32)
+        ans = self._pick_rc.cast_rays(rays)
+        if not np.isfinite(float(ans["t_hit"].numpy()[0])):
+            self.pick_status_label.text = "Missed the part — click on a face."
+            return
+
+        prim_id = int(ans["primitive_ids"].numpy()[0])
+        tri_n = ans["primitive_normals"].numpy()[0].astype(float)
+        faces, n_up, _ = self._faces_normal_for(prim_id, ray_dir, tri_n)
+
+        self.picked_normal = n_up
+        self.user_R = rotation_aligning_vector_to_axis(n_up, (0.0, 0.0, 1.0))
+        self.pick_mode = False   # one click = one pick; drag to rotate, click again to re-pick
+        self._hover_facet = None
+        self._highlight_picked_face(faces, n_up)
+        self.pick_status_label.text = f"Face-up set: n=[{n_up[0]:+.2f} {n_up[1]:+.2f} {n_up[2]:+.2f}]"
+
+    def _highlight_picked_face(self, faces, n_up):
+        """Overlay the picked coplanar patch (cyan) plus a 3D arrow (blue) from the part centre along the
+        chosen up direction."""
+        self._remove_pick_overlays()
+        self._add_facet_overlay("picked_face", faces, n_up, (0.0, 1.0, 1.0))
+
+        bbox = self.app.target_mesh.get_axis_aligned_bounding_box()
+        L = 0.6 * float(np.linalg.norm(bbox.get_extent()))
+        if L < 1e-9:
+            L = 1.0
+        r = 0.02 * L
+        arrow = o3d.geometry.TriangleMesh.create_arrow(
+            cylinder_radius=r, cone_radius=2 * r, cylinder_height=0.7 * L, cone_height=0.3 * L)
+        arrow.rotate(rotation_aligning_vector_to_axis((0.0, 0.0, 1.0), n_up), center=(0.0, 0.0, 0.0))
+        arrow.translate(self.app.target_mesh.get_center())
+        arrow.compute_vertex_normals()
+        arrow_mat = rendering.MaterialRecord()
+        arrow_mat.shader = "defaultLit"
+        arrow_mat.base_color = [0.0, 0.0, 1.0, 1.0]
+        self.app.scene.scene.add_geometry("pick_arrow", arrow, arrow_mat)
+        self.app.redraw()
+
+    def _on_mouse_event(self, event):
+        # Only active while picking a face-up direction. Hover highlights the patch under the
+        # cursor; a near-stationary press-release is a pick; anything with drag falls through so
+        # the camera controller can rotate the view.
+        if not self.pick_mode:
+            return gui.Widget.EventCallbackResult.IGNORED
+        if event.type == gui.MouseEvent.Type.MOVE:
+            self._hover_face_at(event.x, event.y)
+            return gui.Widget.EventCallbackResult.IGNORED
+        if event.type == gui.MouseEvent.Type.BUTTON_DOWN:
+            self._pick_down_xy = (event.x, event.y)
+            return gui.Widget.EventCallbackResult.IGNORED
+        if event.type == gui.MouseEvent.Type.BUTTON_UP and self._pick_down_xy is not None:
+            dx = event.x - self._pick_down_xy[0]
+            dy = event.y - self._pick_down_xy[1]
+            self._pick_down_xy = None
+            if (dx * dx + dy * dy) ** 0.5 < 5:
+                self._pick_face_at(event.x, event.y)
+                self.enable_widgets()
+                return gui.Widget.EventCallbackResult.HANDLED
+        return gui.Widget.EventCallbackResult.IGNORED
 
     def _apply_slider_mode(self, idx: int):
         """Repurpose the single slider: idx 0 = fill-rate %, idx 1 = override count."""
@@ -353,8 +625,7 @@ class SceneStage(BaseStage):
                     if obj.T_gt is not None:
                         g.transform(obj.T_gt)
                     self.app.scene.scene.add_geometry(name, g, self.app.default_material)
-            self.app.main_thread(self.app._reframe)
-            self.app.scene.force_redraw()
+            self.app._reframe()
         self.app.main_thread(show)
 
     def _refresh_ui(self):
@@ -372,14 +643,38 @@ class SceneStage(BaseStage):
             elif self.app.target_mesh is not None:
                 self.app.main_thread(lambda: self.app.scene.scene.add_geometry(
                     "mesh", self.app.target_mesh, self.app.default_material))
+            self.app.main_thread(self.app._reframe)   # content swap -> reframe
+        self._apply_structure_label()
+        self._apply_option_visibility()
+        self.enable_widgets()
+
+    def on_enter(self):
+        """Entry-only reset (not fired on worker completion): drop any stale face-up pick and
+        start the orientation choice at Auto so a fresh visit is clean."""
+        if self.app.headless:
+            return
+        self.pick_mode = False
+        self.picked_normal = None
+        self.user_R = None
+        self._pick_down_xy = None
+        self._pick_rc = None
+        self._hover_facet = None
+        self.orient_radio.selected_index = 0
+        self.pick_status_label.text = "Face-up: auto"
+        self._remove_pick_overlays()
+        self._apply_option_visibility()
         self.enable_widgets()
 
     def on_clear(self):
-        # Reset stage-local scratch alongside the app-level scene state.
+        # Reset stage-local scratch alongside the app-level scene state. NOTE: do not clear
+        # user_R / picked_normal here — worker() calls clear_state_from() at its start, so
+        # wiping the pick here would drop the override before the same run reads it. The pick
+        # is reset instead on stage entry (on_enter).
         self.o3d_scene = {}
         self.mj_scene = None
         self.worker_step = 0
-        self.app.main_thread(self.app._reframe)
+        # No reframe here: this fires against a stale/empty scene. _refresh_ui reframes once the
+        # replacement geometry is actually on screen.
 
     def worker(self):
         TOTAL_STEPS = 4
@@ -395,7 +690,7 @@ class SceneStage(BaseStage):
         if not self.app.headless:
             self.app.show_progress("Simulating physical scene...")
             self.app.main_thread(lambda: self.app._clear_scene())
-            self.arrangement = self.arrangement_combo.selected_text.lower()
+            self.arrangement = "random" if self._is_random() else "structured"
             self.generate_mode = "fill_rate" if self.radio_mode.selected_index == 0 else "count"
             if self.generate_mode == "fill_rate":
                 self.fill_rate = self.gen_slider.int_value / 100.0
@@ -404,6 +699,13 @@ class SceneStage(BaseStage):
             self.structure_type = self._structure_type()
             self.structure_height_pct = int(self.structure_slider.int_value)
             self.clearance_mode = self._clearance_mode()
+            # Optional manual override: when the user picked a face-up direction, force that
+            # orientation instead of the auto stable pose. Otherwise None -> _generate_structured_scene
+            # falls back to the most-probable stable pose (unchanged GUI behavior).
+            if (not self._is_random()) and self.orient_radio.selected_index == 1 and self.user_R is not None:
+                self.stable_pose_R = self.user_R
+            else:
+                self.stable_pose_R = None
 
         def _update_pb(message: str):
             if not self.app.headless:
@@ -414,7 +716,9 @@ class SceneStage(BaseStage):
         # MujocoBinScene requires mesh centered at its own origin: every rotation, spawn-height,
         # stable-pose, and tray-pocket calculation rotates vertices around (0,0,0). Center a
         # local copy without modifying app.target_mesh so the user's centering choice is preserved.
-        mesh_center = np.asarray(self.app.target_mesh.get_center())
+        # Anchored on the AABB centre (not the vertex mean) so r_max and bounding_sphere — both
+        # measured about the body origin — are not skewed by tessellation density.
+        mesh_center = np.asarray(self.app.target_mesh.get_axis_aligned_bounding_box().get_center())
         needs_centering = np.linalg.norm(mesh_center) > 1e-9
         part_mesh = o3d_to_trimesh(self.app.target_mesh)
         if needs_centering:
@@ -439,7 +743,7 @@ class SceneStage(BaseStage):
                                        structure_type=self.structure_type,
                                        structure_height_frac=self.structure_height_pct / 100.0,
                                        clearance_mode=self.clearance_mode)
-        self.app.mj_scene = self.mj_scene   # handoff to RenderStage + app._reframe
+        self.app.mj_scene = self.mj_scene   # handoff to RenderStage
 
         # Live mesh preview: shown whenever the scene actually simulates (random, or structured
         # partition/tray which now settle under gravity). Structured/none is static → no preview.
@@ -528,6 +832,9 @@ class SceneStage(BaseStage):
                         body_name, self._pose_to_T(pos, bd["quaternion"]))
             self.app.scene.scene.add_geometry("bin", bin_mesh, self.app.default_material)
         self.app.main_thread(add_all)
+        # Scene bounds work here even though parked bodies are hidden and still counted: they keep
+        # an identity transform (see add_all above), so they sit at the part's own origin, and the
+        # bin dominates the box either way.
         self.app.main_thread(self.app._reframe)   # GUI op → main thread (Open3D not thread-safe)
 
     def _live_preview_update(self):
@@ -547,5 +854,5 @@ class SceneStage(BaseStage):
                 self.app.scene.scene.show_geometry(name, not parked)
                 if not parked:
                     self.app.scene.scene.set_geometry_transform(name, T)
-            self.app.scene.force_redraw()
+            self.app.redraw()
         self.app.main_thread(apply)

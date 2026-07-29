@@ -405,18 +405,16 @@ class MujocoBinScene:
         the last row/column cannot clip the bin walls. For partition/tray the pitch is widened
         so each cell clears its fixture (divider thickness, or tray wall + clearance).
         """
-        verts = np.asarray(self.part_mesh.vertices)
-        sv = (R_stable @ verts.T).T
+        # Size the grid from the CONVEX collision footprint (what MuJoCo actually collides) so
+        # truly-snug cells are never bulged into by the hull. Falls back to the mesh if no hulls.
+        # Boxes have convex == mesh, so this is a no-op for the simple test parts.
+        fp_verts = (np.vstack([np.asarray(m.vertices) for m in self.part_convex_meshes])
+                    if self.part_convex_meshes else np.asarray(self.part_mesh.vertices))
+        sv = (R_stable @ fp_verts.T).T
         mins, maxs = sv.min(axis=0), sv.max(axis=0)
         fp_x = maxs[0] - mins[0]
         fp_y = maxs[1] - mins[1]
-
-        # Worst-case vertex displacement from compound "xyz" Euler jitter of ±5° per axis.
-        # Effective rotation angle ≈ √3·5° = 8.66° (RMS of three independent axes).
-        # Using 10° adds a small safety buffer above that bound.
         r_max = float(np.sqrt((sv ** 2).sum(axis=1)).max())
-        jitter_margin = r_max * np.sin(np.radians(max(JITTER_DEG)))
-        raw_pos_z = float(-mins[2] + 0.01 + jitter_margin)
 
         # Inner usable extent: subtract wall thickness from both sides.
         t = self.bin_dim[3]
@@ -426,8 +424,9 @@ class MujocoBinScene:
         # Per-pose part height (z-extent) drives divider height, pocket depth, and tray seat z.
         part_h = float(maxs[2] - mins[2])
 
-        # Resolve running clearance, then widen the cell pitch so each cell clears its fixture:
-        # cardboard divider thickness (partition) or tray wall + pocket clearance (tray). "none" adds 0.
+        # Running clearance from the mode (snug 1mm / medium 2.5mm / loose 5%·diag). The cell pitch
+        # is exactly footprint + fixture + 2·clearance, so the actual part-to-wall gap equals the
+        # setting — no arbitrary looseness. "none" has no fixture, so the clearance is pure spacing.
         clearance = self._resolve_clearance(float(np.hypot(fp_x, fp_y)))
         self._clearance_m = clearance
         if self.structure_type == "partition":
@@ -435,12 +434,20 @@ class MujocoBinScene:
         elif self.structure_type == "tray":
             extra = 2 * TRAY_WALL + 2 * clearance
         else:
-            extra = 0.0
+            extra = 2 * clearance
 
-        # For each orientation the maximum valid part-centre coordinate is:
-        #   inner_h? - half_footprint - jitter_margin
-        # (the jitter can push the part edge outward by ~jitter_margin in X/Y)
-        gap = max(fp_x, fp_y) * 0.1 + extra
+        # Spawn tilt is scaled to — and bounded by — the clearance: a part leans until it just
+        # reaches the cell wall, so snug barely tilts, loose tilts more, and the tilted part never
+        # exceeds its cell. Bound: the chord of the farthest vertex about the body-origin tilt axis
+        # (2·r_max·sin(θ/2)) must stay within the clearance, so NO vertex crosses its cell wall. This
+        # naturally lets tall-narrow parts lean more than wide-flat ones. Tray holds the exact pose.
+        theta_max = 0.0 if self.structure_type == "tray" else float(
+            2.0 * np.arcsin(np.clip(clearance / (2.0 * max(r_max, 1e-9)), 0.0, 1.0)))
+        self._structured_theta_max = theta_max
+        jitter_margin = r_max * np.sin(theta_max)
+        raw_pos_z = float(-mins[2] + 0.01 + jitter_margin)
+
+        gap = extra
 
         def _slot_count(fx, fy):
             px = fx + gap
@@ -472,11 +479,16 @@ class MujocoBinScene:
         pitch_x = fp_x + gap
         pitch_y = fp_y + gap
 
-        x_max_center = max(0.0, inner_hx - fp_x / 2 - jitter_margin)
-        y_max_center = max(0.0, inner_hy - fp_y / 2 - jitter_margin)
-
-        nx = int(2 * x_max_center / pitch_x) + 1
-        ny = int(2 * y_max_center / pitch_y) + 1
+        if self.structure_type == "partition":
+            # Reserve room for the outer perimeter divider: n*pitch/2 + half_divider <= inner_h.
+            half_div = PARTITION_THICKNESS / 2.0
+            nx = max(1, int((inner_hx - half_div) * 2.0 / pitch_x))
+            ny = max(1, int((inner_hy - half_div) * 2.0 / pitch_y))
+        else:
+            x_max_center = max(0.0, inner_hx - fp_x / 2 - jitter_margin)
+            y_max_center = max(0.0, inner_hy - fp_y / 2 - jitter_margin)
+            nx = int(2 * x_max_center / pitch_x) + 1
+            ny = int(2 * y_max_center / pitch_y) + 1
 
         xs = np.linspace(-(nx - 1) * pitch_x / 2, (nx - 1) * pitch_x / 2, nx)
         ys = np.linspace(-(ny - 1) * pitch_y / 2, (ny - 1) * pitch_y / 2, ny)
@@ -484,11 +496,16 @@ class MujocoBinScene:
         # For asymmetric meshes the AABB centre (where load_part anchors the mesh)
         # does not coincide with the footprint centroid after R_aligned is applied.
         # Shift every body position so the footprint midpoint lands on the grid point.
-        sv_aligned = (R_aligned @ verts.T).T
+        sv_aligned = (R_aligned @ fp_verts.T).T
         cx = float((sv_aligned[:, 0].min() + sv_aligned[:, 0].max()) / 2)
         cy = float((sv_aligned[:, 1].min() + sv_aligned[:, 1].max()) / 2)
         xs = xs - cx
         ys = ys - cy
+        # Body origins now sit at xs/ys but each part's FOOTPRINT centre sits at xs+cx / ys+cy.
+        # _build_partitions needs this offset to place dividers midway between footprints (not
+        # between body origins); otherwise asymmetric footprints (cx/cy != 0, common for a
+        # user-picked face-up) put the part hard against — or into — a divider.
+        self._grid_fp_offset = (cx, cy)
 
         rp(f"[STRUCTURED] footprint {fp_x:.3f}x{fp_y:.3f} m  pitch {pitch_x:.3f}x{pitch_y:.3f} m  grid {nx}x{ny}"
            f"  part_h {part_h:.3f} m  structure={self.structure_type}{'  (yaw-rotated)' if apply_yaw90 else ''}")
@@ -639,8 +656,12 @@ class MujocoBinScene:
                 R_local = R_aligned
                 pos_z = tray_seat_z
             else:
-                R_jitter = R.from_euler("xyz", np.random.uniform(*JITTER_DEG), degrees=True).as_matrix()
-                R_local = R_aligned @ R_jitter
+                # Clearance-scaled lean (partition + none): random azimuth, tilt in [0, theta_max]
+                # so the part leans within its cell but never past the wall. theta_max is 0 for tray.
+                phi = np.random.uniform(0.0, 2 * np.pi)
+                theta = np.random.uniform(0.0, self._structured_theta_max)
+                R_tilt = R.from_rotvec(np.array([np.cos(phi), np.sin(phi), 0.0]) * theta).as_matrix()
+                R_local = R_aligned @ R_tilt
                 pos_z = raw_pos_z
             T_local = np.eye(4)
             T_local[:3, :3] = R_local
@@ -652,7 +673,7 @@ class MujocoBinScene:
 
         # Build fixtures on the bin body (geoms + visual mesh) before compile().
         if self.structure_type == "partition":
-            self._build_partitions(xs, ys, part_h)
+            self._build_partitions(xs, ys, part_h, pitch_x, pitch_y)
         elif self.structure_type == "tray":
             self._instance_tray_hfield(tray_hf, valid_poses[:, :3])
 
@@ -661,16 +682,30 @@ class MujocoBinScene:
             # Reuse the random-arrangement settle path: all parts in one batch (no parking waves).
             self._batch_of_body = [0] * self.n_parts
 
-    def _build_partitions(self, xs, ys, part_h):
-        """Egg-crate cardboard dividers on the interior grid lines: thin static boxes on the bin body
-        (one part per cell). Also merged into self.bin_mesh so they share the bin geom id and are
-        treated as background by segmentation. Height = structure_height_frac x part_h."""
+    def _build_partitions(self, xs, ys, part_h, pitch_x, pitch_y):
+        """Egg-crate cardboard dividers: thin static boxes on the bin body forming one cell per part,
+        including a full perimeter ring so edge cells are boxed like interior ones. Also merged into
+        self.bin_mesh so they share the bin geom id and read as background to segmentation. Height =
+        structure_height_frac x part_h."""
         t = self.bin_dim[3]
         inner_hx, inner_hy = self.hx - t, self.hy - t
         h = max(1e-3, self.structure_height_frac * part_h)
         half = PARTITION_THICKNESS / 2.0
-        x_lines = [(xs[i] + xs[i + 1]) / 2.0 for i in range(len(xs) - 1)]   # planes between columns
-        y_lines = [(ys[i] + ys[i + 1]) / 2.0 for i in range(len(ys) - 1)]   # planes between rows
+        # Divider planes at EVERY cell boundary (footprint centres ± half-pitch), incl. the outer
+        # ring. xs/ys are body-origin positions; the footprint centres sit at xs+off_x / ys+off_y
+        # (_grid_fp_offset), so add the offset back — else a plane lands off-centre and clips an
+        # asymmetric part. Planes that would poke through the bin wall are dropped (wall bounds it).
+        off_x, off_y = getattr(self, "_grid_fp_offset", (0.0, 0.0))
+
+        def _cell_boundaries(centres, pitch, inner_h):
+            c = np.asarray(centres, dtype=float)
+            lines = [c[0] - pitch / 2.0,
+                     *[(c[i] + c[i + 1]) / 2.0 for i in range(len(c) - 1)],
+                     c[-1] + pitch / 2.0]
+            return [float(l) for l in lines if abs(l) + half <= inner_h + 1e-9]
+
+        x_lines = _cell_boundaries(np.asarray(xs) + off_x, pitch_x, inner_hx)   # column boundaries
+        y_lines = _cell_boundaries(np.asarray(ys) + off_y, pitch_y, inner_hy)   # row boundaries
         geom_quat = np.array(R.from_matrix(self.bin_transform[:3, :3]).as_quat(scalar_first=True))
         combined = o3d.geometry.TriangleMesh()
 

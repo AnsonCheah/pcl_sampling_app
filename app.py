@@ -25,7 +25,7 @@ The synthetic stage has its own express/custom choice and works for both
 
 from enums import *
 # import open3d.core as o3c
-from open3d.geometry import Geometry3D
+from open3d.geometry import Geometry3D, AxisAlignedBoundingBox
 import open3d.visualization.gui as gui
 import open3d.visualization.rendering as rendering
 import numpy as np
@@ -48,11 +48,24 @@ from physics.mujoco_bin_scene import MujocoBinScene
 # import cupy as cp
 # print(cp.cuda.runtime.getDeviceCount())
 
+# Extent framed when the scene is empty (launch, or after a clear). 1.0 m matches the axis length
+# Open3D itself falls back to for degenerate bounds (Open3DScene.cpp, RecreateAxis), so the view and
+# the axes agree instead of one overflowing the other.
+DEFAULT_WORLD_EXTENT = 1.0
+
+# How much the scene's bounding box must move or resize, as a fraction of its diagonal, before
+# _reframe treats it as different content and moves the camera. Below this the camera is left alone
+# so navigating between stages that show the same object does not throw away a manual orbit/zoom.
+FRAME_REL_TOL = 0.05
+
+
 class MeshSamplingApp:
 
     def __init__(self, headless=False, mesh_path=None):
         self.headless = headless
         self.express_sampling_busy = False   # blocks the Express Sampling button while a run is in flight
+        self.show_origin_frame = True        # read by _reframe on every scene swap
+        self._framed_bbox = None             # (centre, diagonal) last framed; see _framing_changed
 
         self.mesh_path = Path(mesh_path) if mesh_path is not None else None
         self.stages = {
@@ -71,6 +84,9 @@ class MeshSamplingApp:
         for st, inst in self.stages.items():
             inst.stage_key = st
         if not self.headless:
+            # Must happen after Application.initialize() and before create_window().
+            self.axes_glyph = self._install_glyph_font()
+
             # === Scene widget ===
             self.window_width = 1440
             self.window_height = 900
@@ -79,10 +95,28 @@ class MeshSamplingApp:
             self.scene.scene = rendering.Open3DScene(self.window.renderer)
             self.scene.scene.set_background([0.2, 0.2, 0.2, 1.0])
             self.scene_geoms = {}
+            self.scene.scene.show_axes(self.show_origin_frame)
             self.window.set_on_layout(self._on_layout)
             self.window.set_on_key(self._on_key)
             self.scene.set_on_mouse(self._on_mouse_event)
             self.window.add_child(self.scene)
+
+            # Origin-axes toggle, floating over the bottom-right of the 3D view (positioned in
+            # _on_layout). Added after self.scene so it draws on top. Intentionally NOT registered
+            # through BaseStage.register_widget: set_stage force-resets is_on on every stage-owned
+            # toggleable, which would switch the axes off each time the stage changes.
+            self.btn_axes = gui.Button(self.axes_glyph)
+            self.btn_axes.toggleable = True
+            self.btn_axes.is_on = True
+            self.btn_axes.horizontal_padding_em = 0.3
+            self.btn_axes.vertical_padding_em = 0.3
+            # No tooltip. Open3D's Button::Draw renders the tooltip *inside* the toggled-text-colour
+            # push (button_on_text_color is literally black), so an ON toggleable button draws black
+            # tooltip text on the unchanged grey popup background. Not fixable from Python: Theme
+            # colours are read-only in the bindings and Button has no text-colour setter. The X key
+            # binding below is the discoverability path instead.
+            self.btn_axes.set_on_clicked(self._on_axes_toggled)
+            self.window.add_child(self.btn_axes)
 
             # === Materials ===
             self.default_material = rendering.MaterialRecord()
@@ -142,6 +176,33 @@ class MeshSamplingApp:
             self.stages[Stage.IMPORT_MESH].file_path = self.mesh_path
 
         self._restart()
+
+    @staticmethod
+    def _install_glyph_font():
+        """Merge the axes glyph into the default UI font and return the button label.
+
+        gui.Button carries no font id (only Label does), so a custom font cannot be attached to
+        the widget — the glyph has to go into DEFAULT_FONT_ID itself. The stock UI faces do not
+        have it: segoeui.ttf and arial.ttf carry none of the candidate code points. DejaVuSans
+        does, and ships inside the conda env via matplotlib, so it needs no OS font.
+
+        Returns "XYZ" if anything fails: a missing glyph renders as a blank button, which is a
+        worse outcome than three letters. Must be called after Application.initialize() and
+        before any window is created.
+        """
+        glyph = "⊕"   # CIRCLED PLUS
+        try:
+            import matplotlib
+            path = Path(matplotlib.__file__).parent / "mpl-data" / "fonts" / "ttf" / "DejaVuSans.ttf"
+            if not path.exists():
+                raise FileNotFoundError(path)
+            fd = gui.FontDescription(gui.FontDescription.SANS_SERIF)
+            fd.add_typeface_for_code_points(str(path), [ord(glyph)])
+            gui.Application.instance.set_font(gui.Application.DEFAULT_FONT_ID, fd)
+            return glyph
+        except Exception as e:
+            print(f"[UI] axes glyph font unavailable ({e}); using a text label instead")
+            return "XYZ"
 
     def _restart(self):
         # Single source of truth: every app.* pipeline attribute is declared in some
@@ -235,6 +296,14 @@ class MeshSamplingApp:
         panel_width = 300
         self.scene.frame = gui.Rect(r.x, r.y, r.width - panel_width, r.height)
         self.panel.frame = gui.Rect(r.get_right() - panel_width, r.y, panel_width, r.height)
+        # Floating origin-axes toggle, pinned to the bottom-right of the 3D view. Recomputed on
+        # every layout (unlike progress_panel's one-shot frame) so it tracks window resizes.
+        pref = self.btn_axes.calc_preferred_size(layout_context, gui.Widget.Constraints())
+        margin = 8
+        self.btn_axes.frame = gui.Rect(
+            self.scene.frame.get_right() - pref.width - margin,
+            self.scene.frame.get_bottom() - pref.height - margin,
+            pref.width, pref.height)
 
     # ===============================
     # UI helpers
@@ -242,34 +311,114 @@ class MeshSamplingApp:
     def _update_title(self):
         self.window.title = f"Mesh Sampling Wizard | Stage: {self.stage.name}"
 
-    def _reframe(self, fov_deg=41.1, margin=1.0):
+    @staticmethod
+    def _framing_key(bbox):
+        """(centre, diagonal) — the shape-and-place summary _framing_changed compares."""
+        lo = np.asarray(bbox.get_min_bound(), dtype=float)
+        hi = np.asarray(bbox.get_max_bound(), dtype=float)
+        return (lo + hi) / 2.0, float(np.linalg.norm(hi - lo))
+
+    def _remember_framing(self, bbox):
+        self._framed_bbox = self._framing_key(bbox)
+
+    def _framing_changed(self, bbox) -> bool:
+        """Has the viewport's content actually changed since the last framing?
+
+        Compared as centre + diagonal rather than raw corners, so re-showing the same object in a
+        slightly different form counts as unchanged — a cloud sampled from a mesh has almost the
+        same box, just not to the millimetre. Both are relative to the diagonal, so the test scales
+        from a 5 cm part to a 76 cm bin.
         """
-        Dynamically frame object based on its bounding box size.
+        if self._framed_bbox is None:
+            return True
+        centre, diag = self._framing_key(bbox)
+        prev_centre, prev_diag = self._framed_bbox
+        scale = max(diag, prev_diag, 1e-9)
+        moved = float(np.linalg.norm(centre - prev_centre)) > FRAME_REL_TOL * scale
+        resized = abs(diag - prev_diag) > FRAME_REL_TOL * scale
+        return moved or resized
+
+    def _reframe(self, fov_deg=41.1, margin=1.15, force=False):
+        """Frame the camera on whatever is currently in the viewport, from a fixed isometric angle.
+
+        The renderer's own accumulated bounding box is the only source of bounds — no stage state,
+        no per-caller overrides. Deriving the view from app state instead of scene contents is what
+        made the face-up picker frame the bin after a scene had been generated.
+
+        That box covers "all the items in the scene, visible and invisible" (Open3D's wording), so
+        hidden geometry counts. That is fine here: the only geometry we hide is the parked bodies in
+        the live settling preview, and those keep an identity transform (see
+        SceneStage._setup_live_preview), so they sit at the part's own origin inside the bin.
         """
         if self.headless:
             return
-        if self.target_mesh is None:
+        bbox = self.scene.scene.bounding_box
+        if bbox is None or bbox.is_empty() or np.linalg.norm(bbox.get_extent()) < 1e-9:
+            bbox = self._default_world_bbox()   # nothing loaded -> frame the world axes
+        diag = float(np.linalg.norm(bbox.get_extent()))
+        look_at = bbox.get_center()
+        # Distance that actually fits `diag` in the vertical FOV, with `margin` headroom.
+        distance = margin * 0.5 * diag / np.tan(np.radians(fov_deg) * 0.5)
+        cam_pos = look_at + distance * (np.array([1.0, 1.0, 1.0]) / np.sqrt(3.0))
+        up = camera_view_matrix(cam_pos, look_at)[:3, 1]
+
+        # Resize the origin axes here, not in _clear_scene. Open3D only rebuilds them inside
+        # show_axes() and only while its internal dirty flag is set, so calling it straight after
+        # clear_geometry rebuilds from the just-emptied bounds and pins the axes at their 1 m
+        # degenerate fallback for good. Called after the geometry is in, it sizes them to the
+        # content. RecreateAxis adds the axis to the low-level Scene, bypassing Open3DScene's
+        # bounds_, so the axes never feed back into the bbox read above.
+        self.scene.scene.show_axes(self.show_origin_frame)
+
+        # Only move the camera when the viewport is actually showing something else. Stages re-add
+        # the same object as you navigate (Raycast -> Decompose both show the part), and resetting
+        # the orbit there would discard whatever view the user had set up. `R` passes force=True.
+        if not force and not self._framing_changed(bbox):
+            self.redraw()
             return
-        else:
-            if self.stage in (Stage.SCENE, Stage.RENDER) and self.mj_scene is not None:
-                mj_scene = self.mj_scene
-                look_at, cam_pos, up = mj_scene._get_camera_lookat()
-                bbox = mj_scene.bin_mesh.get_axis_aligned_bounding_box()
-            else:
-                bbox = self.target_mesh.get_axis_aligned_bounding_box()
-                look_at = bbox.get_center()
-                distance = 1.0 * np.linalg.norm(bbox.get_extent())
-                if distance < 1e-6:
-                    return
-                cam_pos = look_at + np.array([distance, distance, distance])
-                T_cam = camera_view_matrix(cam_pos, look_at)
-                up = T_cam[:3, 1]
+        self._remember_framing(bbox)
 
         self.scene.center_of_rotation = look_at
         self.scene.setup_camera(fov_deg, bbox, look_at)
         self.scene.scene.camera.look_at(look_at, cam_pos, up)
+        self.redraw()
+
+    def redraw(self):
+        """Repaint the viewport. Use this, never `scene.force_redraw()` on its own.
+
+        `SceneWidget::ForceRedraw` opens with `if (!scene_caching_enabled_) return;` and caching
+        defaults to off (we never enable it), so calling it alone is a no-op — which is why
+        geometry added from a finished worker only appeared once the mouse moved and generated a
+        real input event. `window.post_redraw()` is the call that actually queues a repaint; the
+        `post_to_main_thread` binding documents it ("you will need to manually request a redraw of
+        the window with w.post_redraw()"). Both are issued here, in that order, so this stays
+        correct if scene caching is ever turned on — the same pairing O3DVisualizer uses.
+        """
+        if self.headless:
+            return
         self.scene.force_redraw()
-        print("reframed")
+        self.window.post_redraw()
+
+    @staticmethod
+    def _default_world_bbox():
+        """Bounds to frame when nothing is loaded: the world axes themselves, with a little margin
+        behind the origin. Open3D's axis runs from the origin out to +length on each axis, so this
+        is deliberately asymmetric."""
+        lo = -0.15 * DEFAULT_WORLD_EXTENT
+        hi = DEFAULT_WORLD_EXTENT
+        return AxisAlignedBoundingBox((lo, lo, lo), (hi, hi, hi))
+
+    def _set_origin_axes(self, show: bool):
+        """Single entry point for the axes toggle, shared by the button and the X key, so the two
+        can never disagree. Deliberately does not reframe — the camera must not jump."""
+        self.show_origin_frame = bool(show)
+        self.btn_axes.is_on = self.show_origin_frame
+        self.scene.scene.show_axes(self.show_origin_frame)
+        self.redraw()
+
+    def _on_axes_toggled(self):
+        # Button callback: Open3D has already flipped is_on for us.
+        self._set_origin_axes(self.btn_axes.is_on)
 
     def show_progress(self, text="Processing...", detail=""):
         if self.headless:
@@ -306,42 +455,44 @@ class MeshSamplingApp:
     def _clear_scene(self):
         self.scene_geoms = {}
         self.scene.scene.clear_geometry()
+        # Deliberately no show_axes() here — see the note in _reframe. Calling it at this point
+        # rebuilds the axes from the bounds clear_geometry just emptied, pinning them at 1 m.
 
-    def add_geom_in_scene(self, name:str, geom: Geometry3D, color=[1.0, 1.0, 1.0], alpha=1.0, point_size=1.5):
-        material = rendering.MaterialRecord()
-        material.point_size = point_size
-        material.base_color = color + [alpha]
-        material.shader = "defaultLit"
-        self.scene_geoms[name] = O3DSceneObject(geom, material)
-        self.main_thread(lambda: self.scene.scene.add_geometry(name, geom, material))
+    # def add_geom_in_scene(self, name:str, geom: Geometry3D, color=[1.0, 1.0, 1.0], alpha=1.0, point_size=1.5):
+    #     material = rendering.MaterialRecord()
+    #     material.point_size = point_size
+    #     material.base_color = color + [alpha]
+    #     material.shader = "defaultLit"
+    #     self.scene_geoms[name] = O3DSceneObject(geom, material)
+    #     self.main_thread(lambda: self.scene.scene.add_geometry(name, geom, material))
 
-    def remove_geom_in_scene(self, name:str):
-        self.scene_geoms.pop(name)
-        self.main_thread(lambda: self.scene.scene.remove_geometry(name))
+    # def remove_geom_in_scene(self, name:str):
+    #     self.scene_geoms.pop(name)
+    #     self.main_thread(lambda: self.scene.scene.remove_geometry(name))
 
-    def hide_geoms_in_scene(self, geoms=[]):
-        def hide_geoms():
-            if not geoms:
-                print("no specified geom, hiding all")
-                for name in self.scene_geoms.keys():
-                    print(f"hiding {name}")
-                    self.scene.scene.show_geometry(name, show=False)
-            else:
-                print(f"geoms = {geoms}")
-                for name in geoms:
-                    print(f"hiding {name}")
-                    self.scene.scene.show_geometry(name, show=False)
-        self.main_thread(hide_geoms)
+    # def hide_geoms_in_scene(self, geoms=[]):
+    #     def hide_geoms():
+    #         if not geoms:
+    #             print("no specified geom, hiding all")
+    #             for name in self.scene_geoms.keys():
+    #                 print(f"hiding {name}")
+    #                 self.scene.scene.show_geometry(name, show=False)
+    #         else:
+    #             print(f"geoms = {geoms}")
+    #             for name in geoms:
+    #                 print(f"hiding {name}")
+    #                 self.scene.scene.show_geometry(name, show=False)
+    #     self.main_thread(hide_geoms)
 
-    def show_geoms_in_scene(self, geoms:list=[]):
-        def show_geoms():
-            if not geoms: print("no specified geom, showing all")
-            print(geoms)
+    # def show_geoms_in_scene(self, geoms:list=[]):
+    #     def show_geoms():
+    #         if not geoms: print("no specified geom, showing all")
+    #         print(geoms)
 
-            for name in (geoms if geoms else self.scene_geoms.keys()):
-                print(f"showing {name}")
-                self.scene.scene.show_geometry(name, show=True)
-        self.main_thread(show_geoms)
+    #         for name in (geoms if geoms else self.scene_geoms.keys()):
+    #             print(f"showing {name}")
+    #             self.scene.scene.show_geometry(name, show=True)
+    #     self.main_thread(show_geoms)
 
     def has_geom(self, name:str):
         self.main_thread(lambda: self.scene.scene.has_geometry(name))
@@ -411,7 +562,10 @@ class MeshSamplingApp:
 
         # --- Global ---
         if key == gui.KeyName.R:
-            self._reframe()
+            self._reframe(force=True)   # explicit user request: always re-frame
+            return True
+        if key == gui.KeyName.X:
+            self._set_origin_axes(not self.show_origin_frame)
             return True
 
         # --- Stage specific ---
@@ -481,8 +635,7 @@ class MeshSamplingApp:
                 self.main_thread(lambda: self.scene.scene.add_geometry("down_pcd", self.down_pcd, self.default_point_material))
                 # self.hide_geoms_in_scene()
                 # self.add_geom_in_scene("down_pcd", self.down_pcd)
-                self.scene.force_redraw()
-                self._reframe()
+                self.main_thread(self._reframe)   # GUI op from a worker thread -> must be posted
             except Exception as e:
                 print(f"[ERROR] Failed to process {stl_path.name}: {e}")
                 continue

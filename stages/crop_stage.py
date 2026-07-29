@@ -61,7 +61,7 @@ class CropStage(BaseStage):
         else:
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry("selected", self.selected_pcd, self.app.overlay_material))
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry("non selected", self.non_selected_pcd, self.app.default_point_material))
-        self.app.scene.force_redraw()
+        self.app.main_thread(self.app._reframe)   # content swap -> reframe (posts a redraw too)
         self.enable_widgets()
 
     def reset(self):
@@ -300,7 +300,7 @@ class CropStage(BaseStage):
         
         try:
             self.app.scene.scene.add_geometry("selection_rect", self.line_set, self.rect_material)
-            self.app.scene.force_redraw()
+            self.app.redraw()
         except Exception as e:
             print(f"[WARNING] Could not draw selection rectangle: {e}")
 
@@ -308,7 +308,7 @@ class CropStage(BaseStage):
         """Remove the selection rectangle from the scene"""
         if self.app.scene.scene.has_geometry("selection_rect"):
             self.app.scene.scene.remove_geometry("selection_rect")
-            self.app.scene.force_redraw()
+            self.app.redraw()
     
     def _on_mouse_event(self, event):
         if self.tool_mode != ToolMode.BOX_SELECT:

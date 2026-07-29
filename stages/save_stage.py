@@ -44,7 +44,7 @@ class SaveStage(BaseStage):
         if self.app.down_pcd is not None:
             self.app.main_thread(lambda: self.app._clear_scene())
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry("down_pcd", self.app.down_pcd, self.app.default_point_material))
-            self.app.scene.force_redraw()
+            self.app.main_thread(self.app._reframe)   # content swap -> reframe (posts a redraw too)
         self.enable_widgets()
 
     def _save_cloud_bundle(self, pcd, folder_path, stem, cloud_type):

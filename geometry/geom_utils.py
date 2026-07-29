@@ -31,6 +31,54 @@ def random_rotation_matrix():
 def random_quaternion(scalar_first=False):
     return R.random().as_quat(scalar_first=scalar_first)
 
+def rotation_aligning_vector_to_axis(src, dst=(0., 0., 1.)) -> np.ndarray:
+    """Return a 3x3 rotation matrix R such that ``R @ src`` is parallel to ``dst``.
+
+    Used to turn a user-picked face normal ("this face points up") into the stable-pose
+    rotation the structured-scene builder expects. Mirrors the face-normal alignment in
+    ``MujocoBinScene.get_stable_poses`` but aligns to an arbitrary axis (default world +Z).
+    Handles the parallel / antiparallel degeneracies; for the antiparallel case any
+    perpendicular rotation axis is valid, so we pick one deterministically.
+    """
+    src = np.asarray(src, dtype=float)
+    dst = np.asarray(dst, dtype=float)
+    src = src / np.linalg.norm(src)
+    dst = dst / np.linalg.norm(dst)
+
+    cos_a = float(np.clip(np.dot(src, dst), -1.0, 1.0))
+    if cos_a > 1.0 - 1e-6:
+        return np.eye(3)
+    if cos_a < -1.0 + 1e-6:
+        # Antiparallel: rotate 180 deg about any axis perpendicular to src.
+        perp = np.cross(src, [1.0, 0.0, 0.0])
+        if np.linalg.norm(perp) < 1e-6:
+            perp = np.cross(src, [0.0, 1.0, 0.0])
+        perp /= np.linalg.norm(perp)
+        return R.from_rotvec(perp * np.pi).as_matrix()
+
+    axis = np.cross(src, dst)
+    axis /= np.linalg.norm(axis)
+    return R.from_rotvec(axis * np.arccos(cos_a)).as_matrix()
+
+def face_facet_map(tri_mesh):
+    """Group coplanar-adjacent faces into facets (trimesh.facets) and return a face->facet lookup.
+
+    Returns (face_to_facet, facets, facets_normal):
+      face_to_facet : (F,) int array; face_to_facet[f] is the facet index of face f, or -1 when f is
+                      a singleton (trimesh only lists groups of 2+ coplanar-adjacent faces).
+      facets        : list of int arrays, each the face indices of one coplanar-adjacent group.
+      facets_normal : (len(facets), 3) float array, one normal per facet.
+
+    Merge coincident vertices first (``tri_mesh.merge_vertices()``) so face adjacency is detectable
+    on split-vertex STL meshes — otherwise every face comes back as a singleton.
+    """
+    facets = list(tri_mesh.facets)
+    facets_normal = np.asarray(tri_mesh.facets_normal, dtype=float).reshape(-1, 3)
+    face_to_facet = np.full(len(tri_mesh.faces), -1, dtype=np.int64)
+    for fi, faces in enumerate(facets):
+        face_to_facet[np.asarray(faces, dtype=np.int64)] = fi
+    return face_to_facet, facets, facets_normal
+
 def o3d_display(geometries:list, width:int=1280, height:int=720, dynamic_color:bool=False):
     """
     Display a list of Open3D geometries with a black background.

@@ -519,10 +519,7 @@ class TuningStage(BaseStage):
             self.app._clear_scene()
             geom = o3d.geometry.PointCloud(scene_pcd)
             self.app.scene.scene.add_geometry("tuning_scene", geom, mat)
-            bbox = geom.get_axis_aligned_bounding_box()
-            if not bbox.is_empty():
-                self.app.scene.setup_camera(60.0, bbox, bbox.get_center())
-            self.app.scene.force_redraw()
+            self.app._reframe()
         self.app.main_thread(apply)
         self.enable_widgets()
 
@@ -760,7 +757,7 @@ class TuningStage(BaseStage):
             self.app._clear_scene()
             for name, geom, rgb in geoms:
                 self.app.scene.scene.add_geometry(name, geom, self._point_material(rgb))
-            self.app.scene.force_redraw()
+            self.app.redraw()
             self._update_pending = False
         self.app.main_thread(apply)
 

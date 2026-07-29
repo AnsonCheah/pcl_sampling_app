@@ -113,7 +113,7 @@ class DecomposeStage(BaseStage):
             # On stage entry, before decomposition: show the original mesh.
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry(
                 "mesh", self.app.target_mesh, self.app.default_material))
-        self.app.scene.force_redraw()
+        self.app.main_thread(self.app._reframe)   # content swap -> reframe (posts a redraw too)
         self.enable_widgets()
 
     def worker(self):
@@ -143,3 +143,4 @@ class DecomposeStage(BaseStage):
                                      f"Building convex hulls ({i + 1}/{n})...")
         print(f"[DECOMPOSE] decomposed mesh into {len(self.app.convex_meshes)} convex hulls, time taken={time.time() - start}")
 
+        self.app.redraw()
