@@ -19,12 +19,18 @@ OWNED_DEFAULTS = {
     "cropped_pcd": None,
     "point_count_mean": None,
     "point_count_range": None,
+    # Declared by RaycastStage; the parity guard had drifted and was already failing
+    # before ambiguity_profile was added.
+    "aspect_ratio_range": None,
+    "area_ratio_range": None,
+    "ref_cam_distance": None,
     "down_pcd": None,
     "down_pcd_surface": None,
     "down_pcd_edge": None,
     "feature_pcd": None,
     "pcd_flat": None,
     "geocenter": "EYE4",
+    "ambiguity_profile": None,
     "output_pcd_path": None,
     "convex_meshes": [],
     "o3d_scene": {},

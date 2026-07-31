@@ -135,41 +135,116 @@ def trimesh_to_o3d(tri_mesh:trimesh.Trimesh):
     o3d_mesh.compute_vertex_normals()
     return o3d_mesh
 
-def pcd_geocenter(pcd):
+def _fix_axis_signs(rotation_matrix):
+    """Deterministic sign convention: each column's dominant component is positive.
+
+    Without this the eigen-decomposition's arbitrary sign choice makes the frame differ
+    run to run, which matters because the frame is baked into every exported cloud.
+    """
+    for i in range(3):
+        axis = rotation_matrix[:, i]
+        max_idx = np.argmax(np.abs(axis))
+        if axis[max_idx] < 0:
+            rotation_matrix[:, i] *= -1
+    if np.linalg.det(rotation_matrix) < 0:
+        rotation_matrix[:, 2] *= -1
+    return rotation_matrix
+
+
+def pcd_geocenter(pcd, axis=None, axis_align_tol_deg=5.0, axis_point_tol=None):
     """
     Returns transformation matrix with consistent orientation.
+
+    With ``axis=None`` this is the historical PCA-canonical frame: axes are the
+    covariance eigenvectors through the cloud mean.
+
+    With an ``AmbiguityAxis`` (see ``geometry.ambiguity``) the frame is built so the
+    ambiguity axis IS the frame's **Z** and passes through the frame origin. That is what
+    makes the axis addressable by MechVision's ``rotationStrategy``, which can only rotate
+    about a geocenter frame axis: a PCA frame is derived from mass distribution and has no
+    reason to line up with an ambiguity axis, so without this the symmetry search rotates
+    about the wrong line no matter what ``angleStep`` is used.
+
+    If the PCA frame already agrees with the axis (direction within
+    ``axis_align_tol_deg``, and the axis passes within ``axis_point_tol`` of the PCA
+    origin) the PCA frame is returned unchanged, so parts that were already correct need
+    no bundle or scene regeneration.
+
+    Returns
+    -------
+    (tf, frame_changed) when ``axis`` is given, else ``tf`` alone — the historical
+    single-value contract is preserved for existing callers.
+
+    Note the return convention is the *inverse* transform; see geometry/CLAUDE.md.
     """
     points = np.asarray(pcd.points)
     center = points.mean(axis=0)
-    
+
     centered_points = points - center
     cov_matrix = np.cov(centered_points.T)
     eigenvalues, eigenvectors = np.linalg.eig(cov_matrix)
-    
+
     # Sort by eigenvalues (descending)
     idx = eigenvalues.argsort()[::-1]
     rotation_matrix = eigenvectors[:, idx]
     if np.linalg.det(rotation_matrix) < 0:
         rotation_matrix[:, 2] *= -1
 
+    rotation_matrix = _fix_axis_signs(rotation_matrix)
+
+    def _pack(rot, origin):
+        tf = np.eye(4)
+        tf[:3, 3] = origin
+        tf[:3, :3] = np.round(rot, decimals=6)
+        return np.linalg.inv(tf)
+
+    if axis is None:
+        return _pack(rotation_matrix, center)
+
+    d = np.asarray(axis.direction, dtype=float)
+    d = d / np.linalg.norm(d)
+    axis_pt = np.asarray(axis.point, dtype=float)
+    if axis_point_tol is None:
+        extent = np.linalg.norm(points.max(axis=0) - points.min(axis=0))
+        axis_point_tol = 0.01 * float(extent)
+
+    # Does the existing PCA frame already do the job?
     for i in range(3):
-        axis = rotation_matrix[:, i]
-        # Find the component with largest absolute value
-        max_idx = np.argmax(np.abs(axis))
-        # If that component is negative, flip the entire axis
-        if axis[max_idx] < 0:
-            rotation_matrix[:, i] *= -1
-    
-    if np.linalg.det(rotation_matrix) < 0:
-        rotation_matrix[:, 2] *= -1
-    
-    rotation_matrix = np.round(rotation_matrix, decimals=6)
-    tf = np.eye(4)
-    tf[:3, 3] = center
-    tf[:3, :3] = rotation_matrix
-    tf = np.linalg.inv(tf)
-    
-    return tf
+        if abs(float(rotation_matrix[:, i] @ d)) < np.cos(np.deg2rad(axis_align_tol_deg)):
+            continue
+        offset = center - axis_pt
+        if np.linalg.norm(offset - float(offset @ d) * d) <= axis_point_tol:
+            return _pack(rotation_matrix, center), False
+
+    # Frame Z is the ambiguity axis. Two DOF remain: where the origin sits along the axis,
+    # and the in-plane rotation. Fix the first by projecting the cloud mean onto the axis
+    # and the second from the PCA of the cloud projected into the perpendicular plane, so
+    # the frame is fully determined and reproducible.
+    origin = axis_pt + float((center - axis_pt) @ d) * d
+
+    rel = points - origin
+    planar = rel - np.outer(rel @ d, d)
+    cov2 = np.cov(planar.T)
+    vals2, vecs2 = np.linalg.eig(cov2)
+    order = np.argsort(vals2.real)[::-1]
+    x_axis = vecs2[:, order[0]].real
+    x_axis = x_axis - float(x_axis @ d) * d
+    norm = np.linalg.norm(x_axis)
+    if norm < 1e-9:                      # perfectly isotropic in-plane; any X will do
+        x_axis = np.cross(d, [0.0, 0.0, 1.0] if abs(d[2]) < 0.9 else [1.0, 0.0, 0.0])
+        norm = np.linalg.norm(x_axis)
+    x_axis /= norm
+    y_axis = np.cross(d, x_axis)
+
+    rot = _fix_axis_signs(np.column_stack([x_axis, y_axis, d]))
+    # Re-orthonormalise: the sign fixing may have flipped Z, and Z must stay the axis
+    # (direction only -- either sense of the axis is the same line).
+    rot[:, 1] = np.cross(rot[:, 2], rot[:, 0])
+    rot[:, 1] /= np.linalg.norm(rot[:, 1])
+    rot[:, 0] = np.cross(rot[:, 1], rot[:, 2])
+    rot[:, 0] /= np.linalg.norm(rot[:, 0])
+
+    return _pack(rot, origin), True
 
 def estimate_normals(points:np.ndarray, view_pos:np.ndarray, radius=0.005, max_nn=50):
     pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points))

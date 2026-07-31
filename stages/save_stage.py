@@ -5,9 +5,11 @@ from enums import Stage
 from pathlib import Path
 from stages.stage_base import BaseStage
 from geometry.file_utils import pointcloud_to_ply
+from geometry.ambiguity import save_ambiguity_profile
 from scipy.spatial.transform import Rotation as R
 
 _IDENTITY_POSE = [0, 0, 0, 1, 0, 0, 0]
+AMBIGUITY_SIDECAR = "ambiguity_profile.json"
 
 class SaveStage(BaseStage):
     downstream = {
@@ -81,6 +83,12 @@ class SaveStage(BaseStage):
         }]
         with open(folder_path / "poses.poses", "w") as f:
             json.dump(poses, f, indent=4)
+
+        # Sidecar goes next to every cloud variant so the tuner finds it beside whichever
+        # model it loads. The axis is already expressed in this cloud's frame.
+        profile = getattr(self.app, "ambiguity_profile", None)
+        if profile is not None:
+            save_ambiguity_profile(profile, folder_path / AMBIGUITY_SIDECAR)
 
         print(f"[INFO] Saved {cloud_type} cloud to {folder_path}")
 
