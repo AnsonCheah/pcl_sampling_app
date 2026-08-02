@@ -684,7 +684,7 @@ class SceneStage(BaseStage):
         if self.app.headless:
             self.rendering_flag = False
         if not self.app.convex_meshes:
-            print("[WARN] No convex meshes available — run DecomposeStage before SCENE; "
+            print("[WARN] No convex meshes available -- run DecomposeStage before SCENE; "
                   "simulation collisions will be degraded.")
 
         if not self.app.headless:

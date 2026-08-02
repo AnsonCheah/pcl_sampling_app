@@ -14,4 +14,8 @@
 
 **Synthetic generation is split into `SceneStage` → `RenderStage`.** `SceneStage` (`scene_stage.py`) builds the physical bin scene (MuJoCo arrangement/settle, partitions/tray) → `app.o3d_scene` + `app.mj_scene`; `RenderStage` (`render_stage.py`) simulates the sensor (raycast → noise → segmentation → export). They communicate only through `app` attributes. If sensor math appears in `scene_stage.py`, or MuJoCo logic in `render_stage.py`, it's in the wrong place.
 
-**`decompose_thread` race condition.** `ImportMeshStage.decompose_mesh()` runs in a daemon thread that starts during `worker()`. `SceneStage` requires the decomposition to be complete before calling `MujocoBinScene`. The join must happen before sim init.
+**`DecomposeStage` is synchronous — there is no thread to join.** It runs VHACD in a `ProcessPoolExecutor` and blocks on the result, so `app.convex_meshes` is guaranteed populated when the worker returns. (It used to be a daemon thread callers had to `join()` before `SceneStage`; that is gone.) The child process exists because `vhacdx.compute_vhacd` holds the GIL for its whole runtime and would otherwise freeze the GUI.
+
+**`app.main_thread(fn)` silently DROPS `fn` when headless.** It is a no-op, not a direct call. Any state change routed through it therefore does not happen in a headless run — `_express_sampling_worker` sets the stage that way, so `app.stage` never becomes `SAVE`, `SaveStage.worker()` matches neither of its branches, and the reference bundle is not written. No error is raised. Headless drivers must call `app.set_stage(...)` **directly**; see `bench/generate_scenes.py`.
+
+**Runtime `print()` must stay ASCII.** A Windows console piping stdout uses cp1252, so an em dash or arrow in a print statement raises `UnicodeEncodeError` and kills the run — which is exactly what a logged batch job does. Docstrings and comments are unaffected; only text that reaches stdout matters.

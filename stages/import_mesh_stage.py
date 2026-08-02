@@ -120,7 +120,7 @@ class ImportMeshStage(BaseStage):
         # The unit scale is decided on the debris-free extent and applied to BOTH variants, so
         # the operator's keep/remove choice can never change the resulting scale.
         if report.unit_scale != 1.0:
-            print(f"[INFO] Converting units mm → m: {self.file_path.name}")
+            print(f"[INFO] Converting units mm -> m: {self.file_path.name}")
             mesh.scale(report.unit_scale, center=(0, 0, 0))
             cleaned.scale(report.unit_scale, center=(0, 0, 0))
 

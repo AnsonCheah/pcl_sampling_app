@@ -134,7 +134,7 @@ class RenderStage(BaseStage):
         self.app.clear_state_from(self.stage_key)
 
         if not self.app.o3d_scene or self.app.mj_scene is None:
-            print("[WARN] No scene available — run SCENE before RENDER.")
+            print("[WARN] No scene available -- run SCENE before RENDER.")
             return
 
         if not self.app.headless:
@@ -250,7 +250,7 @@ class RenderStage(BaseStage):
         area_range   = getattr(self.app, "area_ratio_range", None)
         ref_cam_d    = getattr(self.app, "ref_cam_distance", None)
         if (aspect_range is None or area_range is None or ref_cam_d is None):
-            print("[WARN] 2D filter ranges unavailable (run RAYCAST) — skipping aspect/area gate.")
+            print("[WARN] 2D filter ranges unavailable (run RAYCAST) -- skipping aspect/area gate.")
             area_scale = 1.0
         else:
             area_scale = (self.app.mj_scene.camera_distance / ref_cam_d) ** 2

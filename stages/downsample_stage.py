@@ -62,7 +62,7 @@ class DownsampleStage(BaseStage):
 
         dom = profile.dominant
         if dom is None:
-            print("[INFO] Ambiguity: none found — pose should be uniquely determined")
+            print("[INFO] Ambiguity: none found -- pose should be uniquely determined")
         else:
             fold = "continuous" if dom.fold == 0 else f"C{dom.fold}"
             step = "-" if dom.fold == 0 else f"{dom.angle_step_deg():.0f}deg"
@@ -169,7 +169,7 @@ class DownsampleStage(BaseStage):
             self.app.scene.scene.add_geometry(f"ambiguity_{i}", g, mat)
 
         if not legend:
-            print("[INFO] Ambiguity preview: no axes — pose should be uniquely determined")
+            print("[INFO] Ambiguity preview: no axes -- pose should be uniquely determined")
             return
         print(f"[INFO] Ambiguity preview: {len(legend)} axes "
               f"(hot = rank 0 = most viewpoints affected)")
@@ -252,7 +252,7 @@ class DownsampleStage(BaseStage):
             print("[INFO] Model frame rebuilt around the dominant ambiguity axis "
                   "(now frame Z) — regenerate this part's scenes alongside the bundle")
         else:
-            print("[INFO] PCA frame already agrees with the ambiguity axis — frame unchanged")
+            print("[INFO] PCA frame already agrees with the ambiguity axis -- frame unchanged")
         return tf
 
     def uniform_voxel_downsample(self):

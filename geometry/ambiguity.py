@@ -73,6 +73,8 @@ __all__ = [
     "rank_axes",
     "save_ambiguity_profile",
     "load_ambiguity_profile",
+    "per_point_path",
+    "reclassify_global",
     "heat_colour",
     "discriminative_colours",
     "ambiguity_geometries",
@@ -138,6 +140,34 @@ class AmbiguityConfig:
     epsilon_floor_m: float = 0.0005       # sensor-physics floor (~3*sigma_depth)
     normal_cos_tol: float = 0.70          # a point must also agree in normal direction
     global_area_frac: float = 0.95        # coverage above which an axis preserves the whole model
+    # ...OR the axis is ambiguous from essentially every viewpoint.
+    #
+    # Surface coverage alone is too strict for real manufactured parts.  Validated against
+    # BOP's published symmetry annotations for the 30 T-LESS objects: 10 parts BOP calls
+    # symmetric were missed on coverage alone, their best area_fraction spanning 0.81-0.95
+    # (a symmetric body with a small boss, hole or chamfer breaking exact surface agreement
+    # at the 5-20% level).  Every one of those 10 had view_fraction == 1.00 and the correct
+    # fold, so the axis was recovered perfectly and only the *label* was wrong.
+    #
+    # view_fraction is the more direct measure of what "global" has to mean operationally:
+    # an axis that makes every viewpoint ambiguous will flip the matcher from anywhere,
+    # whether or not the last few percent of the surface agrees.
+    global_view_frac: float = 0.98
+    # ...but that clause on its own is too permissive, so it carries a coverage floor.
+    #
+    # Without one, the three BOP-asymmetric T-LESS objects all get promoted to global: they
+    # too have an axis ambiguous from every viewpoint, explaining 0.71-0.80 of the surface.
+    # They are *nearly* symmetric, and a matcher looking at partial views really will flip
+    # them -- BOP calls them asymmetric because with the whole model in hand the poses are
+    # separable.
+    #
+    # Be aware how thin the separation is: across the 30 objects, symmetric parts bottom out
+    # at area_fraction 0.809 and asymmetric ones top out at 0.803. A 0.006 gap is not a
+    # natural boundary, it is a continuum of "how nearly symmetric", and this threshold is
+    # calibrated on 30 samples sitting either side of it. It gets 29/30 here; do not read it
+    # as a law. Where a published annotation exists, prefer it -- `bench/metrics.py` already
+    # does, and only falls back to this classification for parts BOP has never seen.
+    global_view_area_floor: float = 0.80
 
     # Per-view survival.
     #
@@ -638,6 +668,32 @@ def _explains(pts: np.ndarray,
 # Fold fitting and grouping
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _is_global(view_fraction: float, area_fraction: float, cfg: AmbiguityConfig) -> bool:
+    """Does this axis map the whole model onto itself, for practical purposes?
+
+    Either it preserves nearly all the surface, **or** it is ambiguous from essentially
+    every viewpoint. See ``AmbiguityConfig.global_view_frac`` for why the second clause is
+    needed — coverage alone missed 10 of the 27 symmetric T-LESS parts.
+    """
+    return bool(area_fraction > cfg.global_area_frac
+                or (view_fraction >= cfg.global_view_frac
+                    and area_fraction >= cfg.global_view_area_floor))
+
+
+def reclassify_global(profile: "AmbiguityProfile",
+                      cfg: Optional[AmbiguityConfig] = None) -> "AmbiguityProfile":
+    """Recompute ``is_global`` in place from each axis's stored metrics.
+
+    Both inputs are already persisted per axis, so the classification can be revised on a
+    saved profile without re-running the analysis — which costs minutes per part. Same
+    reasoning as ``rank_axes``: keep anything derivable from stored metrics re-derivable.
+    """
+    cfg = cfg or AmbiguityConfig()
+    for ax in profile.axes:
+        ax.is_global = _is_global(ax.view_fraction, ax.area_fraction, cfg)
+    return profile
+
+
 def rank_axes(profile: "AmbiguityProfile",
               area_exponent: float = 2.0,
               significant_score: float = 0.05) -> "AmbiguityProfile":
@@ -682,8 +738,9 @@ def _fit_fold(angles: List[float], cfg: AmbiguityConfig,
     resulting MechVision ``angleStep`` of 180 would leave two thirds of the ambiguity
     unmitigated.
 
-    Continuous is tested the way ``heuristic_engine._find_fold_order`` does it: several
-    arbitrary angles must all pass, not just the ones the vote found.
+    Continuous is tested by requiring several *arbitrary* angles to pass, not just the ones
+    the vote happened to find — otherwise an axis is called continuous whenever the vote
+    was thorough rather than whenever the geometry is.
     """
     rng = np.random.default_rng(0)
     if all(probe(float(x)) for x in rng.uniform(5.0, 175.0, cfg.continuous_probes)):
@@ -918,7 +975,7 @@ def analyse_ambiguity(mesh: o3d.geometry.TriangleMesh,
         axes.append(AmbiguityAxis(
             direction=d, point=p, fold=fold,
             angles_deg=fold_angles or sorted(angles),
-            is_global=bool(af > cfg.global_area_frac),
+            is_global=_is_global(vf, af, cfg),
             view_fraction=vf, area_fraction=af,
             patch_fraction=pf, best_patch_fraction=bpf,
         ))
@@ -1090,8 +1147,31 @@ def _axis_to_dict(ax: AmbiguityAxis) -> dict:
     return d
 
 
-def save_ambiguity_profile(profile: AmbiguityProfile, path) -> None:
-    """Write the profile sidecar. ``per_point_discriminative`` is summarised, not dumped."""
+def per_point_path(path) -> "Path":
+    """Companion ``.npy`` holding the full per-point heat map for a profile JSON."""
+    from pathlib import Path
+    p = Path(path)
+    return p.with_name(p.stem + "_per_point.npy")
+
+
+def save_ambiguity_profile(profile: AmbiguityProfile, path, per_point: bool = False) -> None:
+    """Write the profile sidecar.
+
+    The JSON carries the axes and a *summary* of ``per_point_discriminative``, because a
+    20 000-element array in JSON is neither readable nor compact.
+
+    With ``per_point=True`` the full array is additionally written to a companion ``.npy``
+    (see :func:`per_point_path`), which is what a matcher needs in order to weight votes by
+    discriminability — the summary cannot be used for that.
+
+    **It is off by default on purpose.** The array is index-aligned with the cloud the
+    analysis ran on, which is the *surface* cloud. The same profile is written next to the
+    edge / feature / flat variants too, where the axes remain valid but the per-point array
+    does not correspond to those clouds' points at all. Passing ``per_point=True`` there
+    would produce a file that looks usable and silently misattributes every score.
+    """
+    if per_point and profile.per_point_discriminative.size:
+        np.save(per_point_path(path), profile.per_point_discriminative.astype(np.float32))
     disc = profile.per_point_discriminative
     payload = {
         "axes": [_axis_to_dict(a) for a in profile.axes],
@@ -1137,9 +1217,23 @@ def _axis_from_dict(d: dict) -> AmbiguityAxis:
 
 
 def load_ambiguity_profile(path) -> AmbiguityProfile:
+    """Read a profile sidecar, including the per-point heat map when it was written.
+
+    Profiles saved without ``per_point=True`` (and every sidecar written before the
+    companion ``.npy`` existed) load fine with an empty ``per_point_discriminative`` — the
+    axes are the part that most consumers want, and callers already have to handle the
+    empty case because a part with no recovered axes has no heat map either.
+    """
     with open(path) as f:
         d = json.load(f)
-    return AmbiguityProfile(
+    pp = per_point_path(path)
+    disc = np.load(pp).astype(np.float64) if pp.exists() else np.empty(0)
+    # `is_global` is re-derived rather than trusted from the file. It is a pure function of
+    # `view_fraction` and `area_fraction`, both of which are stored, so a sidecar written
+    # under an older classification rule is judged by the current one instead of silently
+    # carrying a stale label. (Same principle as `rank_axes`.)
+    return reclassify_global(AmbiguityProfile(
+        per_point_discriminative=disc,
         axes=[_axis_from_dict(a) for a in d.get("axes", [])],
         dominant=_axis_from_dict(d["dominant"]) if d.get("dominant") else None,
         n_significant_axes=int(d.get("n_significant_axes", 0)),
@@ -1154,4 +1248,4 @@ def load_ambiguity_profile(path) -> AmbiguityProfile:
         f_tau=float(d.get("f_tau", 0.0)),
         rank_area_exponent=float(d.get("rank_area_exponent", 2.0)),
         diameter_m=float(d.get("diameter_m", 0.0)),
-    )
+    ))
