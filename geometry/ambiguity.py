@@ -200,7 +200,9 @@ class AmbiguityAxis:
     # random-rotation noise ceiling is ~0.32, genuine ambiguity on 25333MB000 is ~0.73.
     patch_fraction: float = 0.0      # median over the views where it survives
     best_patch_fraction: float = 0.0 # best single view
-    score: float = 0.0               # = view_fraction (see note where it is set)
+    # = view_fraction * area_fraction ** rank_area_exponent; set by `rank_axes`, which is
+    # also what orders `AmbiguityProfile.axes`. Do not read it as a frequency.
+    score: float = 0.0
 
     def angle_step_deg(self) -> float:
         """The MechVision ``angleStep`` implied by this axis."""
@@ -640,7 +642,8 @@ def _explains(pts: np.ndarray,
 
 def rank_axes(profile: "AmbiguityProfile",
               area_exponent: float = 2.0,
-              significant_score: float = 0.05) -> "AmbiguityProfile":
+              significant_score: float = 0.05,
+              tie_frac: float = 0.05) -> "AmbiguityProfile":
     """(Re)rank a profile's axes in place and pick the dominant one.
 
     Ranking is a pure function of three already-stored per-axis numbers, so the exponent
@@ -656,16 +659,34 @@ def rank_axes(profile: "AmbiguityProfile",
     for ax in profile.axes:
         ax.score = float(ax.view_fraction * ax.area_fraction ** area_exponent)
 
-    # On a score tie prefer the axis that costs more to get wrong: continuous first, then
-    # higher folds. A cylinder's continuous axis and its perpendicular C2 axes both score
-    # ~1.0, but only the continuous one is worth MechVision's single rotationStrategy slot.
+    profile.axes.sort(key=lambda ax: -ax.score)
+
+    # Score decides the order.  The fold preference is a *tie-break only*, and only among
+    # GLOBAL axes -- it says "of two axes that are equally likely to be returned, prefer
+    # the one that costs more to get wrong", which is a statement about a symmetry group:
+    # a hex prism's C2 and C6 axes are both global and score within a thousandth of each
+    # other, and reporting C2/180deg for a part that needs C6/60deg leaves two thirds of
+    # the ambiguity unmitigated.  A cylinder's continuous axis beats its perpendicular C2s
+    # the same way.
     #
-    # The rounding sets how wide a "tie" is, and must stay coarse: a hex prism's C2 and C6
-    # axes are both global, so they differ only in the third decimal, and rounding any
-    # finer lets that noise decide the order before the fold preference is ever consulted
-    # -- reporting C2/180deg for a part that needs C6/60deg.
-    profile.axes.sort(key=lambda ax: (-round(ax.score, 2),
-                                      -(1000 if ax.fold == 0 else ax.fold)))
+    # It must NOT reach view-dependent axes.  Their scores are two orders of magnitude
+    # smaller (0.01-0.03, not ~1.0), so the old absolute `round(score, 2)` tie window put
+    # every one of them in a single bucket and silently promoted fold to the primary sort
+    # key.  Measured on 25333MB000: six axes scoring 0.0017-0.0172, the highest being the
+    # off-centroid disc axis at fold 1 -- which was demoted to rank 2 behind two C2 axes
+    # scoring LESS, because 0.0172 and 0.0170 both round to 0.02 and fold 2 > fold 1.
+    # That is the ranking the exponent was calibrated to avoid.
+    #
+    # The window is a fraction of the leading score rather than an absolute step, so it
+    # means the same thing whether scores sit near 1.0 or near 0.01.
+    if profile.axes:
+        lead = profile.axes[0].score
+        tied = [i for i, ax in enumerate(profile.axes)
+                if ax.score >= lead * (1.0 - tie_frac) and ax.is_global]
+        if len(tied) > 1:
+            best = max(tied, key=lambda i: 1000 if profile.axes[i].fold == 0
+                       else profile.axes[i].fold)
+            profile.axes.insert(0, profile.axes.pop(best))
     profile.dominant = profile.axes[0] if profile.axes else None
     profile.n_significant_axes = sum(1 for ax in profile.axes
                                      if ax.view_fraction >= significant_score)
@@ -777,7 +798,11 @@ def analyse_ambiguity(mesh: o3d.geometry.TriangleMesh,
     spacing = float(np.median(tree.query(pts, k=2)[0][:, 1]))
     epsilon = max(cfg.epsilon_spacing_factor * spacing, cfg.epsilon_floor_m)
 
-    profile = AmbiguityProfile(epsilon_m=epsilon, f_tau=cfg.f_tau, diameter_m=diameter)
+    # rank_area_exponent is recorded, not left at the dataclass default: the sidecar is the
+    # only record of how the stored scores were produced, and `load_ambiguity_profile`
+    # re-ranks from it. Left unset, a profile built with `--rank-exp 0` claimed 2.0.
+    profile = AmbiguityProfile(epsilon_m=epsilon, f_tau=cfg.f_tau, diameter_m=diameter,
+                               rank_area_exponent=cfg.rank_area_exponent)
 
     visible, view_dirs = _visibility_masks(mesh, pts, cfg, progress_cb)
     candidates = _vote_rotation_axes(pts, normals, diameter, cfg, rng, progress_cb)

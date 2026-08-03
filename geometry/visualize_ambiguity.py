@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import open3d as o3d
+from scipy.spatial import cKDTree
 
 from geometry.ambiguity import (
     AmbiguityConfig,
@@ -81,17 +82,75 @@ def _primitive(name: str):
     return mesh, None
 
 
+def pairing_error(mesh, pcd):
+    """Why this mesh and this cloud are not the same part in the same frame, or None.
+
+    The mesh is not a decoration here — ``_visibility_masks`` raycasts it and snaps each
+    hit to the nearest cloud point within ~``2*radius/res``, so a cloud that does not sit
+    ON that mesh loses almost every point from ``visible``.  Nothing errors: the sweep just
+    reports a thin sliver as "the visible patch", the per-view survival test is then applied
+    to a few hundred accidental points, and the ranking is decided by whichever transform
+    happens to explain that sliver.
+
+    Measured on a stale export paired with the current STL, 13% of points were ever visible
+    (311 per view) against 99% (6400 per view) for a matched pair, and the run reported 12
+    axes with a bogus continuous one where the matched pair reports 3.  A silently wrong
+    answer, so it is checked rather than assumed — the check costs milliseconds.
+    """
+    pts = np.asarray(pcd.points, dtype=float)
+    if len(pts) < 2 or len(mesh.triangles) == 0:
+        return None
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh))
+    dist = scene.compute_distance(o3d.core.Tensor(pts.astype(np.float32))).numpy()
+
+    # Judged against the cloud's own resolution, not an absolute distance, so this scales
+    # from a 20 mm part to a 500 mm one exactly as the analysis tolerances do.
+    tree = cKDTree(pts)
+    spacing = float(np.median(tree.query(pts, k=2)[0][:, 1]))
+    offset = float(np.percentile(dist, 95))
+    tol = max(2.0 * spacing, 0.0005)
+    if offset <= tol:
+        return None
+    return (f"95% of the cloud's points lie within {offset * 1000:.2f} mm of the mesh "
+            f"surface, against a {tol * 1000:.2f} mm tolerance "
+            f"(2x the cloud's own {spacing * 1000:.2f} mm spacing)")
+
+
+def _mesh_candidates(ply_path: str, stem: str):
+    """Meshes that might belong to ``ply_path``, nearest-provenance first.
+
+    A reference bundle is written by ``SaveStage`` as ``<part>/<part>.stl`` plus
+    ``<part>/<part>_<type>/<part>_<type>.ply``, both transformed into the *same* model frame
+    in the same run.  So the bundle's own STL is the only mesh guaranteed to match its
+    cloud; everything after it is a guess and has to survive ``pairing_error``.
+    """
+    d = os.path.dirname(os.path.abspath(ply_path))
+    return [os.path.join(os.path.dirname(d), f"{stem}.stl"),   # bundle root — exported together
+            os.path.join(d, f"{stem}.stl"),
+            os.path.join(REF_ROOT, stem, f"{stem}.stl"),
+            os.path.join(REPO, f"{stem}.STL"),
+            os.path.join(REPO, f"{stem}.stl")]
+
+
 def _resolve(target: str):
-    """Accept a part name, an STL, or a reference PLY. Returns (mesh, pcd_or_None)."""
+    """Accept a part name, an STL, or a reference PLY. Returns (mesh, pcd_or_None).
+
+    ``REF_ROOT`` is searched before ``MM_ROOT``: the reference bundle is the source of
+    truth and carries its own STL, whereas the MechVision resource folder is a deployed
+    *copy* with no mesh beside it, so its cloud can only ever be paired by guessing — and
+    it goes stale the moment a part is re-exported into a new model frame.  It is still
+    searched last, but the pairing check is what actually decides.
+    """
     if os.path.isfile(target):
         path = target
     else:
         stem = os.path.splitext(os.path.basename(target))[0]
-        for cand in (os.path.join(MM_ROOT, f"{stem}_surface", f"{stem}_surface.ply"),
-                     os.path.join(REF_ROOT, stem, f"{stem}_surface", f"{stem}_surface.ply"),
+        for cand in (os.path.join(REF_ROOT, stem, f"{stem}_surface", f"{stem}_surface.ply"),
                      os.path.join(REF_ROOT, stem, f"{stem}.stl"),
                      os.path.join(REPO, f"{stem}.STL"),
-                     os.path.join(REPO, f"{stem}.stl")):
+                     os.path.join(REPO, f"{stem}.stl"),
+                     os.path.join(MM_ROOT, f"{stem}_surface", f"{stem}_surface.ply")):
             if os.path.isfile(cand):
                 path = cand
                 break
@@ -102,13 +161,24 @@ def _resolve(target: str):
     if path.lower().endswith(".ply"):
         pcd = o3d.io.read_point_cloud(path)
         stem = os.path.basename(path).replace("_surface.ply", "").replace(".ply", "")
-        for cand in (os.path.join(REF_ROOT, stem, f"{stem}.stl"),
-                     os.path.join(REPO, f"{stem}.STL")):
-            if os.path.isfile(cand):
-                mesh = o3d.io.read_triangle_mesh(cand)
-                mesh.compute_vertex_normals()
+        rejected = []
+        for cand in _mesh_candidates(path, stem):
+            if not os.path.isfile(cand):
+                continue
+            mesh = o3d.io.read_triangle_mesh(cand)
+            mesh.compute_vertex_normals()
+            why = pairing_error(mesh, pcd)
+            if why is None:
                 print(f"Mesh:   {cand}")
                 return mesh, pcd
+            rejected.append(f"  {cand}\n    {why}")
+        if rejected:
+            sys.exit("None of the meshes found for '{}' match this cloud:\n{}\n\n"
+                     "The cloud and the mesh must be in the same model frame. A bundle under\n"
+                     "output/reference_pcd/ always is; a copy elsewhere (e.g. the MechVision\n"
+                     "3d_matching resource) goes stale as soon as the part is re-exported into\n"
+                     "an ambiguity-aligned frame. Re-export the part, or pass --mesh explicitly."
+                     .format(stem, "\n".join(rejected)))
         sys.exit(f"Found the cloud but no mesh for '{stem}'; pass --mesh explicitly "
                  f"(the raycast visibility sweep needs the surface)")
 
@@ -259,6 +329,15 @@ def main():
     if args.mesh:
         mesh = o3d.io.read_triangle_mesh(args.mesh)
         mesh.compute_vertex_normals()
+
+    # Re-checked here, not only inside _resolve, because --mesh overrides whatever _resolve
+    # validated and is exactly the path an operator reaches for after hitting the error.
+    if pcd is not None:
+        why = pairing_error(mesh, pcd)
+        if why is not None:
+            sys.exit(f"Mesh and cloud are not the same part in the same frame: {why}\n"
+                     f"The visibility sweep raycasts the mesh and snaps hits onto the cloud, "
+                     f"so this would report ambiguity axes fitted to a sliver of points.")
 
     mesh, pcd = _prepare(mesh, pcd, args.points)
     print(f"Part:   {label}   {len(pcd.points)} points, {len(mesh.triangles)} triangles")

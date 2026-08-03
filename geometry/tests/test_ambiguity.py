@@ -28,6 +28,7 @@ import pytest
 import trimesh
 
 from geometry.ambiguity import (
+    AmbiguityAxis,
     AmbiguityConfig,
     AmbiguityProfile,
     _explains,
@@ -37,6 +38,7 @@ from geometry.ambiguity import (
     discriminative_colours,
     heat_colour,
     load_ambiguity_profile,
+    rank_axes,
     save_ambiguity_profile,
 )
 from geometry.geom_utils import trimesh_to_o3d
@@ -347,3 +349,87 @@ def test_ambiguity_geometries_handles_a_part_with_no_axes():
     geoms, legend = ambiguity_geometries(cloud, empty)
     assert legend == []
     assert len(geoms) == 3          # cloud plus the two reference markers
+
+
+# ---------------------------------------------------------------------------
+# Ranking: score decides, fold only breaks ties between global axes
+#
+# These are unit tests on `rank_axes` with hand-built axes rather than on a whole
+# analysis, because the failure they pin is a knife edge: on 25333MB000 the leading
+# view-dependent axis beat the runner-up by 1% of score, and an absolute tie window
+# swallowed the difference. Driving it from a mesh would make the margin an accident of
+# sampling instead of the thing under test.
+# ---------------------------------------------------------------------------
+
+def _axis(view_fraction, area_fraction, fold, is_global):
+    return AmbiguityAxis(direction=np.array([0.0, 0.0, 1.0]),
+                         point=np.zeros(3), fold=fold, angles_deg=[],
+                         is_global=is_global,
+                         view_fraction=view_fraction, area_fraction=area_fraction)
+
+
+def test_view_dependent_axes_rank_by_score_not_fold():
+    """The measured 25333MB000 case: six view-dependent axes scoring 0.0017-0.0172, the
+    best of them fold 1. It must lead. Under an absolute `round(score, 2)` tie window all
+    six collapsed into one bucket and the two lower-scoring C2 axes were promoted."""
+    profile = AmbiguityProfile(axes=[
+        _axis(0.150, 0.336896, 2, False),      # score 0.017025
+        _axis(0.140, 0.334580, 2, False),      # score 0.015672
+        _axis(0.075, 0.478760, 1, False),      # score 0.017191  <- highest
+        _axis(0.105, 0.312494, 2, False),      # score 0.010254
+        _axis(0.025, 0.257458, 2, False),
+        _axis(0.055, 0.269926, 2, False),
+    ])
+    rank_axes(profile, area_exponent=2.0)
+    assert profile.dominant is profile.axes[0]
+    assert profile.axes[0].fold == 1
+    assert profile.axes[0].score == pytest.approx(0.017191, abs=1e-6)
+    scores = [ax.score for ax in profile.axes]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_global_axes_still_prefer_the_higher_fold_on_a_tie():
+    """A hex prism's C2 and C6 axes are both global and score within a thousandth of each
+    other; reporting C2/180deg would leave two thirds of the ambiguity unmitigated."""
+    profile = AmbiguityProfile(axes=[
+        _axis(1.0, 0.9992, 2, True),
+        _axis(1.0, 0.9989, 6, True),
+    ])
+    rank_axes(profile, area_exponent=2.0)
+    assert profile.dominant.fold == 6
+
+
+def test_a_continuous_global_axis_outranks_a_tied_finite_one():
+    profile = AmbiguityProfile(axes=[
+        _axis(1.0, 0.999, 2, True),
+        _axis(1.0, 0.998, 0, True),
+    ])
+    rank_axes(profile, area_exponent=2.0)
+    assert profile.dominant.fold == 0
+
+
+def test_fold_preference_never_overrides_a_real_score_gap():
+    """Outside the tie band the higher fold must not win, global or not."""
+    profile = AmbiguityProfile(axes=[
+        _axis(1.00, 1.00, 1, True),            # score 1.00
+        _axis(0.50, 1.00, 6, True),            # score 0.50 -- far outside the band
+    ])
+    rank_axes(profile, area_exponent=2.0)
+    assert profile.dominant.fold == 1
+
+
+def test_ranking_is_unchanged_by_a_uniform_rescale_of_scores():
+    """The tie window is a fraction of the leading score, so the same axes ordered the same
+    way must come out the same whether they score near 1.0 or near 0.01."""
+    big = AmbiguityProfile(axes=[_axis(1.0, 0.999, 2, True), _axis(1.0, 0.998, 6, True)])
+    rank_axes(big, area_exponent=2.0)
+    small = AmbiguityProfile(axes=[_axis(0.01, 0.999, 2, True), _axis(0.01, 0.998, 6, True)])
+    rank_axes(small, area_exponent=2.0)
+    assert big.dominant.fold == small.dominant.fold == 6
+
+
+def test_profile_records_the_exponent_it_ranked_with():
+    mesh = _centred(o3d.geometry.TriangleMesh.create_box(0.100, 0.030, 0.020))
+    cfg = AmbiguityConfig(n_views=8, res=64, rank_area_exponent=0.0)
+    profile = analyse_ambiguity(mesh, _cloud(mesh, 1500), cfg)
+    assert profile.rank_area_exponent == 0.0
