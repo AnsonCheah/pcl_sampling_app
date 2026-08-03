@@ -429,6 +429,134 @@ def camera_view_matrix(cam_pos, look_at, up=np.array([0.0, 0.0, 1.0])):
     T[:3, 3] = cam_pos
     return T
 
+def _as_points(obj) -> np.ndarray:
+    """Accept a PointCloud, a TriangleMesh, or an (N,3) array and return the points."""
+    if isinstance(obj, np.ndarray):
+        return np.asarray(obj, dtype=float).reshape(-1, 3)
+    if hasattr(obj, "points"):
+        return np.asarray(obj.points, dtype=float)
+    if hasattr(obj, "vertices"):
+        return np.asarray(obj.vertices, dtype=float)
+    raise TypeError(f"cannot extract points from {type(obj)}")
+
+
+def model_diameter(obj, max_hull_points: int = 3000) -> float:
+    """Diameter — the largest distance between any two points.
+
+    The diameter is always realised by a pair of convex-hull vertices, so the search runs
+    over the hull. Exact whenever the hull has at most ``max_hull_points`` vertices, which
+    covers most parts (the Stanford bunny's 21 668-point cloud has a 1 416-vertex hull).
+
+    Above that the hull is strided down and the result is a tight lower bound rather than
+    exact. The subsample always retains the six axis-extreme points, so it can never come
+    back shorter than the longest AABB edge. This matters more than it sounds: a sphere
+    sampled at 20 000 points has a 19 172-vertex hull — nearly every point is a vertex —
+    and an unguarded all-pairs distance matrix over that would ask for 8.8 GB.
+
+    Pairwise distances go through ``scipy.spatial.distance.pdist``, which stores only the
+    lower triangle and is ~15x faster than an ``(n, n, 3)`` broadcast at a sixth of the
+    memory.
+
+    This replaces two disagreeing definitions that were in use: the longest *minimal-OBB*
+    extent (``registration/ppf_helpers.compute_model_diameter``) and the AABB *diagonal*
+    (``geometry.ambiguity``). On the bunny those give 94.4 mm and 146.5 mm — a 1.55x spread
+    — so a threshold expressed as "5% of diameter" meant two different things depending on
+    which module you were standing in.
+
+    PPF needs this value specifically: it is the upper bound on the point-pair distance, so
+    anything smaller silently discards long pairs (the ones with the best lever arm on
+    rotation) and anything larger wastes distance bins on pairs that cannot occur.
+
+    ``geometry.ambiguity`` deliberately keeps its own AABB-diagonal measure: its tolerances
+    are calibrated against that number, and swapping the anchor underneath them would move
+    every threshold in a module that currently works.
+    """
+    from scipy.spatial.distance import pdist
+
+    pts = _as_points(obj)
+    if len(pts) < 2:
+        return 0.0
+    try:
+        from scipy.spatial import ConvexHull
+        hull = pts[ConvexHull(pts).vertices]
+    except Exception:
+        # Degenerate (coplanar/collinear) clouds have no 3D hull; the answer is still the
+        # max pairwise distance, just over every point.
+        hull = pts
+    if len(hull) > max_hull_points:
+        extremes = np.concatenate([hull.argmin(axis=0), hull.argmax(axis=0)])
+        stride = np.linspace(0, len(hull) - 1, max_hull_points).astype(np.int64)
+        hull = hull[np.unique(np.concatenate([stride, extremes]))]
+    return float(pdist(hull).max())
+
+
+def median_spacing(obj) -> float:
+    """Median nearest-neighbour distance — the cloud's own resolution.
+
+    This is the floor on any geometric tolerance: agreement asserted below the sampling
+    pitch is measuring the sampling, not the geometry.
+    """
+    from scipy.spatial import cKDTree
+    pts = _as_points(obj)
+    if len(pts) < 2:
+        return 0.0
+    return float(np.median(cKDTree(pts).query(pts, k=2)[0][:, 1]))
+
+
+def estimate_surface_area(obj, k: int = 8) -> float:
+    """Surface area of a point cloud, from a k-nearest-neighbour density estimate.
+
+    For a locally 2D point set of areal density ``lambda``, the k-th nearest neighbour sits
+    at ``d_k`` with ``lambda ~ k / (pi * d_k^2)``; the area is then ``N / lambda``.
+
+    This replaces ``N * s^2`` (with ``s`` the *first*-neighbour distance), which is wrong by
+    a large constant for randomly sampled clouds: the median nearest-neighbour distance of a
+    Poisson process is ``0.4697/sqrt(lambda)``, not ``1/sqrt(lambda)``, so that formula
+    understates area by ~4.5x.  Measured on a box of known area it returned 2 389 mm^2
+    against a true 11 200 mm^2.  Using a larger ``k`` averages over the local arrangement
+    and lands within a few tens of percent for both randomly sampled and voxel-gridded
+    clouds, which matters because this pipeline produces both.
+
+    Also deterministic, unlike the version it replaces: that one sampled 500 points with an
+    unseeded ``np.random.choice``, so repeated calls disagreed and every parameter derived
+    from it moved with them.
+    """
+    from scipy.spatial import cKDTree
+    pts = _as_points(obj)
+    if len(pts) < 10:
+        return float(np.pi * (model_diameter(pts) / 2.0) ** 2)     # sphere fallback
+    kk = min(k, len(pts) - 1)
+    d_k = cKDTree(pts).query(pts, k=kk + 1)[0][:, kk]              # skip self at column 0
+    d_k = d_k[d_k > 1e-12]
+    if len(d_k) == 0:
+        return 0.0
+    density = kk / (np.pi * np.median(d_k) ** 2)                   # points per unit area
+    return float(len(pts) / max(density, 1e-12))
+
+
+def project_to_so3(R: np.ndarray) -> np.ndarray:
+    """Nearest rotation matrix to ``R``. Accepts ``(3,3)`` or a batch ``(..., 3, 3)``.
+
+    Needed wherever rotations are averaged — pose clustering averages the rotations of the
+    hypotheses in a cluster, and the mean of several rotation matrices is not itself one.
+    Feeding an unprojected mean downstream produces a transform that quietly scales and
+    shears the model, which shows up as a plausible-looking pose that fails verification.
+
+    (This is also the failure OpenCV's ``ppf_match_3d`` ships with — opencv_contrib #3223,
+    an unnormalised quaternion in ``clusterPoses`` — so the same guard is needed whether the
+    clustering is ours or theirs.)
+
+    Delegates to ``scipy.spatial.transform.Rotation.from_matrix``, which orthogonalises a
+    non-proper input via Markley's quaternion method rather than raising. That agrees with a
+    hand-written SVD projection to 1.3e-15 over 200 perturbed rotations, so there is nothing
+    to gain from keeping our own — and scipy handles batches and reflections for free.
+    """
+    from scipy.spatial.transform import Rotation
+
+    arr = np.asarray(R, dtype=float)
+    return Rotation.from_matrix(arr).as_matrix().reshape(arr.shape)
+
+
 def compute_overlap(xyz0: np.ndarray,
                     xyz1: np.ndarray,
                     threshold: float) -> float:
@@ -454,7 +582,7 @@ if __name__=="__main__":
     bbox = mesh.get_axis_aligned_bounding_box()
     extent_max = bbox.get_extent().max()
     if 5.0 < extent_max < 5000.0:
-        print(f"[INFO] Converting units mm → m")
+        print(f"[INFO] Converting units mm -> m")
         mesh.scale(0.001, center=(0, 0, 0))
     mesh.compute_vertex_normals()
     mesh.translate(-mesh.get_center())

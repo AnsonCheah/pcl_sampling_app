@@ -718,7 +718,7 @@ class TuningStage(BaseStage):
         if result is not None:
             try:
                 out = self._optimizer.export_best(result, prefix=f"{self.sampler.upper()}_")
-                print(f"[TUNING] Best config exported → {out}")
+                print(f"[TUNING] Best config exported -> {out}")
             except Exception as e:
                 print(f"[TUNING] export_best failed: {e}")
 
@@ -849,7 +849,7 @@ class TuningStage(BaseStage):
         db = self._db_path()
         exe = self._dashboard_exe()
         if not db or exe is None:
-            print("[TUNING] optuna-dashboard executable not found — skipping dashboard.")
+            print("[TUNING] optuna-dashboard executable not found -- skipping dashboard.")
             return
         try:
             self._dash_proc = subprocess.Popen(
@@ -862,7 +862,7 @@ class TuningStage(BaseStage):
             if not self._atexit_hooked:
                 atexit.register(self._teardown_runtime)
                 self._atexit_hooked = True
-            print(f"[TUNING] optuna-dashboard → {DASH_URL}  (db={db})")
+            print(f"[TUNING] optuna-dashboard -> {DASH_URL}  (db={db})")
         except Exception as e:
             print(f"[TUNING] failed to launch dashboard: {e}")
             self._dash_proc = None

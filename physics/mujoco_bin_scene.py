@@ -1125,7 +1125,7 @@ class MujocoBinScene:
         n_out = len(out_of_bin)
         rp(f"[BIN CHECK] {n_in}/{n_in + n_out} parts inside bin, {n_out} escaped")
         if n_out > 0:
-            rp(f"  Escaped: {out_of_bin[:10]}{'  …' if n_out > 10 else ''}")
+            rp(f"  Escaped: {out_of_bin[:10]}{'  ...' if n_out > 10 else ''}")
         return {"in_bin": in_bin, "out_of_bin": out_of_bin, "n_in": n_in, "n_out": n_out}
 
     def extract_scene_state(self):

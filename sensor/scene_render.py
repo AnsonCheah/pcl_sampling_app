@@ -1220,7 +1220,7 @@ if __name__ == "__main__":
     part_mesh = o3d.io.read_triangle_mesh(file_path)
     extent_max = part_mesh.get_axis_aligned_bounding_box().get_extent().max()
     if 5.0 < extent_max < 5000.0:
-        print(f"[INFO] Converting units mm → m")
+        print(f"[INFO] Converting units mm -> m")
         part_mesh.scale(0.001, center=(0, 0, 0))
     part_mesh.translate(-part_mesh.get_center())
     part_mesh.rotate(R.random().as_matrix())

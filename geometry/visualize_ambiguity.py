@@ -217,7 +217,7 @@ def _report(profile, legend):
         print(f"  ppf entropy    {profile.ppf_degeneracy.get('entropy', float('nan')):.3f}"
               f"   (diagnostic only; low = flat patches PPF cannot separate)")
     if not legend:
-        print("\n  No ambiguity axes found — pose should be uniquely determined.")
+        print("\n  No ambiguity axes found -- pose should be uniquely determined.")
         return
     print(f"\n  {'rank':>4} {'colour':<18} {'fold':>10} {'step':>7} {'glob':>5} "
           f"{'views':>6} {'patch':>6} {'off-centroid':>13} {'off-aabb':>9}")

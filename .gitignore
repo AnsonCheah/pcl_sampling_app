@@ -19,6 +19,7 @@ MM_Optimizer/results/
 MM_Optimizer/backup_task_records.json
 */.msoln
 *.vis
+mesh_raw/*
 
 # input output formats
 *.stl

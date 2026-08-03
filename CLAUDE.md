@@ -24,12 +24,18 @@ geometry/          ← no local imports (base layer)
     ↑
 sensor/            ← geometry only
 physics/           ← geometry only
-registration/      ← no local imports (standalone)
+registration/      ← geometry only
     ↑
 stages/            ← geometry, sensor, physics (not registration yet)
     ↑
 app.py             ← stages only
+
+bench/             ← top tier; may import everything. Scene generation, metrics, ablation.
 ```
+
+`DecomposeStage` runs VHACD in a `ProcessPoolExecutor` and blocks on the result — it is a
+normal synchronous stage. (It used to be a daemon thread callers had to `join()`; anything
+still saying so is stale.)
 
 
 ## Cross-Domain Contracts
