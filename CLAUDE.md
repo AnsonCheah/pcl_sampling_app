@@ -20,17 +20,26 @@ use "C:\Users\Hmgics\AppData\Local\anaconda3\envs\pcd-sampling\python.exe" for r
 
 ## Package Dependency Graph
 ```
+registration/ppf/  ← NO local imports at all. Standalone vanilla PPF + its own benchmark
+                     harness (ppf/bench/). Copyable into another project; two tests enforce
+                     that, and relative imports are mandatory inside it.
+
 geometry/          ← no local imports (base layer)
     ↑
 sensor/            ← geometry only
 physics/           ← geometry only
-registration/      ← geometry only
+registration/ppf_saliency/
+                   ← geometry + registration.ppf.bench.dataset. The weighted-voting variant
+                     and its ablation harness (ppf_saliency/bench/). Not standalone: its arms
+                     are defined by the ambiguity heat map.
     ↑
 stages/            ← geometry, sensor, physics (not registration yet)
     ↑
 app.py             ← stages only
 
-bench/             ← top tier; may import everything. Scene generation, metrics, ablation.
+bench/             ← top tier; may import everything. Scene GENERATION, dataset fetch, and
+                     ambiguity validation only — matcher benchmarking lives in the packages.
+                     Reserved for an Optuna tuning benchmark (deferred).
 ```
 
 `DecomposeStage` runs VHACD in a `ProcessPoolExecutor` and blocks on the result — it is a

@@ -2,9 +2,9 @@
 
 Run::
 
-    python bench/ablation.py --parts obj_000018 --arms A_uniform,F_ppf_weight
-    python bench/ablation.py --all --out bench_ablation.json
-    python bench/ablation.py --all --arms A_uniform,E_heat_weight,F_ppf_weight,G_combined
+    python -m registration.ppf_saliency.bench.ablation --parts obj_000018 --arms A_uniform,F_ppf_weight
+    python -m registration.ppf_saliency.bench.ablation --all --out bench_ablation.json
+    python -m registration.ppf_saliency.bench.ablation --all --arms A_uniform,E_heat_weight,G_combined
 
 Results are stratified by **symmetry class** (continuous / discrete / asymmetric, taken from
 BOP's published ``models_info.json``) rather than pooled. A mean over mixed geometry would
@@ -30,23 +30,27 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# The repo root, four levels up, so `geometry` and friends resolve when run with -m
+# from anywhere. registration/ppf_saliency/bench/ablation.py -> ../../..
+sys.path.insert(0, os.path.abspath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', '..', '..')))
 
-from bench.arms import ARMS, ArmContext, build_arm, resolve_weights
-from bench.dataset import list_scenes, load_reference, load_scene
-from bench.metrics import (LOOSE, TIGHT, evaluate_pose, summarise,
+from registration.ppf_saliency.bench import SYNTH_ROOT, MESH_ROOT, REPO_ROOT
+from registration.ppf_saliency.bench.arms import (ARMS, ArmContext, build_arm,
+                                                  resolve_weights)
+from registration.ppf.bench.dataset import list_scenes, load_reference, load_scene
+from registration.ppf_saliency.bench.metrics import (LOOSE, TIGHT, evaluate_pose, summarise,
                            symmetry_transforms_from_bop,
                            symmetry_transforms_from_profile)
-from registration.ppf import PPFConfig, PPFModel, downsample, match
+from registration.ppf_saliency import PPFConfig, PPFModel, downsample, match
 
-_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-SYNTH_ROOT = os.path.join(_ROOT, "output", "synthetic_target")
+_ROOT = REPO_ROOT
 
 
 def _bop_models_info() -> Dict[str, dict]:
     """Map ``obj_000005`` -> its BOP ``models_info`` entry, if the dataset is present."""
     out: Dict[str, dict] = {}
-    for root, _, files in os.walk(os.path.join(_ROOT, "mesh_raw")):
+    for root, _, files in os.walk(MESH_ROOT):
         if "models_info.json" not in files:
             continue
         with open(os.path.join(root, "models_info.json")) as f:

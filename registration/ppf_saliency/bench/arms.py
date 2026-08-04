@@ -81,7 +81,7 @@ def _knee_mask(values: np.ndarray) -> np.ndarray:
 
     ``find_cdf_knee`` is the same splitter already used for curvature and edge extraction.
     """
-    from geometry.math_utils import find_cdf_knee
+    from .._utils import find_cdf_knee
 
     v = np.asarray(values, dtype=np.float64)
     if v.size < 10 or float(v.max() - v.min()) < 1e-9:
@@ -120,8 +120,8 @@ def build_arm(name: str, ctx: ArmContext):
     Points are at full resolution; the caller voxel-downsamples at ``tau`` so every arm goes
     through identical preprocessing.
     """
-    from registration.ppf import downsample
-    from registration.ppf.saliency import combine, ppf_saliency, transfer_weights
+    from .. import downsample
+    from ..saliency import combine, ppf_saliency, transfer_weights
 
     spec = ARMS[name]
     if spec.needs_heat and ctx.heat is None:
@@ -137,12 +137,12 @@ def build_arm(name: str, ctx: ArmContext):
         return pts[m], nrm[m], None
 
     if name == "C_curvature":
-        from geometry.curvature import mean_curvature
+        from .._utils import mean_curvature
         m = _knee_mask(mean_curvature(pts, nrm))
         return pts[m], nrm[m], None
 
     if name == "D_curv_heat":
-        from geometry.curvature import mean_curvature
+        from .._utils import mean_curvature
         m = _knee_mask(mean_curvature(pts, nrm)) | _knee_mask(heat)
         return pts[m], nrm[m], None
 
@@ -152,7 +152,7 @@ def build_arm(name: str, ctx: ArmContext):
         # peak becomes noise-determined. Misc3D exposes this as a separate VotingMode and the
         # edge-PPF literature (Choi & Christensen 2012, PPF-MEAM 2018) reports it as the fix.
         import open3d as o3d
-        from geometry.geom_utils import extract_edge_points
+        from .._utils import extract_edge_points
         pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
         pcd.normals = o3d.utility.Vector3dVector(nrm)
         m = extract_edge_points(pcd, ctx.tau)
@@ -171,7 +171,7 @@ def build_arm(name: str, ctx: ArmContext):
 
 def resolve_weights(name: str, model, prebuilt) -> Optional[np.ndarray]:
     """Finish the weight arms that need the trained table (PPF saliency reads its buckets)."""
-    from registration.ppf.saliency import combine, ppf_saliency
+    from ..saliency import combine, ppf_saliency
 
     if prebuilt is None:
         return None

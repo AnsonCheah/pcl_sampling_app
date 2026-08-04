@@ -1,61 +1,60 @@
 # bench
 
-Benchmark harness for the PPF matcher: fetch meshes, generate scenes, score poses, run the
-reference-cloud ablation. Top tier of the dependency graph — may import every other package.
+Repo-tier benchmarking: things that need the **full pipeline** (MuJoCo, the sensor simulator,
+the segmentation stage) or that validate a repo module against external ground truth.
 
-## Workflow
+**Matcher benchmarking does not live here any more.** It moved next to the code it measures:
 
-```bash
-python bench/fetch_dataset.py --dataset tless          # 30 industrial meshes + symmetry GT
-python bench/generate_scenes.py --meshes mesh_raw/tless --scenes 4
-python bench/ablation.py --all --max-instances 100 --out ablation.json
-python bench/validate_ambiguity.py --verbose           # ambiguity module vs BOP
-python bench/visualize_ppf.py                          # overlay poses on a scene
-```
+| Was | Now |
+|---|---|
+| `bench/dataset.py` | `registration/ppf/bench/dataset.py` |
+| `bench/metrics.py` | `registration/ppf_saliency/bench/metrics.py` (a standalone reimplementation lives in `registration/ppf/bench/metrics.py`) |
+| `bench/ablation.py`, `arms.py`, `visualize_ppf.py` | `registration/ppf_saliency/bench/` |
+| `bench/tests/test_bench.py` | `registration/tests/test_ppf_saliency_bench.py` |
 
-Scene generation is the slow step (~2 h for 30 parts x 4 scenes, ~8.8 GB) and is resumable —
-a part that already has enough scenes is skipped, and one that fails is logged and stepped
-over. Raw ablation JSON goes to `output/bench/`, which is gitignored.
+A package whose accuracy claims can only be reproduced from a directory two levels above it
+is not really shippable, and `registration/ppf/` is meant to be liftable into another project.
+What stayed here is what genuinely cannot move.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `fetch_dataset.py` | Download benchmark meshes into `mesh_raw/` |
-| `dataset.py` | Load `output/synthetic_target/<part>/scene_*/` |
-| `generate_scenes.py` | Batch-drive the app pipeline over a mesh directory |
-| `metrics.py` | Symmetry-aware pose error (MSSD / ADI / ADD via `bop_toolkit`) |
-| `arms.py` | The reference-cloud / vote-weight variants under test |
-| `ablation.py` | Run every arm over every part, stratified by symmetry class |
-| `validate_ambiguity.py` | Check `geometry/ambiguity.py` against BOP annotations |
-| `visualize_ppf.py` | Side-by-side pose overlay, one panel per arm |
+| `fetch_dataset.py` | Download benchmark meshes into `mesh_raw/` (T-LESS: 30 objects + symmetry GT, CC BY 4.0) |
+| `generate_scenes.py` | Batch-drive the app pipeline over a mesh directory to produce scenes with GT poses |
+| `validate_ambiguity.py` | Check `geometry/ambiguity.py` against BOP's published symmetry annotations |
 
-## Results (2026-08, 30 T-LESS parts, 2789 instances/arm, CI +/-1.9 points)
+Reserved for an **Optuna tuning benchmark** (deferred): scoring MechVision parameter searches
+from `MM_Optimizer/`. That is what this directory is for — driving a black box that is not
+part of any package here.
 
-| arm | BOP recall (MSSD<0.2D) | @2mm/5deg | MSSD p50 | s/inst |
-|---|---|---|---|---|
-| **A_uniform** | **0.66** | **0.35** | **5.65 mm** | 0.182 |
-| F_ppf_weight | 0.64 | 0.29 | 7.06 mm | 0.240 |
-| E_heat_weight | 0.56 | 0.20 | 13.29 mm | 0.240 |
-| D_curv_heat | 0.40 | 0.09 | 32.5 mm | 0.102 |
-| B_heat_prune | 0.32 | 0.07 | 40.4 mm | 0.089 |
-| H_edge | 0.26 | 0.05 | 49.1 mm | 0.053 |
-| C_curvature | 0.16 | 0.01 | 56.5 mm | 0.067 |
+## Workflow
 
-**Uniform coverage wins. No weighting or pruning scheme beat it.** Pruning arms are 2-3x
-faster — the trade K-PPF reports — but cost 26-50 recall points here rather than the sub-1
-point they claim. This is Birdal & Ilic's even-spacing argument (IROS 2017) confirmed at
-n=2789, and it reproduces the repo's own Jan-Feb 2026 curvature-cloud finding with a much
-sharper edge.
+```bash
+python bench/fetch_dataset.py --dataset tless             # 30 industrial meshes + symmetry GT
+python bench/generate_scenes.py --meshes mesh_raw/tless --scenes 4
+python bench/validate_ambiguity.py --verbose              # ambiguity module vs BOP
 
-Per symmetry class, continuous parts are the weak spot everywhere: 0.44 against 0.81 for
-discrete and 0.73 for asymmetric.
+# then, from the packages:
+python -m registration.ppf.bench.run --all \
+    --scenes-root output/synthetic_target \
+    --models-info mesh_raw/tless/models_info.json
+python -m registration.ppf_saliency.bench.ablation --all --out ablation.json
+```
 
-## Reading the ablation table
+Scene generation is the slow step (~3 min per part per scene, most of it VHACD convex
+decomposition, which is one-time per part) and is **resumable** — a part that already has
+enough scenes is skipped, and one that fails is logged and stepped over. Pass
+`--no-ambiguity` when only the vanilla matcher will consume the output; it saves 1-3 min per
+part, and only the heat-map weighting arms read that sidecar.
+
+Raw output goes to `output/synthetic_target/`, which is gitignored.
+
+## Reading any of these numbers
 
 - **Compare only within a block.** Parts differ enormously in difficulty.
 - **Two arms differ only if their CIs do not overlap.** At 26 instances the half-width on a
-  ~0.5 recall is +/-19 points, wider than any arm difference — hence the 100-instance cap
+  ~0.5 recall is +/-19 points, wider than most arm differences — hence the 100-instance cap
   per part and the 30-part sweep.
 - **`BOP mssd<0.2D` is the headline**, not `@2mm/5deg`. The latter is MechVision's coarse
   *plus fine* target; PPF alone is a coarse stage and scoring it there compresses every arm
@@ -79,4 +78,8 @@ mesh-recentring shift; only the per-sample one shares a frame with `reference_cl
 counter over instances passing the 2D filter.
 
 **`bop_toolkit` must be installed with `--no-deps`** — its pyproject pins `numpy<2.0.0` and a
-normal install downgrades numpy, open3d and scipy together.
+normal install downgrades numpy, open3d and scipy together. `registration/ppf/bench/metrics.py`
+deliberately does not use it at all; `registration/ppf_saliency/bench/metrics.py` still does.
+
+**`fetch_dataset.py` needs `requests` + `certifi`**, which are present in `pcd-sampling` but
+not in `autotune`. Everything else here runs in either.

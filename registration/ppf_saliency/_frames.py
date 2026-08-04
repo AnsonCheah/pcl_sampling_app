@@ -1,10 +1,10 @@
-"""Local reference frames and the alpha angle -- the geometric core of PPF.
+"""Local reference frames and the alpha angle — the geometric core of PPF.
 
 Every oriented point ``(p, n)`` defines a frame in which ``p`` sits at the origin and ``n``
 points along +x.  A point pair is then described by four rotation-invariant numbers (the
 feature) plus one angle ``alpha`` that carries the remaining rotational degree of freedom.
 Matching a scene pair to a model pair therefore pins down the full pose from a single
-correspondence -- which is what makes PPF a voting method rather than a search.
+correspondence — which is what makes PPF a voting method rather than a search.
 
 The convention here (``R n = +x``, ``alpha = atan2(-v_z, v_y)``) is Drost's.  Any
 self-consistent convention works, but train, match, and pose reconstruction must share
@@ -29,8 +29,8 @@ def frames_to_x(normals: np.ndarray) -> np.ndarray:
     skew-matrix algebra bought nothing but a place for a sign error to hide.
 
     What scipy cannot do for us is the degenerate case.  When ``n`` is already parallel to
-    +/-x the cross product vanishes, the rotation axis is undefined, and normalising it
-    divides by zero -- so +x is mapped to identity and -x to a half turn about z explicitly.
+    ±x the cross product vanishes, the rotation axis is undefined, and normalising it
+    divides by zero — so +x is mapped to identity and -x to a half turn about z explicitly.
     """
     n = np.asarray(normals, dtype=np.float64).reshape(-1, 3)
     n = n / np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-12)

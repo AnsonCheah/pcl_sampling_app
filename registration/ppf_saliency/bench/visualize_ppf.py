@@ -2,10 +2,10 @@
 
 Run::
 
-    python bench/visualize_ppf.py                          # bunny, scene 0, both arms
-    python bench/visualize_ppf.py --part X --scene 1
-    python bench/visualize_ppf.py --arms uniform           # single panel
-    python bench/visualize_ppf.py --save out.png --no-show
+    python -m registration.ppf_saliency.bench.visualize_ppf                          # bunny, scene 0, both arms
+    python -m registration.ppf_saliency.bench.visualize_ppf --part X --scene 1
+    python -m registration.ppf_saliency.bench.visualize_ppf --arms uniform           # single panel
+    python -m registration.ppf_saliency.bench.visualize_ppf --save out.png --no-show
 
 What you are looking at
     Grey cloud      the raw synthetic scene, exactly as the sensor simulation produced it.
@@ -42,11 +42,15 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import open3d as o3d
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Repo root, four levels up: registration/ppf_saliency/bench/visualize_ppf.py
+sys.path.insert(0, os.path.abspath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', '..', '..')))
 
-from bench.dataset import SYNTH_ROOT, list_parts, list_scenes, load_reference, load_scene
-from registration.ppf import PPFConfig, PPFModel, downsample, match
-from registration.ppf.saliency import ppf_saliency, transfer_weights
+from registration.ppf_saliency.bench import SYNTH_ROOT
+from registration.ppf.bench.dataset import (list_parts, list_scenes, load_reference,
+                                            load_scene)
+from registration.ppf_saliency import PPFConfig, PPFModel, downsample, match  # noqa: E402
+from registration.ppf_saliency.saliency import ppf_saliency, transfer_weights
 
 # Repo-wide accuracy gates (MM_Optimizer/search_config.py).
 TIGHT = (0.002, 5.0)

@@ -24,11 +24,12 @@ import open3d as o3d
 import pytest
 from scipy.spatial.transform import Rotation as Rot
 
-from bench.arms import ARMS, ArmContext, _knee_mask, build_arm
-from bench.metrics import (LOOSE, TIGHT, PoseError, evaluate_pose,
+from registration.ppf_saliency.bench.arms import (ARMS, ArmContext, _knee_mask,
+                                                  build_arm)
+from registration.ppf_saliency.bench.metrics import (LOOSE, TIGHT, PoseError, evaluate_pose,
                            symmetry_transforms_from_profile)
 from geometry.ambiguity import AmbiguityAxis, AmbiguityProfile
-from registration.ppf import PPFConfig, downsample
+from registration.ppf_saliency import PPFConfig, downsample
 
 
 # ─────────────────────────────────────────────────────────────────────────────

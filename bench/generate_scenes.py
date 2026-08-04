@@ -149,7 +149,7 @@ def main() -> None:
         part = os.path.splitext(os.path.basename(mesh))[0]
         have = existing_scene_count(part)
         if have >= args.scenes and not args.force:
-            print(f"[{i}/{len(meshes)}] {part}: already has {have} scenes — skipping")
+            print(f"[{i}/{len(meshes)}] {part}: already has {have} scenes - skipping")
             skipped.append(part)
             continue
         print(f"[{i}/{len(meshes)}] {part} ...", flush=True)
@@ -176,7 +176,7 @@ def main() -> None:
         # at ~0.5 recall the 95% CI half-width is 1.96*sqrt(0.25/n).
         half = 1.96 * (0.25 / total_inst) ** 0.5
         print(f"95% CI half-width on a ~0.5 recall: +/- {half * 100:.1f} points "
-              f"({'enough to resolve a 5-point arm difference' if half < 0.025 else 'NOT yet enough — a 5-point arm difference stays inside the noise'})")
+              f"({'enough to resolve a 5-point arm difference' if half < 0.025 else 'NOT yet enough - a 5-point arm difference stays inside the noise'})")
     for part, err in failed:
         print(f"  FAILED {part}: {err}")
 

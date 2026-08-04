@@ -33,10 +33,25 @@ import numpy as np
 import open3d as o3d
 
 __all__ = ["Instance", "Scene", "list_parts", "list_scenes", "load_reference", "load_scene",
-           "SYNTH_ROOT"]
+           "SYNTH_ROOT", "default_scenes_root"]
 
-_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-SYNTH_ROOT = os.path.join(_ROOT, "output", "synthetic_target")
+
+def default_scenes_root() -> str:
+    """Where scenes live, resolved without assuming any particular repository layout.
+
+    The loader reads a *directory format*, not a specific project's output tree, so the
+    location has to come from the caller.  ``PPF_SCENES_ROOT`` wins if set; otherwise this
+    falls back to ``./output/synthetic_target`` under the current working directory, which is
+    what the generator in the surrounding repo happens to write.  Every public function also
+    takes ``root`` explicitly, so nothing here depends on getting this default right.
+    """
+    env = os.environ.get("PPF_SCENES_ROOT")
+    if env:
+        return os.path.abspath(env)
+    return os.path.abspath(os.path.join(os.getcwd(), "output", "synthetic_target"))
+
+
+SYNTH_ROOT = default_scenes_root()
 
 
 @dataclass
@@ -73,15 +88,18 @@ class Scene:
         return np.array([0.0, 0.0, float(self.state.get("camera_distance", 1.5))])
 
 
-def list_parts(root: str = SYNTH_ROOT) -> List[str]:
+def list_parts(root: Optional[str] = None) -> List[str]:
+    # Resolved per call, not bound at import: the default depends on the working directory
+    # and on PPF_SCENES_ROOT, either of which can legitimately change after import.
+    root = root or default_scenes_root()
     if not os.path.isdir(root):
         return []
     return sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)))
 
 
-def list_scenes(part: str, root: str = SYNTH_ROOT) -> List[str]:
+def list_scenes(part: str, root: Optional[str] = None) -> List[str]:
     """Absolute paths of a part's ``scene_NNNNN`` directories, in order."""
-    part_dir = part if os.path.isdir(part) else os.path.join(root, part)
+    part_dir = part if os.path.isdir(part) else os.path.join(root or default_scenes_root(), part)
     if not os.path.isdir(part_dir):
         return []
     return [os.path.join(part_dir, d) for d in sorted(os.listdir(part_dir))

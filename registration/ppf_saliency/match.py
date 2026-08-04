@@ -9,11 +9,15 @@ The accumulator is Drost's: one 2-D table per scene reference point, indexed by 
 point, alpha bin).  A vote for cell ``(m, a)`` says "if this scene reference point is model
 point ``m``, rotated by ``a``, then this pair is explained".  The tallest cell wins.
 
-One departure from textbook Drost, to stop non-discriminative geometry dominating:
-**vote deduplication** (Hinterstoisser, ECCV 2016).  On a planar patch one scene point can
-match hundreds of equivalent model points, all voting the same cell, so a flat region
-out-votes a distinctive one purely by repetition.  Each scene point is therefore counted
-at most once per cell.
+Two departures from textbook Drost, both to stop non-discriminative geometry dominating:
+
+* **Vote deduplication** (Hinterstoisser, ECCV 2016).  On a planar patch one scene point can
+  match hundreds of equivalent model points, all voting the same cell, so a flat region
+  out-votes a distinctive one purely by repetition.  Each scene point is therefore counted
+  at most once per cell.
+* **Per-model-point vote weights.**  The vote is a weight rather than a ``+1``, which is the
+  mechanism the ambiguity heat map and the PPF-saliency map plug into.  Uniform weights
+  reproduce the unweighted result exactly, and there is a test pinning that.
 
 Note that deduplication does **not** subsume MechVision's ``maxNumOfPointPairsPerFeature``,
 which was an early assumption here and is wrong: dedup runs *after* the table lookup has
@@ -60,8 +64,9 @@ class Pose:
         """``1 - runner_up/peak``, in [0, 1]. High = the accumulator had a clear winner.
 
         Reported because the literature never has: no PPF paper relates accumulator health
-        to model sparsity.  A pose that wins by a hair is a different outcome from one that
-        wins outright, even when both land within tolerance.
+        to model sparsity, so the sparsity arms of the ablation have nothing to compare
+        against.  A pose that wins by a hair on a sparsified model is a different outcome
+        from one that wins outright, even when both land within tolerance.
         """
         if self.peak_votes <= 0:
             return 0.0
@@ -76,8 +81,8 @@ class MatchResult:
     n_votes: int = 0                 # votes cast after dedup
     timings: Dict[str, float] = field(default_factory=dict)
     # Which array module actually ran the vote stage. Recorded rather than assumed, because
-    # asking for "cupy" on a machine without a usable GPU silently yields NumPy -- and a
-    # benchmark that reported those CPU timings as GPU ones would be worse than a crash.
+    # asking for "cupy" without a usable GPU silently yields NumPy -- and a benchmark that
+    # reported those CPU timings as GPU ones would be worse than a crash.
     backend: str = "numpy"
 
     @property
@@ -96,7 +101,7 @@ def downsample(points: np.ndarray, normals: np.ndarray, voxel: float
 
     Open3D does the binning (12x faster than doing it here with ``np.unique(axis=0)`` plus
     ``np.add.at``, both of which are slow paths in NumPy). What Open3D does *not* do is
-    renormalise the averaged normals -- they come back up to ~0.2% off unit -- and PPF's
+    renormalise the averaged normals — they come back up to ~0.2% off unit — and PPF's
     features are angles between normals, so that is left to us.
     """
     pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
@@ -117,6 +122,25 @@ def downsample(points: np.ndarray, normals: np.ndarray, voxel: float
     return out_p[keep], out_n[keep] / mag[keep, None]
 
 
+def _pair_weights(w, t_ep, t_ep2, entry: np.ndarray, mode: str) -> Optional[np.ndarray]:
+    """Vote weight per matched model-table entry, or ``None`` for unweighted.
+
+    Takes the weight and entry arrays rather than the model, so the GPU path can hand it
+    device-resident copies instead of a second implementation being written for them.
+    """
+    if w is None:
+        return None
+    if mode == "ref":
+        return w[t_ep[entry]]
+    w1 = w[t_ep[entry]]
+    w2 = w[t_ep2[entry]]
+    if mode == "product":
+        return w1 * w2
+    if mode == "geometric_mean":
+        return np.sqrt(w1 * w2)
+    raise ValueError(f"unknown weight mode {mode!r}")
+
+
 def _rotation_angle_deg(Ra: np.ndarray, Rb: np.ndarray) -> np.ndarray:
     """Geodesic angle between rotations, broadcasting over leading axes."""
     tr = np.einsum("...ij,...ij->...", Ra, Rb)          # trace(Ra^T Rb)
@@ -127,12 +151,12 @@ def _cluster(T: np.ndarray, votes: np.ndarray, peaks: np.ndarray, runners: np.nd
              pos_tol: float, ang_tol_deg: float, max_clusters: int = 64):
     """Greedy SE(3) agglomeration, strongest hypothesis first.
 
-    Both position *and* rotation are compared.  Translation-only clustering merges two
-    genuinely different orientations of the same part at the same location, which is exactly
-    the symmetry-flip case a pose benchmark needs to be able to see.  Collapsing it would
-    hide the failure.
+    Both position *and* rotation are compared.  Translation-only clustering — which is what
+    the previous ``coarse_match._distance_nms`` did — merges two genuinely different
+    orientations of the same part at the same location, which is exactly the symmetry-flip
+    case this project is trying to measure.  Collapsing it would hide the failure.
     """
-    from ._geometry import project_to_so3
+    from geometry.geom_utils import project_to_so3
 
     order = np.argsort(-votes)
     # Representatives held as arrays so each hypothesis is compared against *all* current
@@ -203,18 +227,15 @@ def _verify(model: PPFModel, T: np.ndarray, scene_pts: np.ndarray, scene_nrm: np
     R, t = T[:3, :3], T[:3, 3]
 
     # Scene -> model frame rather than model -> scene frame. A rigid transform preserves
-    # distances and angles, so `dist(scene_i, R*model_j + t) == dist(R^T(scene_i - t),
-    # model_j)` exactly -- but the second form queries a tree over the MODEL, which never
-    # moves and was therefore built once at train time. The previous form rebuilt a KD-tree
-    # per candidate pose, ~16 times per instance, for no information gain.
+    # distances, so `dist(scene_i, R*model_j + t) == dist(R^T(scene_i - t), model_j)` exactly
+    # -- but the second form queries a tree over the MODEL, which never moves and was built
+    # once at train time. The previous form rebuilt a KD-tree per candidate pose.
     # (`x @ R` is `R^T @ x` for row vectors.)
     tree = model.point_tree if model.point_tree is not None else cKDTree(model.points)
     d_scene, i_scene = tree.query((scene_pts - t) @ R, k=1)
     local_n = scene_nrm @ R
     ok = (d_scene < tol) & (np.einsum("ij,ij->i", local_n, model.normals[i_scene]) > cos_tol)
 
-    # The model -> scene direction still needs the model moved, but `scene_tree` is already
-    # built once per match, so there is nothing to hoist here.
     d_model, _ = scene_tree.query(model.points @ R.T + t, k=1)
     return float(np.mean(ok)), int(np.count_nonzero(d_model < tol))
 
@@ -224,6 +245,7 @@ def match(model: PPFModel,
           points: np.ndarray,
           normals: np.ndarray,
           top_k: int = 1,
+          weight_mode: str = "ref",
           do_downsample: bool = True,
           vote_budget: int = 8_000_000,
           accumulator_cells: int = 4_000_000,
@@ -232,12 +254,14 @@ def match(model: PPFModel,
 
     Parameters
     ----------
-    points, normals : the cluster, in scene coordinates. Raw resolution is fine -- see
+    points, normals : the cluster, in scene coordinates. Raw resolution is fine — see
         ``do_downsample``.
-    top_k : hypotheses to return, best first. Ask for >1 when a symmetry flip and the true
-        pose both need to be visible.
+    top_k : hypotheses to return, best first. The ambiguity study wants >1 so that a
+        symmetry flip and the true pose can both be seen.
+    weight_mode : how a pair's two endpoint weights combine (``ref`` / ``product`` /
+        ``geometric_mean``). Ignored when the model carries no weights.
     vote_budget, accumulator_cells : memory budgets in elements. Hardware policy shared by
-        every part, not per-part tuning -- they bound peak RAM on degenerate (planar) parts
+        every part, not per-part tuning — they bound peak RAM on degenerate (planar) parts
         where one feature bin holds a large share of the model's pairs.
     """
     import time
@@ -266,12 +290,13 @@ def match(model: PPFModel,
 
     # The vote stage runs on `xp`; pose reconstruction, clustering and verification stay on
     # the host because they use scipy (Rotation, cKDTree), which has no device equivalent.
-    # Only the per-chunk peaks cross back, which is a few floats per scene reference point.
     if xp is np:
         d_pts, d_nrm, d_frames = s_pts, s_nrm, s_frames
+        d_w = model.weights
     else:
         d_pts, d_nrm, d_frames = xp.asarray(s_pts), xp.asarray(s_nrm), xp.asarray(s_frames)
-    t_keys, t_ep, t_alpha, t_offs = model.table_for(xp)
+        d_w = None if model.weights is None else xp.asarray(model.weights)
+    t_keys, t_ep, t_ep2, t_alpha, t_offs = model.table_for(xp)
 
     all_T, all_votes, all_peak, all_runner = [], [], [], []
     t_vote = 0.0
@@ -310,8 +335,6 @@ def match(model: PPFModel,
 
         # Split into batches whose expanded vote count stays inside the budget. A single
         # over-budget bucket still goes through as its own batch rather than failing.
-        # Planned on the host: it is a short Python loop over a cumulative sum, so running it
-        # on the device would cost more in synchronisation than the loop itself takes.
         edges = _budget_batches(asnumpy(counts), vote_budget)
         tv = time.perf_counter()
         for b0, b1 in edges:
@@ -326,13 +349,14 @@ def match(model: PPFModel,
             alpha = t_alpha[entry].astype(np.float64) - alpha_s[src]
             abin = np.floor((alpha % _TWO_PI) / astep).astype(np.int64) % NA
             cell = (local[src] * M + t_ep[entry]) * NA + abin
+            w = _pair_weights(d_w, t_ep, t_ep2, entry, weight_mode)
 
             if cfg.vote_dedup:
                 # One vote per (cell, scene point). Without this a scene point on a planar
                 # patch votes once per equivalent model point, and flat geometry outvotes
                 # distinctive geometry by sheer repetition.
-                cell = _dedup(cell * C + jj[src], C, xp)
-            acc += xp.bincount(cell, minlength=R * cells)
+                cell, w = _dedup(cell * C + jj[src], C, w, xp)
+            acc += xp.bincount(cell, weights=w, minlength=R * cells)
             result.n_votes += len(cell)
         t_vote += time.perf_counter() - tv
 
@@ -357,8 +381,7 @@ def match(model: PPFModel,
             flat[rows, m_idx * NA + (a_idx + off) % NA] = -1.0
         runner = np.maximum(flat.max(axis=1), 0.0)
 
-        # Back to the host for pose reconstruction onward. Everything below indexes host-side
-        # model geometry and goes through scipy, so this is the natural device boundary.
+        # Back to the host: everything below indexes host-side model geometry via scipy.
         alive = asnumpy(alive)
         m_idx, a_idx = asnumpy(m_idx), asnumpy(a_idx)
         peak, runner = asnumpy(peak), asnumpy(runner)
@@ -404,78 +427,64 @@ def match(model: PPFModel,
     return result
 
 
-def match_many(model: PPFModel,
-               clusters,
-               workers: Optional[int] = None,
-               **kwargs) -> List[MatchResult]:
+def match_many(model: PPFModel, clusters, workers=None, **kwargs):
     """Match many clusters against one model, in parallel. Results keep the input order.
 
-    Instances in a bin are independent, so this is the cheapest large speedup available:
-    measured **3.5x** on 48 T-LESS instances (0.147 -> 0.042 s/instance).
+    Threads, not processes: the hot loop is NumPy (sort, bincount, searchsorted, gathers),
+    all of which release the GIL, and threads share the ~40 MB trained table instead of
+    copying it. Measured 3.5x on 48 T-LESS instances; processes measured *worse than serial*
+    on Windows, where the absence of ``fork`` makes every worker respawn and retrain.
 
-    **Threads, not processes.** The hot loop is NumPy -- sort, bincount, searchsorted,
-    gathers -- all of which release the GIL, and threads share the ~40 MB trained table
-    instead of copying it. Processes measured *worse* than serial on Windows (1.23x at 8
-    workers against 3.47x for threads) because there is no ``fork``: every worker respawns
-    the interpreter and retrains the model. That is a real result, not a tuning artefact.
-
-    Scaling plateaus around 8 threads because what remains serialised is the Python-level
-    remainder -- the chunk loop and the greedy clustering -- so ``workers`` above that buys
-    nothing. Hence the default cap.
-
-    ``clusters`` is an iterable of ``(points, normals)``. Extra keyword arguments go to
-    :func:`match` unchanged.
-
-    On the CuPy backend the default drops to one worker: the kernels already occupy the
-    device, and several host threads pushing into the same stream serialise anyway while
-    adding synchronisation overhead.
+    Scaling plateaus near 8 threads -- what stays serialised is the Python remainder (the
+    chunk loop, the greedy clustering) -- hence the default cap. On the CuPy backend the
+    default is 1: the device is already saturated by one host thread, and several threads
+    pushing the same stream serialise while adding synchronisation.
     """
     from concurrent.futures import ThreadPoolExecutor
 
     items = [(np.asarray(p), np.asarray(n)) for p, n in clusters]
     if not items:
         return []
-
     if workers is None:
         gpu = kwargs.get("backend", "numpy") != "numpy" and cupy_available()
         workers = 1 if gpu else min(8, len(items), (os.cpu_count() or 1))
     workers = max(1, int(workers))
-
     if workers == 1:
         return [match(model, p, n, **kwargs) for p, n in items]
-
-    # `match` only reads the model and allocates per-call locals (including the accumulator
-    # it masks in place), and cKDTree queries are thread-safe, so no locking is needed.
+    # `match` only reads the model and allocates per-call locals, and cKDTree queries are
+    # thread-safe, so no locking is needed.
     with ThreadPoolExecutor(max_workers=workers) as ex:
         return list(ex.map(lambda pn: match(model, pn[0], pn[1], **kwargs), items))
 
 
-def _dedup(comp: np.ndarray, divisor: int, xp=np) -> np.ndarray:
-    """Collapse duplicate ``comp`` values, returning ``comp // divisor``.
+def _dedup(comp: np.ndarray, divisor: int, w: Optional[np.ndarray], xp=np):
+    """Collapse duplicate ``comp`` values, returning ``(comp // divisor, weights)``.
 
     Deliberately sort-based rather than ``np.unique``.  NumPy 2.x routes ``unique`` through
     a hash table which is pathologically slow on the wide int64 keys used here: measured
     0.411 s versus 0.020 s for sort-then-diff on 1.4 M values, and this is the single
     hottest call in the matcher (53% of runtime before the change).
-
-    ``kind="stable"`` was tried and is 5x *slower* here (95 ms vs 19.6 ms on 1.4 M int64),
-    so the default introsort stays.
-
-    ``xp`` is needed only for ``empty`` -- creation has no array argument to dispatch on.
     """
-    s = xp.sort(comp)
+    if w is None:
+        s = xp.sort(comp)
+        keep = xp.empty(len(s), dtype=bool)
+        keep[0] = True
+        np.not_equal(s[1:], s[:-1], out=keep[1:])
+        return s[keep] // divisor, None
+    order = xp.argsort(comp, kind="stable")
+    s = comp[order]
     keep = xp.empty(len(s), dtype=bool)
     keep[0] = True
     np.not_equal(s[1:], s[:-1], out=keep[1:])
-    return s[keep] // divisor
+    return s[keep] // divisor, w[order][keep]
 
 
 def _budget_batches(counts: np.ndarray, budget: int) -> List[Tuple[int, int]]:
     """Contiguous index ranges over ``counts`` whose sums stay under ``budget``.
 
     Cut points come from ``searchsorted`` on the cumulative sum rather than a Python loop
-    over ``counts``. This only fires on degenerate parts -- where the total blows the budget
-    -- but those are exactly the parts with the most pairs, so the loop was slowest precisely
+    over ``counts``. This only fires on degenerate parts — where the total blows the budget
+    — but those are exactly the parts with the most pairs, so the loop was slowest precisely
     when it ran: 43 ms over 250 k pairs.
 
     A single bucket larger than the budget still becomes its own batch rather than failing;
