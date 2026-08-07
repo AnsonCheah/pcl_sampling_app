@@ -43,11 +43,17 @@ TWO_PASS_MIN_CANDIDATES = 3
 # 0.0=Surface, 1.0=Edge
 # ---------------------------------------------------------------------------
 
+# Coarse and fine always share a cloud type. The mixed combinations (coarse edge -> fine
+# surface, and its reverse) are gone because they need two models loaded at once, which the
+# one-model-per-part MechVision layout cannot express: `3d_matching/<part>/` holds exactly one
+# `<part>.ply`, swapped per regime by `MM_Optimizer/model_sync.py`. That layout is what removes
+# the manual copy into the MechVision project, and halving the gate is a side benefit.
+#
+# The cost: a part that genuinely wants edge-coarse with surface-fine can no longer say so.
+# Restoring it means going back to one library entry per cloud type.
 PHASE1_REGIMES = [
-    {"id": "A", "coarse_mode": 0.0, "fine_mode": 0.0, "needs_edge": False},
-    {"id": "B", "coarse_mode": 1.0, "fine_mode": 1.0, "needs_edge": True},
-    {"id": "C", "coarse_mode": 1.0, "fine_mode": 0.0, "needs_edge": True},
-    {"id": "D", "coarse_mode": 0.0, "fine_mode": 1.0, "needs_edge": True},
+    {"id": "A", "coarse_mode": 0.0, "fine_mode": 0.0, "needs_edge": False},   # surface
+    {"id": "B", "coarse_mode": 1.0, "fine_mode": 1.0, "needs_edge": True},    # edge
 ]
 
 PHASE1_COVERAGE_GATE = 0.50    # min coverage @ loose threshold to pass Phase 1

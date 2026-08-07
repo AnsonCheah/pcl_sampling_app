@@ -705,7 +705,13 @@ def run_sampling(app, express):
     downsample = app.stages[Stage.DOWNSAMPLE]
 
     if express:
-        downsample.use_adaptive = True
+        # Uniform, matching the GUI default and `bench/generate_scenes.py`. Adaptive
+        # produced a p90/p10 spacing spread of ~4.3, and the ambiguity analysis derives a
+        # single global epsilon from the median spacing — one number that is simultaneously
+        # too tight for the sparse regions and too loose for the dense ones. It also meant
+        # the express path and the bench sweep built different clouds for the same part,
+        # so any comparison between them varied two things at once.
+        downsample.use_adaptive = False
     else:
         banner("Raycast settings")
         raycast.camera_distance = ask(

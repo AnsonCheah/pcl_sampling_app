@@ -825,6 +825,20 @@ def _ppf_degeneracy(pts: np.ndarray, normals: np.ndarray, diameter: float,
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _restore_origin(profile: "AmbiguityProfile", analysis_origin: np.ndarray) -> "AmbiguityProfile":
+    """Put axis points back into the caller's frame after the analysis-time centring.
+
+    Only the axis *points* moved: directions, angles and every per-view / per-point score
+    are translation-invariant. ``dominant`` is one of the objects in ``axes``, so shifting
+    the list covers it.
+    """
+    if float(np.linalg.norm(analysis_origin)) <= 1e-9:
+        return profile
+    for ax in profile.axes:
+        ax.point = ax.point + analysis_origin
+    return profile
+
+
 def analyse_ambiguity(mesh: o3d.geometry.TriangleMesh,
                       pcd: o3d.geometry.PointCloud,
                       cfg: Optional[AmbiguityConfig] = None,
@@ -846,6 +860,28 @@ def analyse_ambiguity(mesh: o3d.geometry.TriangleMesh,
     if len(pts) < 16 or len(normals) != len(pts):
         return AmbiguityProfile(per_point_discriminative=np.ones(len(pts)))
     normals = normals / np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-12)
+
+    # Work at the origin, whatever the caller hands us, and put the axes back at the end.
+    #
+    # The result is *supposed* to be translation-invariant and is not: a part left in its
+    # assembly coordinates (25333MB000's STL sits 0.85 m out) yields a different answer
+    # from the same cloud centred. Measured on that part -- centred: 4 axes, dominant
+    # area 0.496 (the disc axis); at 0.85 m: 5 axes, dominant area 0.359, with the disc
+    # axis split into 0.415 + 0.461 fragments that individually lose to a C2 axis. The
+    # frame then gets built around the wrong axis.
+    #
+    # The pipeline centres the mesh on every path that goes through the app
+    # (`start_express_sampling`, `run_headless`, batch), which is why this stayed hidden
+    # -- only `bench/generate_scenes.py` skipped it. Rather than rely on every caller
+    # remembering, the invariance is enforced here where it can be guaranteed.
+    #
+    # Only axis *points* are translation-dependent: directions, angles, per-view and
+    # per-point scores are all unaffected.
+    analysis_origin = 0.5 * (pts.min(axis=0) + pts.max(axis=0))
+    if np.linalg.norm(analysis_origin) > 1e-9:
+        pts = pts - analysis_origin
+        mesh = o3d.geometry.TriangleMesh(mesh)
+        mesh.translate(-analysis_origin)
 
     diameter = float(np.linalg.norm(pts.max(axis=0) - pts.min(axis=0)))
     tree = cKDTree(pts)
@@ -988,7 +1024,17 @@ def analyse_ambiguity(mesh: o3d.geometry.TriangleMesh,
 
         fold, fold_angles = _fit_fold(angles, cfg,
                                       lambda a, _d=d, _p=p: probe_at(_d, _p, a))
-        vf = float(view_fraction[g].max())
+        # UNION over the group's members, not the best single one. A group holds several
+        # rotations about one axis (a C3's 120 and 240, say), and they need not bite in the
+        # same viewpoints — `max` reports only the strongest member and under-states how
+        # often the axis is a problem. `any(axis=0)` is the set of viewpoints where *some*
+        # rotation about this axis survives, which is what "this axis makes the pose
+        # ambiguous here" actually means.
+        vf = float(survives[g].any(axis=0).mean())
+        # area_fraction stays per-hypothesis (max, not union). It answers a different
+        # question — whether a *single* wrong pose still overlaps the model enough to
+        # survive MechVision's verification — and unioning across the fold angles would
+        # overstate that for every axis with more than one rotation.
         af = float(area_fraction[g].max())
         # Median over the (member, view) cells where that member actually survives.
         # Selecting whole columns instead -- views where ANY member survived -- mixes in
@@ -1018,7 +1064,7 @@ def analyse_ambiguity(mesh: o3d.geometry.TriangleMesh,
 
     if progress_cb is not None:
         progress_cb(1.0)
-    return profile
+    return _restore_origin(profile, analysis_origin)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1248,16 +1294,29 @@ def load_ambiguity_profile(path) -> AmbiguityProfile:
     companion ``.npy`` existed) load fine with an empty ``per_point_discriminative`` — the
     axes are the part that most consumers want, and callers already have to handle the
     empty case because a part with no recovered axes has no heat map either.
+
+    **Everything derivable from the stored metrics is re-derived**, never trusted from the
+    file: `is_global` via :func:`reclassify_global`, and the axis order, `score` and
+    `dominant` via :func:`rank_axes`. A file records measurements; the decisions taken from
+    them belong to the current code.
+
+    Re-ranking is not hypothetical. The `25333MB000` sidecar was written before
+    `rank_area_exponent` existed, so its order came from the old `score = view_fraction`
+    and named a C2 axis as dominant. Re-ranking those same stored numbers puts the
+    off-centroid disc axis first instead — and `dominant` is what selects MechVision's
+    `rotationStrategy` and `angleStep`, so trusting the stored order ships the wrong axis.
     """
     with open(path) as f:
         d = json.load(f)
     pp = per_point_path(path)
     disc = np.load(pp).astype(np.float64) if pp.exists() else np.empty(0)
-    # `is_global` is re-derived rather than trusted from the file. It is a pure function of
-    # `view_fraction` and `area_fraction`, both of which are stored, so a sidecar written
-    # under an older classification rule is judged by the current one instead of silently
-    # carrying a stale label. (Same principle as `rank_axes`.)
-    return reclassify_global(AmbiguityProfile(
+
+    # A key present but null must fall back to the default, so this cannot be a plain
+    # `.get(key, default)` — and `or` would swallow a deliberate exponent of 0.0.
+    exponent = d.get("rank_area_exponent")
+    exponent = AmbiguityConfig.rank_area_exponent if exponent is None else float(exponent)
+
+    profile = AmbiguityProfile(
         per_point_discriminative=disc,
         axes=[_axis_from_dict(a) for a in d.get("axes", [])],
         dominant=_axis_from_dict(d["dominant"]) if d.get("dominant") else None,
@@ -1271,6 +1330,10 @@ def load_ambiguity_profile(path) -> AmbiguityProfile:
         ppf_degeneracy=d.get("ppf_degeneracy", {}),
         epsilon_m=float(d.get("epsilon_m", 0.0)),
         f_tau=float(d.get("f_tau", 0.0)),
-        rank_area_exponent=float(d.get("rank_area_exponent", 2.0)),
+        rank_area_exponent=exponent,
         diameter_m=float(d.get("diameter_m", 0.0)),
-    ))
+    )
+    reclassify_global(profile)
+    # Ranked with the profile's OWN exponent, so a file saved under a deliberate setting
+    # keeps that intent; only a file that never recorded one adopts the current default.
+    return rank_axes(profile, exponent)

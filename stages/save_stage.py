@@ -1,4 +1,5 @@
 import json
+import numpy as np
 import open3d as o3d
 import open3d.visualization.gui as gui
 from enums import Stage
@@ -98,6 +99,35 @@ class SaveStage(BaseStage):
 
         print(f"[INFO] Saved {cloud_type} cloud to {folder_path}")
 
+    def _warn_if_not_recentred(self):
+        """Loudly flag a bundle exported before the model frame was applied.
+
+        `DownsampleStage.worker()` only *computes* the geocenter; `recenter_mesh_pcd()`
+        applies it and then sets `app.geocenter` to identity. A non-identity geocenter
+        here therefore means the transform is still pending and the cloud is being written
+        in the raw raycast frame.
+
+        That matters more than it looks. The bundle stays geometrically valid, but the
+        ambiguity axis is no longer a frame axis through the origin, and MechVision's
+        `rotationStrategy` can only rotate about a frame axis through the geocenter origin
+        -- so the symmetry search would rotate about the wrong line. It also breaks the
+        `geo_center.json` contract: that file is always written as identity because the
+        frame is meant to be baked into the cloud.
+
+        Warn rather than block: recentring stays a deliberate user action (the GUI button),
+        and the tuner re-checks frame alignment on load as a second net.
+        """
+        if getattr(self.app, "geocenter", None) is None:
+            return
+        if np.allclose(self.app.geocenter, np.eye(4)):
+            return
+        print("[WARN] " + "=" * 66)
+        print("[WARN] Exporting a cloud that has NOT been recentred into its model frame.")
+        print("[WARN] Click 'Recenter Point Cloud' in the Downsample stage first, or the")
+        print("[WARN] ambiguity axis will not be a frame axis and MechVision's")
+        print("[WARN] rotationStrategy cannot address it.")
+        print("[WARN] " + "=" * 66)
+
     def worker(self, path=None):
         if not self.app.headless:
             if self.app.down_pcd is None:
@@ -105,6 +135,7 @@ class SaveStage(BaseStage):
                 return
         try:
             if self.app.stage == Stage.SAVE:
+                self._warn_if_not_recentred()
                 stem = self.app.mesh_basename
                 base_path = Path(__file__).resolve().parent.parent / "output" / "reference_pcd" / stem
 

@@ -17,6 +17,7 @@ Two properties matter and both are asserted here.
 Settings are reduced (fewer viewpoints, lower raycast resolution) so the suite stays
 quick; the defaults in `AmbiguityConfig` are what production uses.
 """
+import json
 import os
 import sys
 
@@ -253,6 +254,43 @@ def test_repeated_runs_agree():
     assert a.discriminative_fraction == pytest.approx(b.discriminative_fraction, abs=1e-9)
 
 
+@pytest.mark.parametrize("offset_m", [0.0, 0.85])
+def test_result_is_translation_invariant(offset_m):
+    """A part in assembly coordinates must analyse the same as one at the origin.
+
+    This was not true and it silently corrupted the model frame. `25333MB000`'s STL sits
+    0.85 m out; analysed there it produced 5 axes with the disc axis split into two
+    fragments (area 0.415 + 0.461) that individually lost to a C2 axis, where the same
+    cloud centred gives 4 axes and the disc axis dominant at 0.496. The frame was then
+    built around the wrong axis.
+
+    Every app path centres the mesh first, so only `bench/generate_scenes.py` hit it —
+    which is exactly why relying on callers is not good enough.
+    """
+    mesh = _cylinder_with_offset_mass()
+    cloud = _cloud(mesh)
+    if offset_m:
+        shift = np.array([-0.6547, 0.3403, 0.4134]) / 0.8458 * offset_m
+        mesh = o3d.geometry.TriangleMesh(mesh)
+        mesh.translate(shift)
+        cloud = o3d.geometry.PointCloud(cloud)
+        cloud.translate(shift)
+
+    profile = analyse_ambiguity(mesh, cloud, AmbiguityConfig(**FAST))
+    assert profile.dominant is not None
+
+    true_dir = np.array([0.0, 0.0, 1.0])
+    match = [ax for ax in profile.axes
+             if abs(float(ax.direction @ true_dir)) > np.cos(np.deg2rad(3.0))]
+    assert len(match) == 1, (
+        f"expected the axis to form ONE group, got {len(match)} — a split here is how the "
+        f"wrong axis wins the ranking")
+
+    # The axis point must come back in the CALLER's frame, not the internal centred one.
+    true_pt = np.zeros(3) + (shift if offset_m else 0.0)
+    assert _axis_distance(match[0].point, true_dir, true_pt) < 0.0015
+
+
 @pytest.mark.parametrize("scale", [0.25, 1.0, 4.0])
 def test_result_is_scale_invariant(scale):
     """A 20 mm and a 500 mm part must be judged the same way.
@@ -296,6 +334,83 @@ def test_angle_step_matches_the_fold():
     profile = _analyse(_prism(4, 0.025, 0.050))
     assert profile.dominant.fold == 4
     assert profile.dominant.angle_step_deg() == pytest.approx(90.0)
+
+
+def _write_profile(path, axes, exponent=None):
+    """Hand-write a sidecar so the stored order can be made to disagree with the metrics."""
+    payload = {
+        "axes": axes,
+        "dominant": axes[0],
+        "n_significant_axes": len(axes),
+        "discriminative_fraction": 0.5,
+        "frame_changed": False,
+        "ppf_degeneracy": {},
+        "epsilon_m": 0.0025,
+        "f_tau": 0.40,
+        "diameter_m": 0.12,
+        "per_view": [],
+    }
+    if exponent is not None:                 # absent key vs present-but-null are both real
+        payload["rank_area_exponent"] = exponent
+    path.write_text(json.dumps(payload, indent=2))
+    return path
+
+
+def _axis_record(fold, views, area, direction):
+    return {"direction": list(direction), "point": [0.0, 0.0, 0.0], "fold": fold,
+            "angles_deg": [180.0] if fold == 2 else [], "is_global": False,
+            "view_fraction": views, "area_fraction": area,
+            "patch_fraction": 0.65, "best_patch_fraction": 0.70,
+            "score": views}          # the OLD scheme: score == view_fraction
+
+
+# The measured 25333MB000 case: a C2 axis with more views but less coverage, against the
+# off-centroid disc axis that actually flips in real scenes.
+_C2   = _axis_record(2, 0.14, 0.36, (0.0, 0.0, 1.0))
+_DISC = _axis_record(1, 0.10, 0.50, (1.0, 0.0, 0.0))
+
+
+@pytest.mark.parametrize("exponent", [None, 2.0])
+def test_loader_reranks_a_stale_sidecar(tmp_path, exponent):
+    """A sidecar's stored order must not survive into `dominant`.
+
+    Written before the ranking exponent existed, `25333MB000`'s sidecar was ordered by the
+    old `score = view_fraction` and named the C2 axis dominant. `dominant` is what selects
+    MechVision's rotationStrategy and angleStep, so trusting the stored order ships the
+    wrong axis — re-ranking the same stored numbers is what puts the disc axis first.
+    """
+    path = _write_profile(tmp_path / "ambiguity_profile.json", [_C2, _DISC], exponent)
+    back = load_ambiguity_profile(path)
+
+    assert back.rank_area_exponent == 2.0        # a null/absent key must reach the default
+    # views*area^2: disc 0.10*0.25 = 0.0250 beats C2 0.14*0.1296 = 0.0181
+    assert back.dominant is not None
+    assert np.allclose(np.abs(back.dominant.direction), [1.0, 0.0, 0.0]), \
+        "loaded profile kept the stale write-time order instead of re-ranking"
+    assert back.axes[0].area_fraction == pytest.approx(0.50)
+
+
+def test_loader_honours_a_deliberate_exponent(tmp_path):
+    """A file that recorded its own exponent keeps that intent; only a file that never
+    recorded one adopts the current default."""
+    path = _write_profile(tmp_path / "ambiguity_profile.json", [_C2, _DISC], exponent=0.0)
+    back = load_ambiguity_profile(path)
+
+    assert back.rank_area_exponent == 0.0        # 0.0 is meaningful, not a missing value
+    # At k=0 the score is view_fraction alone, so the C2 axis leads again.
+    assert np.allclose(np.abs(back.dominant.direction), [0.0, 0.0, 1.0])
+
+
+def test_rank_axes_is_reversible_on_a_loaded_profile(tmp_path):
+    """Re-ranking needs no re-analysis — that is what makes the exponent cheap to tune."""
+    path = _write_profile(tmp_path / "ambiguity_profile.json", [_C2, _DISC])
+    back = load_ambiguity_profile(path)
+    assert np.allclose(np.abs(back.dominant.direction), [1.0, 0.0, 0.0])
+
+    rank_axes(back, 0.0)
+    assert np.allclose(np.abs(back.dominant.direction), [0.0, 0.0, 1.0])
+    rank_axes(back, 2.0)
+    assert np.allclose(np.abs(back.dominant.direction), [1.0, 0.0, 0.0])
 
 
 # ─────────────────────────────────────────────────────────────────────────────

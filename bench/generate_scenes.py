@@ -62,6 +62,13 @@ def generate_for_mesh(mesh_path: str, n_scenes: int, fill_rate: float,
     if app.target_mesh is None:
         raise RuntimeError("mesh failed to import")
 
+    # Every path through the app centres the mesh before sampling
+    # (`start_express_sampling`, `run_headless`, `_batch_sampling_worker`); this harness
+    # was the only one that did not, so it sampled parts wherever their STL happened to
+    # sit -- 0.85 m out for 25333MB000, which is in assembly coordinates. That put the
+    # scenes generated here on a different footing from anything produced through the app.
+    app.stages[Stage.IMPORT_MESH].center_mesh()
+
     app.stages[Stage.DOWNSAMPLE].use_adaptive = adaptive
     app.stages[Stage.DOWNSAMPLE].run_ambiguity = run_ambiguity
 

@@ -165,6 +165,20 @@ def pcd_geocenter(pcd, axis=None, axis_align_tol_deg=5.0, axis_point_tol=None):
     reason to line up with an ambiguity axis, so without this the symmetry search rotates
     about the wrong line no matter what ``angleStep`` is used.
 
+    **The part will NOT end up centred on the origin, and that is correct.** An ambiguity
+    axis generally misses the centroid — that is the entire reason this argument exists —
+    so the axis and the centroid cannot both sit on the origin. Putting the axis there
+    leaves the part displaced by exactly the axis's off-centroid distance (12.35 mm on
+    25333MB000, whose disc axis is that far from the centroid). Centring the part instead
+    would move the axis off the origin and MechVision would rotate about the wrong line,
+    which is the failure this whole mechanism exists to remove. A viewer will show the
+    part sitting off-origin; that is the trade, not a bug.
+
+    The remaining freedom is *where along* the axis the origin sits, which does not affect
+    whether ``rotationStrategy`` works. It is placed at the projection of the cloud mean
+    onto the axis, so the along-axis offset is zero and the part stays as close to the
+    origin as the perpendicular constraint allows.
+
     If the PCA frame already agrees with the axis (direction within
     ``axis_align_tol_deg``, and the axis passes within ``axis_point_tol`` of the PCA
     origin) the PCA frame is returned unchanged, so parts that were already correct need

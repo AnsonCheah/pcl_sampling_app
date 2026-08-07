@@ -45,6 +45,7 @@ from mm_adapter.mm_dataclasses import (CoarseMatchingV2, FineMatchingLite,
 from MM_Optimizer.eval_cache      import EvalCache
 from MM_Optimizer.mesh_analysis   import WarmStart
 from MM_Optimizer.optimizer_utils import read_gt_pose_from_ply
+import MM_Optimizer.model_sync as model_sync
 import MM_Optimizer.search_config as SC
 
 log = logging.getLogger(__name__)
@@ -240,21 +241,14 @@ class MVEvaluator:
                     read_synthetic loads all N PLYs from it and returns N
                     individual point clouds — one per instance in the bin.
         """
-        coarse_mode = coarse_params.get("registrationMode", 0.0)
-        fine_mode   = fine_params.get("registrationMode",   0.0)
-        coarse_type = "edge" if coarse_mode == 1.0 else "surface"
-        fine_type   = "edge" if fine_mode   == 1.0 else "surface"
-
-        def model_path(mtype):
-            return os.path.join(self._model_root,
-                                f"{self.part_name}_{mtype}")
-
-        def geo_path(mtype):
-            return os.path.join(model_path(mtype), "geo_center.json")
-
-        def ply_path(mtype):
-            return os.path.join(model_path(mtype),
-                                f"{self.part_name}_{mtype}.ply")
+        # One library entry per part holding one cloud, so coarse and fine necessarily
+        # share it — which is why the mixed regimes were dropped (see PHASE1_REGIMES).
+        # `registrationMode` still tells MechVision how to interpret that cloud; which
+        # cloud it is was decided by `model_sync.sync_regime_model`.
+        model_root_dir = model_sync.model_dir(self.part_name)
+        model_name     = self.part_name
+        ply_file       = model_sync.model_ply(self.part_name)
+        geo_file       = model_sync.geo_center(self.part_name)
 
         scene = EasyCreateStringList(
             name="Scene_Path",
@@ -273,9 +267,9 @@ class MVEvaluator:
 
         coarse = CoarseMatchingV2(
             name="Coarse_Match_Synthetics",
-            modelSelection=(f"{self.part_name}_{coarse_type}", "string", ""),
-            modelFileName=(ply_path(coarse_type), "string", ""),
-            geoCenterFileName=(geo_path(coarse_type), "string", ""),
+            modelSelection=(model_name, "string", ""),
+            modelFileName=(ply_file, "string", ""),
+            geoCenterFileName=(geo_file, "string", ""),
         )
         # Apply all coarse_params overrides
         for k, v in coarse_params.items():
@@ -308,9 +302,9 @@ class MVEvaluator:
 
         fine = FineMatchingLite(
             name="Fine_Match_Synthetics",
-            modelSelection=(f"{self.part_name}_{fine_type}", "string", ""),
-            modelFileName=(ply_path(fine_type), "string", ""),
-            geoCenterFileName=(geo_path(fine_type), "string", ""),
+            modelSelection=(model_name, "string", ""),
+            modelFileName=(ply_file, "string", ""),
+            geoCenterFileName=(geo_file, "string", ""),
         )
         for k, v in fine_params.items():
             if k == "registrationMode":
@@ -596,12 +590,21 @@ class MVEvaluator:
     # ─────────────────────────────────────────────────────────────────────
 
     def phase1_regime_gate(self) -> List[dict]:
-        """Test A/B/C/D regime combos. Return passing regimes sorted by coverage."""
+        """Test the surface/edge regimes. Return passing regimes sorted by coverage.
+
+        Each regime installs its cloud as the part's MechVision model before evaluating,
+        which is what removes the manual copy into the model library. The install replaces
+        the folder, so this loop must stay **sequential** — two regimes syncing at once
+        would leave the library holding one regime's cloud while the other is scored
+        against it.
+        """
         log.info("=" * 60)
         log.info("PHASE 1 — Regime Gate")
 
-        has_edge = os.path.isdir(os.path.join(self._model_root,
-                                              f"{self.part_name}_edge"))
+        # Asked of the exported bundle, not the model library: the library holds only
+        # whichever regime was synced last, so it reports history rather than options.
+        available = model_sync.available_types(self.part_name)
+        log.info(f"  cloud types exported for {self.part_name}: {available or 'none'}")
 
         # Order based on geometry hint
         regimes = sorted(SC.PHASE1_REGIMES,
@@ -610,9 +613,15 @@ class MVEvaluator:
 
         passing = []
         for regime in regimes:
-            if regime["needs_edge"] and not has_edge:
-                log.info(f"  Regime {regime['id']}: skip (no edge model)")
+            cloud_type = "edge" if regime["coarse_mode"] == 1.0 else "surface"
+            if cloud_type not in available:
+                log.info(f"  Regime {regime['id']}: skip (no {cloud_type} cloud exported)")
                 continue
+
+            if not self.dry_run:
+                model_sync.sync_regime_model(self.part_name, cloud_type)
+                log.info(f"  Regime {regime['id']}: synced {cloud_type} cloud into the "
+                         f"model library as {self.part_name}.ply")
 
             cp = self._default_coarse()
             fp = self._default_fine()
@@ -630,8 +639,8 @@ class MVEvaluator:
                      f"time={r.mean_time:.3f}s")
 
             if r.coverage >= SC.PHASE1_COVERAGE_GATE:
-                passing.append({**regime, "coverage": r.coverage,
-                                 "coarse": cp, "fine": fp})
+                passing.append({**regime, "cloud_type": cloud_type,
+                                "coverage": r.coverage, "coarse": cp, "fine": fp})
 
         if not passing:
             log.error("PHASE 1: No regime passes. Part may be un-tunable.")
@@ -641,9 +650,28 @@ class MVEvaluator:
         log.info(f"PHASE 1 done: {len(passing)} passing regimes — "
                  f"best = {passing[0]['id']} (cov={passing[0]['coverage']:.2f})")
 
+        # The loop leaves whichever regime ran last installed, which is not necessarily the
+        # winner. Re-install the best one so the library is consistent with what the caller
+        # is about to tune; a caller choosing a different regime must call lock_regime.
+        self.lock_regime(passing[0])
+
         if not self._gate("after_phase1", passing[0]["coverage"]):
             return []
         return passing
+
+    def lock_regime(self, regime: dict) -> None:
+        """Install ``regime``'s cloud as the part's active MechVision model.
+
+        Call before tuning with a regime other than the gate's winner. Every subsequent
+        MechVision run matches against whatever this last installed — the regime is carried
+        by the model library, not by the parameter dict.
+        """
+        cloud_type = regime.get("cloud_type") or (
+            "edge" if regime.get("coarse_mode") == 1.0 else "surface")
+        if self.dry_run:
+            return
+        model_sync.sync_regime_model(self.part_name, cloud_type)
+        log.info(f"  locked regime {regime.get('id', '?')} ({cloud_type}) into the model library")
 
     # ─────────────────────────────────────────────────────────────────────────
     # Phase 4 — Symmetry confirmation (conditional)
