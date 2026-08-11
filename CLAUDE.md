@@ -13,10 +13,16 @@ Parametric model first, learned model targets the residual. The CVAE+Flow is not
 ## Conda Env Locations
 Use pcd-sampling for all scripts in the workspace.
 
-base                   C:\Users\Hmgics\AppData\Local\anaconda3
-pcd-sampling           C:\Users\Hmgics\AppData\Local\anaconda3\envs\pcd-sampling
+base                   C:\ProgramData\anaconda3
+pcd-sampling           C:\Users\Hmgics\.conda\envs\pcd-sampling
+autotune               C:\Users\Hmgics\.conda\envs\autotune
 
-use "C:\Users\Hmgics\AppData\Local\anaconda3\envs\pcd-sampling\python.exe" for running scripts
+use "C:\Users\Hmgics\.conda\envs\pcd-sampling\python.exe" for running scripts
+
+**Dependency gaps, verified 2026-08-08.** `pcd-sampling` has open3d / scipy / trimesh but
+**not pytest, mujoco or optuna**, so the test suite and every full-app path (which imports
+`physics.mujoco_bin_scene` via `stages/import_mesh_stage.py`) fail there. `autotune` has mujoco
+but also no pytest. Install pytest into `pcd-sampling` before running tests.
 
 ## Package Dependency Graph
 ```

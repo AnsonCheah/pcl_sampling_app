@@ -271,6 +271,11 @@ class AmbiguityProfile:
     discriminative_fraction: float = 1.0
     per_point_discriminative: np.ndarray = field(default_factory=lambda: np.empty(0))
     per_view: List[ViewAmbiguity] = field(default_factory=list)
+    # True when the cloud this profile describes is in an ambiguity-aligned frame (dominant
+    # axis = frame Z through the origin) rather than the PCA frame. It used to mean "differs
+    # from the PCA frame", which distinguished the parts whose scenes needed regenerating;
+    # that distinction died with the PCA-agrees shortcut in `pcd_geocenter`, since the
+    # ambiguity frame is now always built when an axis is available.
     frame_changed: bool = False
     ppf_degeneracy: Dict[str, float] = field(default_factory=dict)
     epsilon_m: float = 0.0
@@ -846,6 +851,24 @@ def analyse_ambiguity(mesh: o3d.geometry.TriangleMesh,
                       progress_cb: Optional[Callable[[float], None]] = None,
                       ) -> AmbiguityProfile:
     """Detect view-dependent and global ambiguity for one part.
+
+    **Deterministic for a fixed (mesh, cloud, cfg, seed), but not stable against a changed
+    input.** Repeated calls on the same cloud agree to 1e-9 (`test_repeated_runs_agree`), and
+    the app pins `seed=0` with an RNG-free raycast and downsample, so re-exporting the same
+    part at the same settings reproduces the profile exactly. Perturb the input and the
+    *ranking* moves, because the surviving axes' scores sit close together. Measured on
+    25333MB000:
+
+      * three sample densities (6000 / 7000 / 9000 points, n_views=100) gave dominant folds
+        C4 / C1 / C2, the third on an axis 45 degrees away from the other two;
+      * the same cloud at n_views=200 gave C4 / C3 / C3 across seeds 0 / 1 / 2.
+
+    Two consequences, neither of them fixed here. `fold` bounds an angleStep *search range*
+    (360/fold down to a ~5 degree floor) rather than fixing an answer, so its instability
+    costs search space, not correctness. But the model frame built from `dominant` moves with
+    it -- by 60.6 degrees and 28.3 mm in the density sweep above -- so a reference cloud and
+    the scenes generated against it are only comparable when they come from the *same* export.
+    `geometry.geom_utils.reference_frames_agree` is what checks that.
 
     Parameters
     ----------

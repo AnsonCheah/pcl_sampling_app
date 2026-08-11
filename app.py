@@ -585,6 +585,13 @@ class MeshSamplingApp:
     def start_express_sampling(self):
         # Block the button immediately; cleared in the worker's finally (done or failed).
         self.express_sampling_busy = True
+        # Express recentres into the ambiguity frame without asking, so the analysis it needs
+        # must be on. Forced here rather than in `_express_sampling_worker`, which is shared
+        # with `bench/generate_scenes.py` where `--no-ambiguity` is a deliberate choice.
+        downsample = self.stages[Stage.DOWNSAMPLE]
+        downsample.run_ambiguity = True
+        if getattr(downsample, "chk_ambiguity", None) is not None:
+            downsample.chk_ambiguity.checked = True
         self.stages[Stage.IMPORT_MESH].enable_widgets()
         self.stages[Stage.IMPORT_MESH].center_mesh()
         self._express_sampling_thread = threading.Thread(target=self._express_sampling_worker)
@@ -712,6 +719,8 @@ def run_sampling(app, express):
         # the express path and the bench sweep built different clouds for the same part,
         # so any comparison between them varied two things at once.
         downsample.use_adaptive = False
+        # Express recentres into the ambiguity frame, so the analysis has to run.
+        downsample.run_ambiguity = True
     else:
         banner("Raycast settings")
         raycast.camera_distance = ask(
@@ -727,6 +736,11 @@ def run_sampling(app, express):
             "Use adaptive (curvature-based) downsampling?", default=False,
             hint="Adaptive keeps more points on edges/high-curvature regions; "
                  "uniform samples the surface evenly.")
+        downsample.run_ambiguity = ask_yes_no(
+            "Analyse pose ambiguity?", default=True,
+            hint="Costs 1-3 min per part. With it on, the model frame is built around the "
+                 "dominant ambiguity axis so MechVision's rotationStrategy can address it; "
+                 "with it off the cloud is recentred into the PCA frame instead.")
 
     rp("[yellow]Note: CROP stage is GUI-only and is skipped in headless mode.[/yellow]")
 
@@ -736,7 +750,12 @@ def run_sampling(app, express):
     rp(f"mean point count = {raycast.point_count_mean}")
     rp(f"point count range = {raycast.point_count_range}")
 
-    # Reference bundle is always exported (app.stage == SAVE after sampling).
+    # Set the stage DIRECTLY. `_express_sampling_worker` routes its `set_stage(SAVE)` through
+    # `main_thread`, which is a no-op headless -- so `app.stage` was still IMPORT_MESH here,
+    # `SaveStage.worker()` matched neither of its two branches, and the reference bundle was
+    # silently never written. `bench/generate_scenes.py` has always carried this line; this
+    # driver did not, and claimed in a comment that the stage was already SAVE.
+    app.set_stage(Stage.SAVE)
     banner("Exporting reference point-cloud bundle")
     app.stages[Stage.SAVE].worker()
 

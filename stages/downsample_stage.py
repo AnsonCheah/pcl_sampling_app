@@ -16,9 +16,13 @@ class DownsampleStage(BaseStage):
         "down_pcd_edge": lambda: None,
         "feature_pcd": lambda: None,
         "pcd_flat": lambda: None,
-        "geocenter": lambda: np.eye(4),
         "ambiguity_profile": lambda: None,
     }
+    # NOTE: `geocenter` is owned by IMPORT_MESH, not by this stage, even though this stage
+    # is what writes it. `recenter_mesh_pcd` transforms `target_mesh` / `raw_pcd` /
+    # `cropped_pcd`, which `clear_state_from(DOWNSAMPLE)` cannot undo -- so if the record
+    # were cleared here, re-running Downsample after a recentre would reset it to identity
+    # while the geometry stayed moved, and the exported provenance would silently be wrong.
 
     def __init__(self, app):
         self.name = Stage.DOWNSAMPLE.name
@@ -43,10 +47,14 @@ class DownsampleStage(BaseStage):
     def analyse_ambiguity_profile(self):
         """Detect view-dependent and global ambiguity for the downsampled cloud.
 
-        Runs before the geocenter is decided, because the dominant axis is what the model
-        frame gets built around: MechVision's symmetry search can only rotate about a
-        geocenter frame axis, so an axis that is not a frame axis cannot be mitigated at
-        any angleStep.
+        Runs before the model frame is decided, because the dominant axis is what the frame
+        gets built around: MechVision's symmetry search can only rotate about a geocenter
+        frame axis, so an axis that is not a frame axis cannot be mitigated at any
+        angleStep.
+
+        The profile is only *computed* here. Applying it -- moving the geometry into the
+        frame it implies -- is `recenter_mesh_pcd`, which stays a deliberate action in the
+        stage-by-stage GUI flow.
         """
         if not self.run_ambiguity or self.app.target_mesh is None:
             return None
@@ -84,7 +92,7 @@ class DownsampleStage(BaseStage):
         self.radio_adaptive.selected_index = 1 if self.use_adaptive else 0
         self.btn_downsample = self.register_widget(gui.Button("Downsample"))
         self.btn_downsample.set_on_clicked(self.start)
-        self.btn_recenter = self.register_widget(gui.Button("Recenter Point Cloud"), lambda: self.app.down_pcd is not None)
+        self.btn_recenter = self.register_widget(gui.Button(self._recenter_mode_label()), lambda: self.app.down_pcd is not None)
         self.btn_recenter.set_on_clicked(self.recenter_mesh_pcd)
 
         self.btn_reset = self.register_widget(gui.Button("Restart Downsample"), lambda: self.app.down_pcd is not None)
@@ -126,8 +134,32 @@ class DownsampleStage(BaseStage):
     def next_enabled(self) -> bool:
         return self.app.down_pcd is not None
 
+    def _use_ambiguity_frame(self) -> bool:
+        """Which frame the recentre button will build.
+
+        Gated on the checkbox rather than merely on the profile existing, so unticking
+        "Analyse pose ambiguity" after a run falls back to PCA instead of silently reusing
+        a profile the operator has just said they do not want.
+
+        `getattr` because `build_panel` calls this for the button label, and stages are
+        constructed BEFORE `MeshSamplingApp._restart()` seeds the app attributes -- so on the
+        GUI path `app.ambiguity_profile` does not exist yet. Headless returns from
+        `build_panel` early, so a plain attribute access fails only in the GUI.
+        """
+        profile = getattr(self.app, "ambiguity_profile", None)
+        return bool(self.run_ambiguity and profile is not None and profile.dominant is not None)
+
+    def _recenter_mode_label(self) -> str:
+        return ("Recenter to Ambiguity Axis" if self._use_ambiguity_frame()
+                else "Recenter to PCA Frame")
+
+    def _sync_recenter_label(self):
+        if not self.app.headless and getattr(self, "btn_recenter", None) is not None:
+            self.btn_recenter.text = self._recenter_mode_label()
+
     def _on_ambiguity_toggled(self, checked):
         self.run_ambiguity = bool(checked)
+        self._sync_recenter_label()
 
     def _toggle_ambiguity_preview(self):
         self.show_ambiguity = not self.show_ambiguity
@@ -206,6 +238,7 @@ class DownsampleStage(BaseStage):
             self.app.main_thread(lambda: self.app._clear_scene())
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry("cropped_pcd", self.app.cropped_pcd, self.app.default_point_material))
         self.app.main_thread(self.app._reframe)   # content swap -> reframe (posts a redraw too)
+        self.app.main_thread(self._sync_recenter_label)
         self.app.main_thread(self.enable_widgets)
 
 
@@ -230,29 +263,34 @@ class DownsampleStage(BaseStage):
         self.app.down_pcd_edge = normalize_normals(pcd_edge_raw.voxel_down_sample(self.voxel_size))
 
         self.app.ambiguity_profile = self.analyse_ambiguity_profile()
-        self.app.geocenter = np.round(self._geocenter_for(self.app.down_pcd), decimals=5)
+        # Deliberately NOT computing app.geocenter here. It records the transform that has
+        # been APPLIED to the geometry, and nothing has been applied yet -- `recenter_mesh_pcd`
+        # is what both derives and applies the frame. Stashing a *pending* transform here is
+        # what made "has this been recentred?" ambiguous and left the exported bundle able to
+        # disagree with what the viewer was showing.
         print(f"[INFO] Downsampled {self.voxel_size * 1000:.2f}mm from {len(self.app.cropped_pcd.points)} to {len(self.app.down_pcd.points)} points")
         print(f"[INFO] Edge cloud: {len(self.app.down_pcd_edge.points)} points ({edge_mask.sum()} before voxel pass)")
         self._refresh_ui()
 
     def _geocenter_for(self, pcd):
-        """Model frame for ``pcd``: ambiguity-aligned when an axis was found, else PCA.
+        """Model frame for ``pcd``: ambiguity-aligned when the checkbox asked for it, else PCA.
 
-        Records ``frame_changed`` on the profile so the caller can tell whether the
-        exported bundle differs from the historical PCA frame — the parts where it does
-        are exactly the ones whose scenes must be regenerated alongside it.
+        Records ``frame_changed`` on the profile to mean "this cloud is in an
+        ambiguity-aligned frame, not the PCA frame". It used to mean "differs from the PCA
+        frame", distinguishing parts whose scenes needed regenerating; that distinction went
+        away with the PCA-agrees shortcut in ``pcd_geocenter`` (see its docstring), because
+        the ambiguity frame is now always built when an axis is available.
         """
         profile = self.app.ambiguity_profile
-        dominant = profile.dominant if profile is not None else None
-        if dominant is None:
+        if not self._use_ambiguity_frame():
+            if profile is not None:
+                profile.frame_changed = False
             return pcd_geocenter(pcd)
-        tf, changed = pcd_geocenter(pcd, axis=dominant)
-        profile.frame_changed = bool(changed)
-        if changed:
-            print("[INFO] Model frame rebuilt around the dominant ambiguity axis "
-                  "(now frame Z) — regenerate this part's scenes alongside the bundle")
-        else:
-            print("[INFO] PCA frame already agrees with the ambiguity axis -- frame unchanged")
+        tf = pcd_geocenter(pcd, axis=profile.dominant)
+        profile.frame_changed = True
+        print("[INFO] Model frame rebuilt around the dominant ambiguity axis "
+              "(now frame Z through the origin) -- regenerate this part's scenes "
+              "alongside the bundle")
         return tf
 
     def uniform_voxel_downsample(self):
@@ -298,13 +336,24 @@ class DownsampleStage(BaseStage):
         return curv
 
     def recenter_mesh_pcd(self):
-        if self.app.cropped_pcd is None:
+        """Move every piece of geometry into the model frame, and record that we did.
+
+        Derived from ``down_pcd_surface`` because that is the cloud the ambiguity analysis
+        ran on, so the frame is built from the same points the axis was found in.
+
+        Safe to invoke twice: re-deriving the frame from an already-recentred cloud returns
+        (numerically) the identity, so a second press is a no-op — measured at 8e-8 mm of
+        point movement on 25333MB000, the floor being the ``np.round(rot, decimals=6)`` in
+        ``pcd_geocenter``. That is why there is no "already applied" guard; the composition
+        below is self-limiting rather than needing to be gated.
+        """
+        if self.app.cropped_pcd is None or self.app.down_pcd_surface is None:
             return
         T = self._geocenter_for(self.app.down_pcd_surface)
 
         self.app.down_pcd_surface.transform(T)
         # In uniform mode down_pcd is the same object as down_pcd_surface — skip to avoid double-transform
-        if self.app.down_pcd is not self.app.down_pcd_surface:
+        if self.app.down_pcd is not None and self.app.down_pcd is not self.app.down_pcd_surface:
             self.app.down_pcd.transform(T)
         if self.app.down_pcd_edge is not None:
             self.app.down_pcd_edge.transform(T)
@@ -312,9 +361,14 @@ class DownsampleStage(BaseStage):
             self.app.feature_pcd.transform(T)
         if self.app.pcd_flat is not None:
             self.app.pcd_flat.transform(T)
-        self.app.raw_pcd.transform(T)
+        # Upstream-owned geometry. It has to move too -- RenderStage pairs `down_pcd` with a
+        # `T_gt` derived from `target_mesh`, so the two must stay in one frame -- but it is
+        # not guaranteed to exist on every path that reaches here.
+        if self.app.raw_pcd is not None:
+            self.app.raw_pcd.transform(T)
         self.app.cropped_pcd.transform(T)
-        self.app.target_mesh.transform(T)
+        if self.app.target_mesh is not None:
+            self.app.target_mesh.transform(T)
         for mesh in self.app.convex_meshes:
             mesh.transform(T)
 
@@ -325,10 +379,10 @@ class DownsampleStage(BaseStage):
         if self.app.ambiguity_profile is not None:
             self.app.ambiguity_profile = self.app.ambiguity_profile.transformed(T)
 
-        # The cloud has just been placed into its own model frame, so the geocenter
-        # relative to it is identity by construction — which is what geo_center.json
-        # already asserts. Recomputing a PCA frame here would disagree with that file for
-        # any part whose frame is ambiguity-aligned rather than PCA-aligned.
-        self.app.geocenter = np.eye(4)
+        # `geocenter` records the transform that HAS BEEN APPLIED, accumulated across
+        # presses -- not one that is pending. So the viewer's world frame is always the
+        # exported frame, `geo_center.json` stays a truthful identity on every path, and
+        # SaveStage can invert this to say where the model origin sat beforehand.
+        self.app.geocenter = T @ self.app.geocenter
         print("recentered mesh and pointcloud")
         self._refresh_ui()   # swaps the geometry, then reframes — do not reframe before this

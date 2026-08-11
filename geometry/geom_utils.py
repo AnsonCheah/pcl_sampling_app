@@ -151,7 +151,7 @@ def _fix_axis_signs(rotation_matrix):
     return rotation_matrix
 
 
-def pcd_geocenter(pcd, axis=None, axis_align_tol_deg=5.0, axis_point_tol=None):
+def pcd_geocenter(pcd, axis=None):
     """
     Returns transformation matrix with consistent orientation.
 
@@ -168,28 +168,42 @@ def pcd_geocenter(pcd, axis=None, axis_align_tol_deg=5.0, axis_point_tol=None):
     **The part will NOT end up centred on the origin, and that is correct.** An ambiguity
     axis generally misses the centroid — that is the entire reason this argument exists —
     so the axis and the centroid cannot both sit on the origin. Putting the axis there
-    leaves the part displaced by exactly the axis's off-centroid distance (12.35 mm on
-    25333MB000, whose disc axis is that far from the centroid). Centring the part instead
-    would move the axis off the origin and MechVision would rotate about the wrong line,
-    which is the failure this whole mechanism exists to remove. A viewer will show the
-    part sitting off-origin; that is the trade, not a bug.
+    leaves the part displaced by exactly the axis's off-centroid distance (10.6 mm measured
+    on 25333MB000, whose disc axis is that far from the centroid). Centring the part
+    instead would move the axis off the origin and MechVision would rotate about the wrong
+    line, which is the failure this whole mechanism exists to remove. A viewer will show
+    the part sitting off-origin; that is the trade, not a bug.
 
     The remaining freedom is *where along* the axis the origin sits, which does not affect
     whether ``rotationStrategy`` works. It is placed at the projection of the cloud mean
     onto the axis, so the along-axis offset is zero and the part stays as close to the
     origin as the perpendicular constraint allows.
 
-    If the PCA frame already agrees with the axis (direction within
-    ``axis_align_tol_deg``, and the axis passes within ``axis_point_tol`` of the PCA
-    origin) the PCA frame is returned unchanged, so parts that were already correct need
-    no bundle or scene regeneration.
+    There is deliberately **no "the PCA frame already agrees" shortcut**. One used to
+    return the PCA frame whenever a PCA axis sat within 5 degrees of the ambiguity axis and
+    the axis passed within 1% of the extent of the PCA origin, on the theory that such
+    parts needed no regeneration. It silently produced a frame that does not satisfy this
+    function's contract: measured on a 100x30x20 box with an ambiguity axis parallel to
+    PCA-1 and offset 0.8 mm, the axis came back as frame **X** sitting **0.83 mm off the
+    origin** — so a rotation search about frame Z was aimed at the wrong line entirely, and
+    even about X it swept a line 0.83 mm away. The axis is now always made frame Z through
+    the origin, whatever the PCA says.
+
+    This function is pure and deterministic: same cloud in, bitwise-identical matrix out.
+    ``_fix_axis_signs`` exists to remove the eigen-decomposition's arbitrary sign choice,
+    which would otherwise make the frame differ run to run. The in-plane X direction is
+    also well conditioned in practice — dropping 0.1% / 1% / 5% of the cloud's points
+    rotates it by 0.045 / 0.35 / 0.21 degrees on 25333MB000, whose in-plane PCA eigenvalue
+    ratio is 1.20 (the direction only becomes arbitrary as that ratio approaches 1.0).
+    What is *not* stable across re-analyses is which ambiguity axis wins in the first
+    place; see ``geometry.ambiguity.analyse_ambiguity``.
 
     Returns
     -------
-    (tf, frame_changed) when ``axis`` is given, else ``tf`` alone — the historical
-    single-value contract is preserved for existing callers.
+    tf : (4, 4) — the transform to APPLY to the cloud to put it in this frame.
 
-    Note the return convention is the *inverse* transform; see geometry/CLAUDE.md.
+    Note the return convention is the *inverse* transform, so the translation sits in
+    column 3 and row 3 is always ``[0, 0, 0, 1]``; see geometry/CLAUDE.md.
     """
     points = np.asarray(pcd.points)
     center = points.mean(axis=0)
@@ -218,17 +232,6 @@ def pcd_geocenter(pcd, axis=None, axis_align_tol_deg=5.0, axis_point_tol=None):
     d = np.asarray(axis.direction, dtype=float)
     d = d / np.linalg.norm(d)
     axis_pt = np.asarray(axis.point, dtype=float)
-    if axis_point_tol is None:
-        extent = np.linalg.norm(points.max(axis=0) - points.min(axis=0))
-        axis_point_tol = 0.01 * float(extent)
-
-    # Does the existing PCA frame already do the job?
-    for i in range(3):
-        if abs(float(rotation_matrix[:, i] @ d)) < np.cos(np.deg2rad(axis_align_tol_deg)):
-            continue
-        offset = center - axis_pt
-        if np.linalg.norm(offset - float(offset @ d) * d) <= axis_point_tol:
-            return _pack(rotation_matrix, center), False
 
     # Frame Z is the ambiguity axis. Two DOF remain: where the origin sits along the axis,
     # and the in-plane rotation. Fix the first by projecting the cloud mean onto the axis
@@ -258,7 +261,7 @@ def pcd_geocenter(pcd, axis=None, axis_align_tol_deg=5.0, axis_point_tol=None):
     rot[:, 0] = np.cross(rot[:, 1], rot[:, 2])
     rot[:, 0] /= np.linalg.norm(rot[:, 0])
 
-    return _pack(rot, origin), True
+    return _pack(rot, origin)
 
 def estimate_normals(points:np.ndarray, view_pos:np.ndarray, radius=0.005, max_nn=50):
     pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points))
@@ -515,6 +518,59 @@ def median_spacing(obj) -> float:
     if len(pts) < 2:
         return 0.0
     return float(np.median(cKDTree(pts).query(pts, k=2)[0][:, 1]))
+
+
+def reference_frames_agree(a, b, tol_factor: float = 0.5, sample: int = 4000):
+    """Are these two reference clouds the same cloud in the same model frame?
+
+    Returns ``None`` when they agree, else a human-readable reason.
+
+    A scene's ``reference_cloud.ply`` and the exported bundle's ``<part>_surface.ply`` are
+    written from ``down_pcd`` and ``down_pcd_surface``, which hold identical points in both
+    uniform and adaptive modes — so on a matching pair this is an exact comparison, not an
+    approximate one, and the tolerance only absorbs PLY's float32 round trip.
+
+    This exists because the model frame is **not reproducible across re-exports**. It is
+    bitwise deterministic for a fixed mesh and fixed settings, but change the voxel size,
+    the view count or the ambiguity config and the winning ambiguity axis can change:
+    measured on 25333MB000, three sample densities gave folds C4/C1/C2 with the third
+    landing on a different axis 45 degrees away, moving the model frame by 60.6 degrees and
+    28.3 mm. Nothing downstream can detect that from the files alone — a stale scene still
+    loads, still has a T_gt, and simply scores every pose against the wrong frame.
+
+    ``bench/generate_scenes.py`` is resumable and tops up parts that already hold scenes, so
+    a single part can accumulate scenes from two sessions in two different frames without
+    anything noticing. That is the case this is here to catch.
+    """
+    from scipy.spatial import cKDTree
+
+    pa, pb = _as_points(a), _as_points(b)
+    if len(pa) == 0 or len(pb) == 0:
+        return f"empty cloud ({len(pa)} vs {len(pb)} points)"
+    if len(pa) != len(pb):
+        return (f"point counts differ ({len(pa)} vs {len(pb)}) -- these are not the same "
+                f"cloud, so they cannot be the same export")
+
+    spacing = median_spacing(pb)
+    if spacing <= 0.0:
+        return None                              # degenerate cloud; nothing to compare against
+    tol = tol_factor * spacing
+
+    idx = np.arange(len(pa)) if len(pa) <= sample else \
+        np.linspace(0, len(pa) - 1, sample).astype(np.int64)
+    dist = cKDTree(pb).query(pa[idx], k=1)[0]
+    # p99 rather than max: a single PLY float32 round-trip outlier should not condemn an
+    # otherwise identical cloud, but a frame change moves essentially every point.
+    worst = float(np.percentile(dist, 99))
+    if worst <= tol:
+        return None
+    return (f"clouds are in different model frames: p99 nearest-neighbour distance "
+            f"{worst * 1000:.3f} mm exceeds {tol * 1000:.3f} mm "
+            f"(0.5x median spacing {spacing * 1000:.3f} mm)\n"
+            f"        A aabb (mm): {np.round(pa.min(axis=0) * 1000, 2)} .. "
+            f"{np.round(pa.max(axis=0) * 1000, 2)}\n"
+            f"        B aabb (mm): {np.round(pb.min(axis=0) * 1000, 2)} .. "
+            f"{np.round(pb.max(axis=0) * 1000, 2)}")
 
 
 def estimate_surface_area(obj, k: int = 8) -> float:

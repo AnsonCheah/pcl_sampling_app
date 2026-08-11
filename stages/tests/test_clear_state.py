@@ -15,6 +15,11 @@ from enums import Stage
 OWNED_DEFAULTS = {
     "target_mesh": None,
     "mesh_basename": None,
+    # Owned by IMPORT_MESH, not DOWNSAMPLE which writes it: it records the transform applied
+    # to target_mesh and everything derived from it, and `recenter_mesh_pcd` mutates geometry
+    # that clear_state_from(DOWNSAMPLE) cannot restore. Clearing the record there would leave
+    # the geometry moved with the provenance reset to identity.
+    "geocenter": "EYE4",
     "raw_pcd": None,
     "cropped_pcd": None,
     "point_count_mean": None,
@@ -29,7 +34,6 @@ OWNED_DEFAULTS = {
     "down_pcd_edge": None,
     "feature_pcd": None,
     "pcd_flat": None,
-    "geocenter": "EYE4",
     "ambiguity_profile": None,
     "output_pcd_path": None,
     "convex_meshes": [],
@@ -62,7 +66,7 @@ def test_clear_state_from_strict_order(headless_app):
     app.clear_state_from(Stage.DOWNSAMPLE)
 
     # DOWNSAMPLE and everything later is reset...
-    for attr in ("down_pcd", "down_pcd_surface", "geocenter", "output_pcd_path",
+    for attr in ("down_pcd", "down_pcd_surface", "ambiguity_profile", "output_pcd_path",
                  "convex_meshes", "o3d_scene", "mj_scene", "synthetic_targets",
                  "synthetic_scenes"):
         assert _is_default(app, attr), f"{attr} should be reset"
@@ -71,6 +75,10 @@ def test_clear_state_from_strict_order(headless_app):
     assert app.raw_pcd == "SENTINEL_raw_pcd"
     assert app.cropped_pcd == "SENTINEL_cropped_pcd"
     assert app.point_count_range == "SENTINEL_point_count_range"
+    # `geocenter` is IMPORT_MESH-owned precisely so it survives here: re-running Downsample
+    # does not un-move the geometry that `recenter_mesh_pcd` already transformed, so resetting
+    # the record would make the exported provenance a lie.
+    assert app.geocenter == "SENTINEL_geocenter"
 
 
 def test_strict_order_over_clears_convex_meshes(headless_app):
@@ -116,8 +124,10 @@ def test_defaults_are_fresh_objects(headless_app):
     app.clear_state_from(Stage.DECOMPOSE)
     assert app.o3d_scene is not first_scene
     assert app.convex_meshes is not first_meshes
+    # geocenter is IMPORT_MESH-owned, so it takes a clear from there (loading a new mesh)
+    # rather than from DOWNSAMPLE.
     app.geocenter[0, 0] = 99.0
-    app.clear_state_from(Stage.DOWNSAMPLE)
+    app.clear_state_from(Stage.IMPORT_MESH)
     assert app.geocenter[0, 0] == 1.0       # fresh identity, not the mutated one
 
 

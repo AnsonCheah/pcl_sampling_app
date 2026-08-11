@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
 import time
 import traceback
@@ -47,9 +48,22 @@ def existing_scene_count(part: str) -> int:
                if n.startswith("scene_") and os.path.isdir(os.path.join(d, n)))
 
 
+def _check_existing_scenes(part: str) -> list:
+    """Complaints about already-present scenes that disagree with the current bundle.
+
+    Empty when there is nothing there yet, which is the common case -- the check only bites
+    on a resume, which is exactly when two runs can disagree.
+    """
+    from MM_Optimizer import model_sync
+
+    model_ply = os.path.join(_ROOT, "output", "reference_pcd", part,
+                             f"{part}_surface", f"{part}_surface.ply")
+    return model_sync.check_scene_frames(part, model_ply, SYNTH_ROOT)
+
+
 def generate_for_mesh(mesh_path: str, n_scenes: int, fill_rate: float,
                       arrangement: str, run_ambiguity: bool,
-                      adaptive: bool) -> dict:
+                      adaptive: bool, replace_stale: bool = False) -> dict:
     """Full pipeline for one mesh. Returns a summary dict."""
     from app import MeshSamplingApp
     from enums import Stage
@@ -80,6 +94,26 @@ def generate_for_mesh(mesh_path: str, n_scenes: int, fill_rate: float,
     # bundle is silently skipped.
     app.set_stage(Stage.SAVE)
     app.stages[Stage.SAVE].worker()
+
+    # This harness is resumable -- `existing_scene_count` lets a part be topped up across
+    # sessions -- so it is where a corpus of mixed model frames gets built. The frame is only
+    # reproducible while the mesh AND the sampling settings are unchanged; a different voxel
+    # size or view count can change which ambiguity axis wins, which moved the frame by 60.6
+    # degrees and 28.3 mm on 25333MB000. Top up only if the scenes already there agree with
+    # the bundle just exported; otherwise say so and leave them alone rather than adding a
+    # second frame to the pile.
+    stale = _check_existing_scenes(part)
+    if stale and replace_stale:
+        # `--force` cannot fix this: it adds MORE scenes rather than clearing, so it would
+        # deepen the mixed-frame pile rather than resolve it. Only removal does.
+        print(f"    dropping {len(stale)} scene(s) in a superseded model frame")
+        shutil.rmtree(os.path.join(SYNTH_ROOT, part), ignore_errors=True)
+    elif stale:
+        raise RuntimeError(
+            f"{len(stale)} existing scene(s) are in a different model frame from the bundle "
+            f"just exported; adding to them would mix two frames in one corpus. Re-run with "
+            f"--replace-stale to discard them, or delete "
+            f"{os.path.join(SYNTH_ROOT, part)} by hand.\n    " + "\n    ".join(stale))
 
     t0 = time.time()
     app.stages[Stage.DECOMPOSE]._run_worker()
@@ -133,6 +167,9 @@ def main() -> None:
     ap.add_argument("--only", default=None, help="substring filter on the mesh name")
     ap.add_argument("--force", action="store_true",
                     help="regenerate even for parts that already have enough scenes")
+    ap.add_argument("--replace-stale", action="store_true",
+                    help="delete a part's existing scenes when they are in a different model "
+                         "frame from the freshly exported bundle, instead of failing")
     args = ap.parse_args()
 
     if os.path.isfile(args.meshes):
@@ -163,7 +200,8 @@ def main() -> None:
         try:
             r = generate_for_mesh(mesh, args.scenes - (0 if args.force else have),
                                   args.fill, args.arrangement,
-                                  not args.no_ambiguity, args.adaptive)
+                                  not args.no_ambiguity, args.adaptive,
+                                  args.replace_stale)
             done.append(r)
             print(f"    OK {r['instances']} instances over {r['scenes']} scenes, "
                   f"{r['n_hulls']} hulls, {r['t_total']:.0f}s "

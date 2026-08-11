@@ -19,18 +19,27 @@ folder, not by having several:
 The folder is rewritten per regime evaluated, so **regimes must be evaluated sequentially**.
 That holds today — the Phase 1 gate is a sequential loop and the regime is frozen before the
 joint Optuna study starts — but a parallel gate would corrupt the library.
+
+`sync_regime_model` now refuses to deploy a bundle whose model frame disagrees with the scenes
+it will be evaluated against (`assert_scene_frames`). The stale copy above was one way to reach
+that state; the other is re-exporting a part, since the model frame is only reproducible while
+the mesh *and* the sampling settings are unchanged — a different voxel size or view count can
+change which ambiguity axis wins, which moved 25333MB000's frame by 60.6 degrees and 28.3 mm.
+Neither failure raises anything on its own: a stale scene still loads and still has a `T_gt`.
 """
 
 from __future__ import annotations
 
+import glob
 import os
 import shutil
-from typing import List
+from typing import List, Optional
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.abspath(os.path.join(_DIR, ".."))
 
 REF_ROOT = os.path.join(_ROOT, "output", "reference_pcd")
+SYNTH_ROOT = os.path.join(_ROOT, "output", "synthetic_target")
 MM_MODEL_ROOT = os.path.join(_DIR, "CAD_Match", "resource", "3d_matching")
 
 # Copied alongside the cloud. Identical across cloud types (SaveStage writes an identity
@@ -68,11 +77,78 @@ def available_types(part: str, candidates=("surface", "edge")) -> List[str]:
             if os.path.isfile(os.path.join(source_dir(part, t), f"{part}_{t}.ply"))]
 
 
-def sync_regime_model(part: str, cloud_type: str) -> str:
+class StaleModelFrameError(RuntimeError):
+    """A part's scenes and its reference cloud are in different model frames."""
+
+
+def scene_dirs(part: str, scenes_root: Optional[str] = None) -> List[str]:
+    """Every generated scene directory for a part, in name order."""
+    root = os.path.join(scenes_root or SYNTH_ROOT, part)
+    if not os.path.isdir(root):
+        return []
+    return sorted(d for d in glob.glob(os.path.join(root, "scene_*")) if os.path.isdir(d))
+
+
+def check_scene_frames(part: str, model_ply_path: str,
+                       scenes_root: Optional[str] = None) -> List[str]:
+    """Report which of a part's scenes are in a different model frame from ``model_ply_path``.
+
+    Returns a list of human-readable complaints, empty when everything agrees.
+
+    A scene's ``reference_cloud.ply`` and the bundle's ``<part>_surface.ply`` are the same
+    points written in the same run, so on a matching pair this is an exact comparison. When
+    they disagree, the scenes' ``T_gt`` values are expressed against a model frame that is
+    not the one MechVision will be matching with, and every pose gets scored against the
+    wrong reference — silently, because a stale scene still loads and still has a pose.
+
+    That is not hypothetical. The model frame is only reproducible while the mesh AND the
+    settings are unchanged; a different voxel size or view count can change which ambiguity
+    axis wins, and on 25333MB000 that moved the frame by 60.6 degrees and 28.3 mm. This
+    module's docstring records the same failure reached a different way: a deployed copy that
+    sat two weeks stale in a superseded frame.
+    """
+    import open3d as o3d
+
+    from geometry.geom_utils import reference_frames_agree
+
+    dirs = scene_dirs(part, scenes_root)
+    if not dirs or not os.path.isfile(model_ply_path):
+        return []
+    model = o3d.io.read_point_cloud(model_ply_path)
+    problems: List[str] = []
+    for d in dirs:
+        ref = os.path.join(d, "reference_cloud.ply")
+        if not os.path.isfile(ref):
+            continue
+        why = reference_frames_agree(o3d.io.read_point_cloud(ref), model)
+        if why:
+            problems.append(f"{d}\n        {why}")
+    return problems
+
+
+def assert_scene_frames(part: str, model_ply_path: str,
+                        scenes_root: Optional[str] = None) -> None:
+    """``check_scene_frames``, but raise ``StaleModelFrameError`` on any disagreement."""
+    problems = check_scene_frames(part, model_ply_path, scenes_root)
+    if not problems:
+        return
+    raise StaleModelFrameError(
+        f"{len(problems)} scene(s) for '{part}' are in a different model frame from "
+        f"{model_ply_path}.\n    " + "\n    ".join(problems) +
+        f"\n    Regenerate this part's scenes against the current bundle "
+        f"(bench/generate_scenes.py --only {part} --force), or re-export the bundle from "
+        f"the run that produced these scenes.")
+
+
+def sync_regime_model(part: str, cloud_type: str, check_frames: bool = True) -> str:
     """Install one cloud type as the part's active MechVision model. Returns the PLY path.
 
     Idempotent, and it *replaces* rather than merges: the destination is cleared first, so
     switching regimes cannot leave the previous cloud behind to be matched against.
+
+    Deploying is the last moment the mismatch is cheap to catch, so the scenes this model
+    will be evaluated against are checked first (see ``assert_scene_frames``). Pass
+    ``check_frames=False`` only when you know the frames differ and want the copy anyway.
     """
     src = source_dir(part, cloud_type)
     src_ply = os.path.join(src, f"{part}_{cloud_type}.ply")
@@ -80,6 +156,13 @@ def sync_regime_model(part: str, cloud_type: str) -> str:
         raise FileNotFoundError(
             f"no {cloud_type} cloud for '{part}' at {src_ply}; "
             f"available: {available_types(part) or 'none'} — re-run sampling for this part")
+
+    if check_frames:
+        # Against the SURFACE bundle, not `src_ply`: scenes write `reference_cloud.ply` from
+        # `down_pcd`, which shares its points with `down_pcd_surface`. An edge cloud is a
+        # legitimately different point set, so comparing it here would fail every edge regime.
+        assert_scene_frames(part, os.path.join(source_dir(part, "surface"),
+                                               f"{part}_surface.ply"))
 
     dst = model_dir(part)
     if os.path.isdir(dst):

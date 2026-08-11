@@ -26,7 +26,7 @@ dependencies:
       - rtree==1.4.1
       - grpcio==1.80.0
       - rich==14.3.3
-       — standalone private package (was vendored under mm_adapter/).
+      #  — standalone private package (was vendored under mm_adapter/).
       - mm-adapter @ git+https://github.com/AnsonCheah/mm-adapter.git@v0.1.0 # MechMind Vision Hub gRPC client
       # ---------------------------------------------------------------------------------
       # OPTIONAL: GPU acceleration. Every consumer falls back to SciPy/NumPy on its own when

@@ -38,8 +38,14 @@ class O3DSceneObject:
 geocenter_x, geocenter_y, geocenter_z
 geocenter_qx, geocenter_qy, geocenter_qz, geocenter_qw
 gt_x, gt_y, gt_z
-gt_qx, gt_qy, gt_qz, gt_qw
+gt_qx, gt_qy, gt_qz, gt_w
 ```
+
+Note the ground-truth scalar term is `gt_w`, **not** `gt_qw` — that is what `render_stage.py` writes and what `MM_Optimizer/optimizer_utils.read_gt_pose_from_ply` requires.
+
+The `geocenter_*` keys carry the model frame expressed in the pre-recentre frame, i.e. where
+the geocenter origin sat before `recenter_mesh_pcd` moved everything. They read as identity on
+a bundle that was never recentred, which is honest: nothing was applied.
 
 ## Key helpers
 
@@ -60,4 +66,5 @@ find_cdf_knee(curvatures: np.ndarray) -> float
 ## Constraints
 
 - **One-way imports**: this package must never import `sensor`, `physics`, `registration`, or `stages`.
-- **`pcd_geocenter()` returns a 4×4 transform with translation in row 3** (not column 3 as is conventional). Callers must account for this.
+- **`pcd_geocenter()` returns a 4×4 transform, not a point** — the matrix you apply to the cloud to put it in the frame. Translation is in **column 3** (`[:3, 3]`), row 3 is `[0, 0, 0, 1]`. (This note previously claimed row 3; it was wrong, and `SaveStage` read row 3 for years, writing `geocenter_x/y/z = 0.0` into every exported PLY.)
+- **`reference_frames_agree(a, b)`** — returns `None` when two reference clouds are the same export in the same model frame, else a reason. The model frame is reproducible only while the mesh *and* the sampling settings are unchanged, so any code pairing a reference cloud with generated scenes should check.

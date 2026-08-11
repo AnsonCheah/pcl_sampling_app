@@ -178,6 +178,9 @@ class TuningStage(BaseStage):
         self.sampler  = SAMPLER_DEFAULT
         self.n_trials = None    # None → SC default; the Run button fills these from the sliders
         self.n_rounds = None
+        # Deliberate override for the model-frame guard (see _frames_agree). Off by default:
+        # the check costs seconds and the run it protects costs hours.
+        self.skip_frame_check = False
         # Runtime scratch (torn down in on_clear()).
         self._client       = None
         self._optimizer    = None
@@ -384,6 +387,11 @@ class TuningStage(BaseStage):
         for s in SAMPLER_CHOICES:
             self.combo_sampler.add_item(s)
         self.combo_sampler.selected_text = SAMPLER_DEFAULT
+        self.chk_skip_frame_check = self.register_widget(
+            gui.Checkbox("Skip model-frame check"), lambda: not self._running)
+        self.chk_skip_frame_check.checked = self.skip_frame_check
+        self.chk_skip_frame_check.set_on_checked(
+            lambda c: setattr(self, "skip_frame_check", bool(c)))
 
         # Run/Stop toggle: "Run Tuning" when idle, "Stop" while a study is active.
         self.btn_run = self.register_widget(
@@ -426,6 +434,7 @@ class TuningStage(BaseStage):
         v.add_child(self.slider_rounds)
         v.add_child(gui.Label("Sampler"))
         v.add_child(self.combo_sampler)
+        v.add_child(self.chk_skip_frame_check)
         v.add_child(self.btn_run)
         v.add_child(self.btn_dashboard)
         v.add_child(gui.Label(""))
@@ -609,6 +618,53 @@ class TuningStage(BaseStage):
         self._stop_requested = False   # clear so the Run/Stop toggle returns to "Run Tuning"
         super()._on_worker_done()
 
+    def _frames_agree(self, part, model_path) -> bool:
+        """Refuse to tune when the scenes and the model are in different model frames.
+
+        A tuning run is hours of MechVision calls scored against each scene's `T_gt`, and
+        `T_gt` is only meaningful against the model frame the scene was generated in. If the
+        bundle has since been re-exported into a different frame, every pose is scored
+        against the wrong reference and the study optimises toward a fiction — with no error,
+        because a stale scene still loads and still has a pose.
+
+        The model frame is only reproducible while both the mesh and the sampling settings
+        are unchanged: a different voxel size or view count can change which ambiguity axis
+        wins, which moved the frame by 60.6 degrees and 28.3 mm on 25333MB000. And
+        `bench/generate_scenes.py` is resumable, so one part can accumulate scenes from two
+        sessions in two frames. Checking is a few seconds against a run measured in hours.
+
+        Also compares the in-app cloud when the session has one, so a bundle that has drifted
+        from what is currently loaded is caught as well.
+        """
+        import open3d as o3d
+
+        from MM_Optimizer import model_sync
+        from geometry.geom_utils import reference_frames_agree
+
+        if self.skip_frame_check:
+            print("[TUNING] Model-frame check skipped by request.")
+            return True
+
+        problems = model_sync.check_scene_frames(part, model_path, _SYNTH_ROOT)
+        live = getattr(self.app, "down_pcd_surface", None)
+        if live is not None:
+            why = reference_frames_agree(live, o3d.io.read_point_cloud(model_path))
+            if why:
+                problems.append(f"{model_path} (exported bundle) vs the cloud loaded in the app"
+                                f"\n        {why}")
+        if not problems:
+            return True
+
+        print("[TUNING] " + "=" * 62)
+        print(f"[TUNING] ABORTING: {len(problems)} model-frame disagreement(s) for '{part}'.")
+        print("[TUNING] Every pose would be scored against the wrong reference frame.")
+        for p in problems:
+            print(f"[TUNING]   {p}")
+        print(f"[TUNING] Fix: python bench/generate_scenes.py --only {part} --force")
+        print("[TUNING] Or tick 'Skip model-frame check' to run anyway.")
+        print("[TUNING] " + "=" * 62)
+        return False
+
     def worker(self):
         # Local heavy imports (see module docstring).
         from MM_Optimizer.mv_evaluator    import PROJ_NAME, RESULTS_DIR, ENABLE_CACHE
@@ -634,6 +690,9 @@ class TuningStage(BaseStage):
         if not os.path.exists(model_path):
             print(f"[TUNING] Reference model not found: {model_path} "
                   f"— run the sampling pipeline first.")
+            return
+
+        if not self._frames_agree(part, model_path):
             return
 
         # Per-run scene budget (SC globals are mutated the same way the CLI does).
