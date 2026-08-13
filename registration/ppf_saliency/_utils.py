@@ -1,9 +1,9 @@
 """Cloud-analysis helpers the ablation arms need, inlined so this package owns them.
 
-Copies of ``geometry.math_utils.find_cdf_knee``, ``geometry.curvature.mean_curvature`` and
-``geometry.geom_utils.extract_edge_points``.  They live here rather than being imported so
-that the weighting ablation moves as one unit with the package it measures, instead of
-reaching back into the repository's shared geometry layer for three functions.
+``find_cdf_knee`` and ``extract_edge_points`` mirror ``geometry.math_utils`` and
+``geometry.geom_utils``; ``mean_curvature`` is owned outright here (the former
+``geometry/curvature.py`` was unused and has been removed).  They live here rather than being
+imported so that the weighting ablation moves as one unit with the package it measures.
 
 One deliberate behavioural change from the originals: ``find_cdf_knee`` no longer prints.
 It is called once per arm per part inside a sweep over thousands of instances, where two

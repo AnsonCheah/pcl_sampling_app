@@ -94,7 +94,6 @@ class MeshSamplingApp:
             self.scene = gui.SceneWidget()
             self.scene.scene = rendering.Open3DScene(self.window.renderer)
             self.scene.scene.set_background([0.2, 0.2, 0.2, 1.0])
-            self.scene_geoms = {}
             self.scene.scene.show_axes(self.show_origin_frame)
             self.window.set_on_layout(self._on_layout)
             self.window.set_on_key(self._on_key)
@@ -453,49 +452,9 @@ class MeshSamplingApp:
         gui.Application.instance.post_to_main_thread(self.window, _hide)
 
     def _clear_scene(self):
-        self.scene_geoms = {}
         self.scene.scene.clear_geometry()
         # Deliberately no show_axes() here — see the note in _reframe. Calling it at this point
         # rebuilds the axes from the bounds clear_geometry just emptied, pinning them at 1 m.
-
-    # def add_geom_in_scene(self, name:str, geom: Geometry3D, color=[1.0, 1.0, 1.0], alpha=1.0, point_size=1.5):
-    #     material = rendering.MaterialRecord()
-    #     material.point_size = point_size
-    #     material.base_color = color + [alpha]
-    #     material.shader = "defaultLit"
-    #     self.scene_geoms[name] = O3DSceneObject(geom, material)
-    #     self.main_thread(lambda: self.scene.scene.add_geometry(name, geom, material))
-
-    # def remove_geom_in_scene(self, name:str):
-    #     self.scene_geoms.pop(name)
-    #     self.main_thread(lambda: self.scene.scene.remove_geometry(name))
-
-    # def hide_geoms_in_scene(self, geoms=[]):
-    #     def hide_geoms():
-    #         if not geoms:
-    #             print("no specified geom, hiding all")
-    #             for name in self.scene_geoms.keys():
-    #                 print(f"hiding {name}")
-    #                 self.scene.scene.show_geometry(name, show=False)
-    #         else:
-    #             print(f"geoms = {geoms}")
-    #             for name in geoms:
-    #                 print(f"hiding {name}")
-    #                 self.scene.scene.show_geometry(name, show=False)
-    #     self.main_thread(hide_geoms)
-
-    # def show_geoms_in_scene(self, geoms:list=[]):
-    #     def show_geoms():
-    #         if not geoms: print("no specified geom, showing all")
-    #         print(geoms)
-
-    #         for name in (geoms if geoms else self.scene_geoms.keys()):
-    #             print(f"showing {name}")
-    #             self.scene.scene.show_geometry(name, show=True)
-    #     self.main_thread(show_geoms)
-
-    def has_geom(self, name:str):
-        self.main_thread(lambda: self.scene.scene.has_geometry(name))
 
     def main_thread(self, fn):
         if self.headless:

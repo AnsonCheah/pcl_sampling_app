@@ -284,17 +284,6 @@ def _boundary_map(mask, ndi, xp, width: int = 1):
     return mask & ~ndi.binary_erosion(mask, structure=struct)
 
 
-def _dist_to_boundary(mask: np.ndarray) -> np.ndarray:
-    """
-    (H, W) float32 — Euclidean distance (pixels) from each True pixel in `mask`
-    to the nearest boundary pixel of that mask. Pixels outside the mask return 0.
-    (Retained for callers/tests; uses NumPy/SciPy.)
-    """
-    interior = _scipy_ndi.binary_erosion(mask, np.ones((3, 3)))
-    dist = _scipy_ndi.distance_transform_edt(interior).astype(np.float32)
-    return np.where(mask, dist, 0.0)
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 #  SECTION 3 — Five error models (operate on a single instance's crop array)
 # ══════════════════════════════════════════════════════════════════════════════

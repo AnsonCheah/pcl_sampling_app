@@ -696,14 +696,6 @@ def _knn_indices(pts, k, tree=None):
     _, idx = tree.query(pts, k=k+1, workers=-1)
     return idx[:, 1:].astype(np.int32)
 
-def _edge_strength_3d(pts, nrm, k, tree=None):
-    idx  = _knn_indices(pts, k, tree)
-    nd   = (1. - (nrm[:, None, :] * nrm[idx]).sum(2).clip(-1,1)).mean(1)
-    nb   = pts[idx]
-    dv   = ((nb - nb.mean(1, keepdims=True))**2).sum(2).mean(1)
-    n01  = lambda x: (x-x.min())/(x.max()-x.min()+1e-12)
-    return np.maximum(n01(nd), n01(dv))
-
 def _smooth_falloff_3d(s, edge_width, pts, k, tree=None):
     idx  = _knn_indices(pts, k, tree)
     d2   = ((pts[idx] - pts[:, None, :])**2).sum(2)
@@ -724,12 +716,6 @@ def _bleed_dirs_image(ray_dirs, gx_img, gy_img, pixel_idx, res):
     b    = gx[:,None]*tx + gy[:,None]*ty
     n    = np.linalg.norm(b, axis=1, keepdims=True)
     return np.where(n > 1e-8, b/(n+1e-12), 0.)
-
-def _bleed_dirs_3d(pts, nrm, sensor_origin):
-    r = sensor_origin - pts; r /= np.linalg.norm(r,1,keepdims=True)+1e-12
-    t = r - (r*nrm).sum(1,keepdims=True)*nrm
-    b = -t + .3*nrm; return b/(np.linalg.norm(b,1,keepdims=True)+1e-12)
-
 
 def add_edge_artifacts(render, keep_mask=None, max_bleed=0.006,
                        edge_width=0.004, k=20, n_per_edge_pixel=1.5,
@@ -813,16 +799,6 @@ def add_edge_artifacts(render, keep_mask=None, max_bleed=0.006,
 
     if verbose: rp(f"{sys._getframe().f_code.co_name} took {np.round(time.time() - start, 6)}s")
     return bled_pts, nrm
-
-
-def add_edge_bleeding_standalone(pts, nrm, sensor_origin,
-                                  max_bleed=0.006, edge_width=0.004, k=20):
-    """Edge bleeding without render dict (3D kNN, no flying pixels)."""
-    tree = _build_tree(pts)
-    s    = _edge_strength_3d(pts, nrm, k, tree)
-    f    = _smooth_falloff_3d(s, edge_width, pts, k, tree)
-    b    = _bleed_dirs_3d(pts, nrm, sensor_origin)
-    return pts + max_bleed * f[:, None] * b
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1201,67 +1177,3 @@ def add_surface_noise(points, normals, mode="fbm", amplitude=0.004,
         raise ValueError(f"mode must be 'perlin' or 'fbm', got {mode!r}")
     if verbose: rp(f"{sys._getframe().f_code.co_name} took {np.round(time.time() - start, 6)}s")
     return points + amplitude * fn(points, scale=scale)[:, None] * normals
-
-if __name__ == "__main__":
-    from geom_utils import camera_view_matrix
-    import open3d as o3d
-    from scipy.spatial.transform import Rotation as R
-    from scene_render import (
-        scene_render,
-        compute_dropout_mask,
-        add_edge_artifacts,
-        add_multipath_outliers, add_pepper_noise, subset_render,
-        add_sensor_noise,
-        add_surface_noise,
-    )
-    from geom_utils import o3d_display
-    
-    file_path = "25333MB000.stl"
-    part_mesh = o3d.io.read_triangle_mesh(file_path)
-    extent_max = part_mesh.get_axis_aligned_bounding_box().get_extent().max()
-    if 5.0 < extent_max < 5000.0:
-        print(f"[INFO] Converting units mm -> m")
-        part_mesh.scale(0.001, center=(0, 0, 0))
-    part_mesh.translate(-part_mesh.get_center())
-    part_mesh.rotate(R.random().as_matrix())
-    fov = 41.11
-    W = 1920
-    H = 1200
-    print("mesh loaded")
-
-    cam_pos = np.asarray([0,0,1.5])
-    look_at = np.zeros(3)
-    T_cam = camera_view_matrix(cam_pos, look_at)
-    meshes = [part_mesh]
-
-    render = scene_render(meshes, T_cam, look_at, fov, W, H)
-    keep = compute_dropout_mask(
-        render, roughness=0.4,
-        albedo_per_geom_id={2: 0.04},  # black rubber part
-        density_cos_ref=0.7,           # oblique density thinning
-    )
-    render = add_image_space_effects(render, keep,
-                                     smooth_sigma_px=0.5,
-                                     sigma_fringe_corr=0.0001)
-    pts, nrm = add_edge_artifacts(render, keep)
-    r = subset_render(render, keep)
-    mp, mn = add_multipath_outliers(r)
-    pp, pn = add_pepper_noise(r)
-    pts = np.vstack([pts, mp, pp])
-    nrm = np.vstack([nrm, mn, pn])
-    n_kept    = keep.sum()
-    n_outlier = len(pts) - n_kept
-    pix_all   = np.concatenate([render["pixel_idx"][keep],
-                                 np.full(n_outlier, -1, np.int64)])
-    cproj_all = np.concatenate([render["cos_proj"][keep],
-                                 np.ones(n_outlier)])
-    pts = add_scan_line_banding(pts, nrm, pix_all, render["res"],
-                                render["sensor_origin"])
-    pts = add_sensor_noise(pts, nrm, render["sensor_origin"],
-                           pixel_idx=pix_all, res=render["res"],
-                           cos_proj=cproj_all)
-    pts = add_surface_noise(pts, nrm)
-
-    cloud = o3d.t.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
-    o3d_display([cloud])
-

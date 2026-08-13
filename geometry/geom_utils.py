@@ -25,12 +25,6 @@ def init_open3d():
     vis.create_window(visible=False)
     vis.destroy_window()
 
-def random_rotation_matrix():
-    return R.random().as_matrix()
-
-def random_quaternion(scalar_first=False):
-    return R.random().as_quat(scalar_first=scalar_first)
-
 def rotation_aligning_vector_to_axis(src, dst=(0., 0., 1.)) -> np.ndarray:
     """Return a 3x3 rotation matrix R such that ``R @ src`` is parallel to ``dst``.
 
@@ -678,33 +672,3 @@ def compute_overlap(xyz0: np.ndarray,
     tree = o3d.geometry.KDTreeFlann(pcd1)
     hits = sum(1 for p in xyz0 if tree.search_radius_vector_3d(p, threshold)[0] > 0)
     return hits / max(len(xyz0), 1)
-
-if __name__=="__main__":
-    import time
-    start = time.time()
-    mesh = o3d.t.io.read_triangle_mesh("mesh_raw/37150MB000.STL")
-    print(f"legacy read time: {time.time() - start}")
-    start = time.time()
-    mesh = o3d.t.io.read_triangle_mesh("mesh_raw/37150MB000.STL")
-    print(f"tensor read time: {time.time() - start}")
-
-    bbox = mesh.get_axis_aligned_bounding_box()
-    extent_max = bbox.get_extent().max()
-    if 5.0 < extent_max < 5000.0:
-        print(f"[INFO] Converting units mm -> m")
-        mesh.scale(0.001, center=(0, 0, 0))
-    mesh.compute_vertex_normals()
-    mesh.translate(-mesh.get_center())
-
-    # mesh.paint_uniform_color([0.5,0.5,0.5])
-    start = time.time()
-    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(fibonacci_sphere(200)*0.5))
-    pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=0.005, max_nn=50))
-    print(f"legacy estimate time: {time.time() - start}")
-    # start = time.time()
-    # pcd1 = o3d.geometry.PointCloud(o3c.Tensor(fibonacci_sphere(200)*0.5, o3c.float32, device))
-    # pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=0.005, max_nn=50))
-    # print(f"tensor estimate time: {time.time() - start}")
-    # o3d_display([pcd1])
-    # o3d.visualization.draw_geometries([mesh, pcd1], width=1080, height=720, zoom=1.0)
-

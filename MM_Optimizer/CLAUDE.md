@@ -31,6 +31,21 @@ MechVision returns poses as a flat list. Labels are disabled for now (`need_labe
 Do NOT re-run MechMind's adapter generator for fine registration parameters — it fails on generating adapter of more than 30 numbers
 MechVision logs folder: C:\Mech-Mind\Mech-Vision & Mech-Viz-1.8.3\Mech-Vision\logs
 
+## Diagnostic Constraints
+
+**`geo_center.json` must be the identity pose `[0, 0, 0, 1, 0, 0, 0]`.** A wrong quaternion there
+makes MechVision report every pose rotated off the synthetic GT — it presents as a uniform
+`ang_error ≈ 179.7°` at the tight threshold, which looks exactly like unhandled rotational
+symmetry. Check the geocenter before investigating symmetry. `SaveStage` writes these values from
+`inv(app.geocenter)`.
+
+**The eval cache key must include the accuracy thresholds.** `evaluate_config` runs at both the
+loose regime-gate threshold (`ang_thresh = 360°`, position-only) and the tight one (5°). Omit
+`pos_thresh`/`ang_thresh` from the key and a loose `coverage = 1.0` is served to a tight query,
+hiding orientation errors entirely. `EvalCache._scene_signature` additionally folds each
+`sample_*.ply`'s `(name, size, mtime_ns)` into the key, so regenerating scenes into the same
+directory invalidates it — a path-only key returned stale results and hid a real world-Z offset.
+
 ## Optimization Objective (priority order)
 1. Maximize pose precision vs synthetic ground truth (primary)
 2. Minimize pose error against GT poses from synthetic PLY (from the sampling app's pipeline)

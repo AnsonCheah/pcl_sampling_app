@@ -17,18 +17,6 @@ def list_scene_dirs(part_dir):
         name for name in os.listdir(part_dir)
         if name.startswith("scene_") and os.path.isdir(os.path.join(part_dir, name)))
 
-def save_ply_dialog(default_name=None):
-    Tk().withdraw()
-    default_name = f"{'output' if not default_name else default_name}.ply"
-    path = filedialog.asksaveasfilename(
-        defaultextension=".ply",
-        initialdir=Path.cwd(), 
-        initialfile=default_name,
-        filetypes=[("PLY files", "*.ply")]
-    )
-
-    return Path(path) if path else None
-
 def open_source_folder_dialog():
     Tk().withdraw()
     path = filedialog.askdirectory(initialdir=Path.cwd(), title="Select source folder (STL files)")
