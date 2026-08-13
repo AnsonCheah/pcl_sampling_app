@@ -26,6 +26,11 @@ dependencies:
       - rtree==1.4.1
       - grpcio==1.80.0
       - rich==14.3.3
+      # Imported at module scope by bench/fetch_dataset.py. It arrives transitively anyway,
+      # but a direct import belongs in the manifest -- a transitive dependency can be dropped
+      # by an unrelated version bump, and the failure would surface as the dataset fetch
+      # breaking rather than as the package that actually changed.
+      - requests==2.34.2
       #  — standalone private package (was vendored under mm_adapter/).
       - mm-adapter @ git+https://github.com/AnsonCheah/mm-adapter.git@v0.1.0 # MechMind Vision Hub gRPC client
       # ---------------------------------------------------------------------------------

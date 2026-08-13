@@ -128,7 +128,7 @@ def generate_for_mesh(mesh_path: str, n_scenes: int, fill_rate: float,
     scene.structure_type = "none"
 
     # Required so save_synthetic_targets() -> SaveStage.worker takes the RENDER branch and
-    # writes reference_cloud.ply (and the ambiguity sidecar) into each scene directory.
+    # writes reference_cloud.ply into each scene directory.
     app.set_stage(Stage.RENDER)
 
     made, instances = 0, 0
@@ -161,8 +161,11 @@ def main() -> None:
     ap.add_argument("--adaptive", action="store_true",
                     help="curvature-adaptive downsampling instead of uniform")
     ap.add_argument("--no-ambiguity", action="store_true",
-                    help="skip the ambiguity analysis (saves ~1-3 min/part, but the "
-                         "heat-map weighting arm then has nothing to read)")
+                    help="skip the ambiguity analysis (saves ~1-3 min/part). This chooses the "
+                         "MODEL FRAME: with it the cloud is recentred into the PCA frame "
+                         "instead of around the dominant ambiguity axis, so scenes generated "
+                         "either way are not interchangeable. Downstream heat-map arms are "
+                         "unaffected -- they recompute the analysis themselves.")
     ap.add_argument("--limit", type=int, default=None, help="only the first N meshes")
     ap.add_argument("--only", default=None, help="substring filter on the mesh name")
     ap.add_argument("--force", action="store_true",

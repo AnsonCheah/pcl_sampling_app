@@ -30,14 +30,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import open3d as o3d
-from scipy.spatial import cKDTree
 
 from geometry.ambiguity import (
     AmbiguityConfig,
     ambiguity_geometries,
     analyse_ambiguity,
-    save_ambiguity_profile,
 )
+from geometry.geom_utils import pairing_error
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REF_ROOT = os.path.join(REPO, "output", "reference_pcd")
@@ -80,41 +79,6 @@ def _primitive(name: str):
     mesh.translate(-mesh.get_axis_aligned_bounding_box().get_center())
     mesh.compute_vertex_normals()
     return mesh, None
-
-
-def pairing_error(mesh, pcd):
-    """Why this mesh and this cloud are not the same part in the same frame, or None.
-
-    The mesh is not a decoration here — ``_visibility_masks`` raycasts it and snaps each
-    hit to the nearest cloud point within ~``2*radius/res``, so a cloud that does not sit
-    ON that mesh loses almost every point from ``visible``.  Nothing errors: the sweep just
-    reports a thin sliver as "the visible patch", the per-view survival test is then applied
-    to a few hundred accidental points, and the ranking is decided by whichever transform
-    happens to explain that sliver.
-
-    Measured on a stale export paired with the current STL, 13% of points were ever visible
-    (311 per view) against 99% (6400 per view) for a matched pair, and the run reported 12
-    axes with a bogus continuous one where the matched pair reports 3.  A silently wrong
-    answer, so it is checked rather than assumed — the check costs milliseconds.
-    """
-    pts = np.asarray(pcd.points, dtype=float)
-    if len(pts) < 2 or len(mesh.triangles) == 0:
-        return None
-    scene = o3d.t.geometry.RaycastingScene()
-    scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh))
-    dist = scene.compute_distance(o3d.core.Tensor(pts.astype(np.float32))).numpy()
-
-    # Judged against the cloud's own resolution, not an absolute distance, so this scales
-    # from a 20 mm part to a 500 mm one exactly as the analysis tolerances do.
-    tree = cKDTree(pts)
-    spacing = float(np.median(tree.query(pts, k=2)[0][:, 1]))
-    offset = float(np.percentile(dist, 95))
-    tol = max(2.0 * spacing, 0.0005)
-    if offset <= tol:
-        return None
-    return (f"95% of the cloud's points lie within {offset * 1000:.2f} mm of the mesh "
-            f"surface, against a {tol * 1000:.2f} mm tolerance "
-            f"(2x the cloud's own {spacing * 1000:.2f} mm spacing)")
 
 
 def _mesh_candidates(ply_path: str, stem: str):
@@ -316,7 +280,6 @@ def main():
     ap.add_argument("--no-markers", action="store_true",
                     help="hide the axis knobs and centroid/AABB reference spheres")
     ap.add_argument("--save", help="write a PNG here")
-    ap.add_argument("--save-profile", help="write the profile JSON here")
     ap.add_argument("--no-show", action="store_true", help="do not open a window")
     args = ap.parse_args()
 
@@ -360,10 +323,6 @@ def main():
     geoms, legend = ambiguity_geometries(pcd, profile, max_axes=args.max_axes,
                                          show_markers=not args.no_markers)
     _report(profile, legend)
-
-    if args.save_profile:
-        save_ambiguity_profile(profile, args.save_profile)
-        print(f"  wrote {args.save_profile}")
 
     lookat = np.asarray(pcd.points).mean(axis=0)
     _show(geoms, f"ambiguity - {label}", args.save, not args.no_show, lookat)

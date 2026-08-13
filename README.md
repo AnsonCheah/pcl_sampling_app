@@ -35,10 +35,17 @@ Domain logic lives in its domain package. `stages/` orchestrates but does not im
 
 ```bash
 conda env create -f environment.yaml
-conda activate pcd-sampling
+conda activate autotune
 ```
 
-Python interpreter: `C:\Users\Hmgics\AppData\Local\anaconda3\envs\pcd-sampling\python.exe`
+Every command below then runs as plain `python`, on any platform. If you invoke the
+interpreter directly instead of activating, point an environment variable at it rather than
+hardcoding the path — the location is install- and OS-specific:
+
+```bash
+export PCL_PY="$LOCALAPPDATA/anaconda3/envs/autotune/python.exe"   # Git Bash on Windows
+export PCL_PY="$HOME/miniconda3/envs/autotune/bin/python"          # Linux / macOS
+```
 
 ### GUI
 

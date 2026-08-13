@@ -265,8 +265,24 @@ class SceneStage(BaseStage):
             return []
         try:
             state = np.load(npz_path, allow_pickle=True)
-            T_gt = np.asarray(state["T_gt"], dtype=float)   # (n,4,4) part->world
+            T_gt = np.asarray(state["T_gt"], dtype=float)   # (n,4,4) model_frame->world
             bin_geom = _reconstruct_bin_mesh(state["bin_dim"], state["bin_transform"])
+            # TRANSITIONAL -- delete this block once no scene directory under
+            # output/synthetic_target/ predates the scene_state frame fix (i.e. every one of
+            # them has been regenerated). It cannot fire on a scene this build wrote, so there
+            # is nothing here worth keeping past that point; left in place forever it just
+            # looks like a live invariant nobody dares touch.
+            #
+            # Until then: `body_offset` marks a scene whose T_gt is in the model frame. Written
+            # from an older build the key is absent and T_gt is in the centred physics body
+            # frame, so pairing it with target_mesh (which is NOT centred) draws every part
+            # offset by the mesh bounding-box centre -- millimetres, enough to look like a
+            # settling artifact rather than a frame error. Say so instead of quietly drawing
+            # the wrong picture.
+            if "body_offset" not in state.files:
+                print(f"[SCENE] {os.path.basename(str(scene_dir))} predates the scene_state "
+                      f"frame fix; preview may be offset by the mesh bbox centre. "
+                      f"Regenerate the scene to clear this.")
         except Exception as e:
             print(f"[SCENE] failed to read {npz_path}: {e}")
             return []
@@ -737,12 +753,17 @@ class SceneStage(BaseStage):
             rp(f"[AUTO-COUNT] fill={self.fill_rate:.0%} "
                f"part OBB vol={part_mesh.bounding_box_oriented.volume:.2e} m³ "
                f"-> n_parts={self.num_targets}")
+        # `body_offset` tells MujocoBinScene what we subtracted, so `export_scene_state` can put
+        # `scene_state.npz` back into the model frame itself. Without it that file stayed in the
+        # centred body frame while the per-instance GT below did not, and the two disagreed by
+        # exactly this vector.
         self.mj_scene = MujocoBinScene(part_mesh, physics_convex, n_parts=self.num_targets,
                                        render=self.rendering_flag, arrangement=self.arrangement,
                                        stable_pose_R=self.stable_pose_R,
                                        structure_type=self.structure_type,
                                        structure_height_frac=self.structure_height_pct / 100.0,
-                                       clearance_mode=self.clearance_mode)
+                                       clearance_mode=self.clearance_mode,
+                                       body_offset=mesh_center if needs_centering else None)
         self.app.mj_scene = self.mj_scene   # handoff to RenderStage
 
         # Live mesh preview: shown whenever the scene actually simulates (random, or structured
@@ -758,8 +779,10 @@ class SceneStage(BaseStage):
         self.mj_scene.verify_parts_in_bin()
         scene_state = self.mj_scene.extract_scene_state()
         self.o3d_scene = self.mj_scene.mujoco_scene_to_o3d(scene_state)
-        # T_gt from MuJoCo is in the centered body frame. Remap it and the mesh geom back to
-        # the original mesh frame so RenderStage and GT export stay consistent with down_pcd.
+        # `mujoco_scene_to_o3d` pairs raw body poses with the CENTRED mesh, so both halves have
+        # to be put back into the original mesh frame here. (`export_scene_state` does its own
+        # equivalent from `body_offset`; that is the serialization path, this is the in-memory
+        # one, and both are driven by the same `mesh_center`.)
         # Math: T_gt_adj = T_gt_phys @ [[I, -mesh_center]; [0,1]]
         #   because p_world = T_gt_phys @ p_centered = T_gt_phys @ (p_orig - mesh_center) = T_gt_adj @ p_orig
         if needs_centering:

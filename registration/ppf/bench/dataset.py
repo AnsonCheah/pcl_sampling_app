@@ -2,13 +2,16 @@
 
 Three things about this data are easy to get wrong, and all three are load-bearing:
 
-* **Use ``sample_i.npz["T_gt"]``, not ``scene_state.npz["T_gt"]``.**  They disagree.
-  ``MujocoBinScene.export_scene_state`` writes poses straight from the physics bodies, while
-  ``SceneStage.worker`` post-multiplies a mesh-recentring shift onto the per-instance poses
-  whenever the imported mesh was not already centred on its bounding box (which is the
-  normal case — ``center_mesh`` is a manual button).  Only the per-sample one is expressed
-  in the same frame as ``reference_cloud.ply``, so only it can be compared against a pose
-  estimated from that cloud.
+* **Use ``sample_i.npz["T_gt"]``, not ``scene_state.npz["T_gt"]``, on any scene generated
+  before the two were unified.**  ``MujocoBinScene.export_scene_state`` used to write poses
+  straight from the physics bodies, while ``SceneStage.worker`` post-multiplied a
+  mesh-recentring shift onto the per-instance poses whenever the imported mesh was not
+  already centred on its bounding box (which is the normal case — ``center_mesh`` is a manual
+  button).  Only the per-sample one was expressed in the same frame as
+  ``reference_cloud.ply``.  ``export_scene_state`` now composes the same shift, so both agree;
+  the marker is the ``body_offset`` key, present only on scenes written since.  This loader
+  reads the per-sample pose either way, which is correct for old and new directories alike —
+  do not "simplify" it to the scene-level array.
 
 * **``sample_<i>`` does not necessarily correspond to ``part_<i>``.**  Samples are numbered
   by a running counter over instances that pass the 2D aspect/area filter, so the mapping is

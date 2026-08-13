@@ -75,9 +75,9 @@ def build_arms(model: PPFModel, names: List[str], scene) -> Dict[str, PPFModel]:
         elif name == "ambiguity":
             w = _ambiguity_weights(model, scene)
             if w is None:
-                print("[skip] arm 'ambiguity': no per-point heat map available. It is not "
-                      "persisted yet (save_ambiguity_profile stores only a summary), so it "
-                      "has to be recomputed from the mesh — pass --mesh <part.stl>.")
+                print("[skip] arm 'ambiguity': no per-point heat map available. It is never "
+                      "persisted, so it has to be recomputed from the mesh — pass "
+                      "--mesh <part.stl>.")
                 continue
             out[name] = model.with_weights(w)
         else:

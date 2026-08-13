@@ -7,8 +7,8 @@ verify two contracts the GUI preview relies on:
   2. An on_step that raises does NOT abort the sim — physics still runs to completion and
      settles. This is what insulates the physics from a GUI hiccup.
 
-Run:
-  C:/Users/Hmgics/AppData/Local/anaconda3/envs/pcd-sampling/python.exe -m pytest physics/tests/test_on_step_callback.py -q
+Run (in the `autotune` env):
+  python -m pytest physics/tests/test_on_step_callback.py -q
 """
 
 import sys

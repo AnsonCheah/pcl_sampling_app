@@ -6,11 +6,9 @@ from enums import Stage
 from pathlib import Path
 from stages.stage_base import BaseStage
 from geometry.file_utils import pointcloud_to_ply
-from geometry.ambiguity import save_ambiguity_profile
 from scipy.spatial.transform import Rotation as R
 
 _IDENTITY_POSE = [0, 0, 0, 1, 0, 0, 0]
-AMBIGUITY_SIDECAR = "ambiguity_profile.json"
 
 class SaveStage(BaseStage):
     downstream = {
@@ -106,18 +104,6 @@ class SaveStage(BaseStage):
         with open(folder_path / "poses.poses", "w") as f:
             json.dump(poses, f, indent=4)
 
-        # Sidecar goes next to every cloud variant so the tuner finds it beside whichever
-        # model it loads. The axis is already expressed in this cloud's frame.
-        #
-        # The per-point heat map is written ONLY for the surface cloud: that is the cloud the
-        # analysis ran on, so it is the only one the array is index-aligned with. Writing it
-        # beside the edge / feature / flat variants would produce a file that looks usable
-        # and silently scores the wrong points.
-        profile = getattr(self.app, "ambiguity_profile", None)
-        if profile is not None:
-            save_ambiguity_profile(profile, folder_path / AMBIGUITY_SIDECAR,
-                                   per_point=(cloud_type == "surface"))
-
         print(f"[INFO] Saved {cloud_type} cloud to {folder_path}")
 
     def _warn_if_axis_not_addressable(self, axis_tol_deg=1.0, origin_tol_m=1e-4):
@@ -198,16 +184,6 @@ class SaveStage(BaseStage):
                 pointcloud_to_ply(self.app.down_pcd, str(pcd_path),
                                   comments=self._geocenter_comments())
                 print(f"[INFO] Point cloud saved to {pcd_path}")
-
-                # Also drop the ambiguity sidecar into the scene directory. Without it a
-                # consumer of these scenes has to re-run the analysis from the mesh (a minute
-                # per part) just to weight votes by discriminability. `down_pcd` shares point
-                # order with `down_pcd_surface` in both uniform and adaptive modes, so the
-                # per-point array is aligned with the cloud written just above.
-                profile = getattr(self.app, "ambiguity_profile", None)
-                if profile is not None:
-                    save_ambiguity_profile(profile, path / AMBIGUITY_SIDECAR, per_point=True)
-                    print(f"[INFO] Ambiguity sidecar saved to {path / AMBIGUITY_SIDECAR}")
 
         except Exception as e:
             print(f"[ERROR] Failed to save PLY: {e}")

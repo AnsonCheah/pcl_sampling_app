@@ -33,8 +33,8 @@ MechVision logs folder: C:\Mech-Mind\Mech-Vision & Mech-Viz-1.8.3\Mech-Vision\lo
 
 ## Optimization Objective (priority order)
 1. Maximize pose precision vs synthetic ground truth (primary)
-2. Minimize pose error against GT poses from synthetic PLY (from `pcd-sampling` pipeline)
+2. Minimize pose error against GT poses from synthetic PLY (from the sampling app's pipeline)
 3. Minimize cycle time — only as a tiebreaker when precision meets the tolerance threshold
 
 ## Ground Truth Interface
-GT poses come from the synthetic PLY files produced by the `pcd-sampling` pipeline. The optimizer reads these PLY files; it does not call into the sampling app directly 
+GT poses come from the synthetic PLY files produced by the sampling app's pipeline. The optimizer reads these PLY files; it does not call into the sampling app directly 

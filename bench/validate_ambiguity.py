@@ -11,8 +11,19 @@ BOP ships per-object ``symmetries_discrete`` and ``symmetries_continuous`` in
 ``models_info.json`` — independently authored ground truth for 30 industrial parts — so this
 is the first external check it has had.
 
-Profiles are read from the sidecars the scene sweep already wrote, not recomputed; the
-analysis costs minutes per part and the sweep has already paid for it.
+Profiles are computed here, straight from the BOP meshes in ``mesh_raw/``.  This script needs
+no scene generation and no exported bundle, so it runs immediately after
+``bench/fetch_dataset.py``.  That is sound because the comparison reads only ``is_global`` and
+``fold``, both of which are frame-independent, and ``analyse_ambiguity`` centres its input
+itself — so a mesh in BOP's own coordinates, in millimetres, is fine once unit-scaled.
+
+The verdict moves with sampling density
+    ``analyse_ambiguity`` is deterministic for a fixed (mesh, cloud, cfg, seed) but **not**
+    stable against a changed input: measured on 25333MB000, three sample densities gave
+    dominant folds C4 / C1 / C2, one of them on an axis 45 degrees from the others.  The cloud
+    is therefore sampled at a pinned count and a pinned seed, and any agreement figure below is
+    only meaningful together with that density.  Re-running at a different ``--n-points`` is a
+    legitimate robustness probe; comparing two runs taken at different densities is not.
 
 Reading the result
     The comparison is only meaningful on **global** symmetry. BOP annotates symmetries of
@@ -29,15 +40,18 @@ import argparse
 import json
 import os
 import sys
-from collections import Counter, defaultdict
-from typing import Dict, Optional
+import time
+from collections import Counter
+from typing import Dict, List
 
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-SYNTH_ROOT = os.path.join(_ROOT, "output", "synthetic_target")
+MESH_ROOT = os.path.join(_ROOT, "mesh_raw")
+
+MESH_EXT = (".ply", ".stl", ".obj")
 
 
 def bop_expectation(rec: dict) -> tuple:
@@ -54,24 +68,57 @@ def bop_expectation(rec: dict) -> tuple:
     return "asymmetric", 1
 
 
-def load_profiles() -> Dict[str, object]:
-    from geometry.ambiguity import load_ambiguity_profile
+def mesh_paths() -> Dict[str, str]:
+    """Map ``obj_000005`` -> its mesh file under ``mesh_raw/``.
 
-    out = {}
-    if not os.path.isdir(SYNTH_ROOT):
-        return out
-    for part in sorted(os.listdir(SYNTH_ROOT)):
-        pdir = os.path.join(SYNTH_ROOT, part)
-        if not os.path.isdir(pdir):
+    Keyed on the bare filename stem, which is exactly how ``models_info.json`` keys are
+    rendered (``obj_%06d``), so the two dictionaries intersect directly.
+    """
+    out: Dict[str, str] = {}
+    for root, _, files in os.walk(MESH_ROOT):
+        for f in sorted(files):
+            stem, ext = os.path.splitext(f)
+            if ext.lower() in MESH_EXT and stem not in out:
+                out[stem] = os.path.join(root, f)
+    return out
+
+
+def compute_profiles(parts: List[str], n_points: int, cfg) -> Dict[str, object]:
+    """Analyse each part straight from its mesh. Minutes per part -- see the module docstring."""
+    import open3d as o3d
+
+    from geometry.ambiguity import analyse_ambiguity
+    from geometry.mesh_repair import analyze_mesh
+
+    paths = mesh_paths()
+    out: Dict[str, object] = {}
+    for i, part in enumerate(parts, 1):
+        path = paths.get(part)
+        if path is None:
+            print(f"  [{i}/{len(parts)}] {part:<14} no mesh under mesh_raw/ -- skipped")
             continue
-        for scene in sorted(os.listdir(pdir)):
-            f = os.path.join(pdir, scene, "ambiguity_profile.json")
-            if os.path.exists(f):
-                try:
-                    out[part] = load_ambiguity_profile(f)
-                except Exception:
-                    pass
-                break                      # one profile per part is enough; they agree
+        print(f"  [{i}/{len(parts)}] {part:<14} ", end="", flush=True)
+        t0 = time.time()
+
+        mesh = o3d.io.read_triangle_mesh(path)
+        cleaned, report = analyze_mesh(mesh)
+        if report.errors:
+            print(f"refused: {'; '.join(report.errors)}")
+            continue
+        # BOP ships millimetres; every tolerance in AmbiguityConfig that is not part-relative
+        # is an absolute sensor-physics floor in metres, so this conversion is load-bearing
+        # rather than cosmetic. Same call and same center as ImportMeshStage.
+        if report.unit_scale != 1.0:
+            cleaned.scale(report.unit_scale, center=(0, 0, 0))
+        cleaned.compute_vertex_normals()
+
+        # Pinned seed + pinned count: the answer moves with density, so the sampling must not
+        # be free to drift between runs. Matches visualize_ambiguity._prepare.
+        o3d.utility.random.seed(0)
+        pcd = cleaned.sample_points_uniformly(n_points, use_triangle_normal=False)
+
+        out[part] = analyse_ambiguity(cleaned, pcd, cfg)
+        print(f"{time.time() - t0:6.0f}s")
     return out
 
 
@@ -79,10 +126,22 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--verbose", action="store_true", help="one line per part")
+    ap.add_argument("--parts", nargs="+", default=None, metavar="PART",
+                    help="only these parts (e.g. obj_000005 obj_000013). The full sweep is "
+                         "30 parts at minutes each, so this is the way to spot-check.")
+    ap.add_argument("--n-points", type=int, default=6000,
+                    help="points sampled from each mesh. The answer is density-sensitive "
+                         "(see the module docstring) -- changing this changes the verdict, so "
+                         "report it alongside any figure taken from this script.")
+    ap.add_argument("--n-views", type=int, default=None,
+                    help="viewpoints in the visibility sweep (default: AmbiguityConfig's)")
     args = ap.parse_args()
 
+    from geometry.ambiguity import AmbiguityConfig
+    cfg = AmbiguityConfig() if args.n_views is None else AmbiguityConfig(n_views=args.n_views)
+
     info: Dict[str, dict] = {}
-    for root, _, files in os.walk(os.path.join(_ROOT, "mesh_raw")):
+    for root, _, files in os.walk(MESH_ROOT):
         if "models_info.json" in files:
             with open(os.path.join(root, "models_info.json")) as f:
                 for k, rec in json.load(f).items():
@@ -90,13 +149,22 @@ def main() -> None:
     if not info:
         sys.exit("no models_info.json under mesh_raw/ — run bench/fetch_dataset.py first")
 
-    profiles = load_profiles()
+    wanted = sorted(info) if args.parts is None else list(args.parts)
+    unknown = [p for p in wanted if p not in info]
+    if unknown:
+        sys.exit(f"no BOP annotation for: {', '.join(unknown)}\n"
+                 f"known parts: {', '.join(sorted(info))}")
+
+    print(f"Analysing {len(wanted)} part(s) at {args.n_points} points, "
+          f"n_views={cfg.n_views}. This takes minutes per part.\n")
+    profiles = compute_profiles(wanted, args.n_points, cfg)
+
     shared = sorted(set(info) & set(profiles))
     if not shared:
-        sys.exit("no parts have both a BOP annotation and a saved ambiguity profile "
-                 "— run bench/generate_scenes.py first")
+        sys.exit("no parts could be analysed — check that mesh_raw/ holds the meshes named "
+                 "in models_info.json (run bench/fetch_dataset.py)")
 
-    print(f"{len(shared)} parts with both a BOP annotation and a computed profile\n")
+    print(f"\n{len(shared)} parts with both a BOP annotation and a computed profile\n")
     if args.verbose:
         print(f"  {'part':<14} {'BOP':<12} {'fold':>5} | {'global axes':>11} "
               f"{'fold':>5} {'view-dep':>9}  {'agree':>6}")

@@ -48,9 +48,8 @@ per-call BVH rebuild in ``sensor.scene_render()``.
 
 from __future__ import annotations
 
-import json
 from collections import Counter
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -71,9 +70,6 @@ __all__ = [
     "AmbiguityProfile",
     "analyse_ambiguity",
     "rank_axes",
-    "save_ambiguity_profile",
-    "load_ambiguity_profile",
-    "per_point_path",
     "reclassify_global",
     "heat_colour",
     "discriminative_colours",
@@ -689,11 +685,11 @@ def _is_global(view_fraction: float, area_fraction: float, cfg: AmbiguityConfig)
 
 def reclassify_global(profile: "AmbiguityProfile",
                       cfg: Optional[AmbiguityConfig] = None) -> "AmbiguityProfile":
-    """Recompute ``is_global`` in place from each axis's stored metrics.
+    """Recompute ``is_global`` in place from each axis's recorded metrics.
 
-    Both inputs are already persisted per axis, so the classification can be revised on a
-    saved profile without re-running the analysis — which costs minutes per part. Same
-    reasoning as ``rank_axes``: keep anything derivable from stored metrics re-derivable.
+    Both inputs are already held per axis, so the classification can be revised on an existing
+    profile without re-running the analysis — which costs minutes per part. Same reasoning as
+    ``rank_axes``: keep anything derivable from the recorded metrics re-derivable.
     """
     cfg = cfg or AmbiguityConfig()
     for ax in profile.axes:
@@ -707,8 +703,8 @@ def rank_axes(profile: "AmbiguityProfile",
               tie_frac: float = 0.05) -> "AmbiguityProfile":
     """(Re)rank a profile's axes in place and pick the dominant one.
 
-    Ranking is a pure function of three already-stored per-axis numbers, so the exponent
-    can be retuned on a saved profile without re-running the analysis — which takes
+    Ranking is a pure function of three already-recorded per-axis numbers, so the exponent
+    can be retuned on an existing profile without re-running the analysis — which takes
     minutes on a large cloud.
 
         score = view_fraction * area_fraction ** area_exponent
@@ -914,9 +910,10 @@ def analyse_ambiguity(mesh: o3d.geometry.TriangleMesh,
     spacing = float(np.median(tree.query(pts, k=2)[0][:, 1]))
     epsilon = max(cfg.epsilon_spacing_factor * spacing, cfg.epsilon_floor_m)
 
-    # rank_area_exponent is recorded, not left at the dataclass default: the sidecar is the
-    # only record of how the stored scores were produced, and `load_ambiguity_profile`
-    # re-ranks from it. Left unset, a profile built with `--rank-exp 0` claimed 2.0.
+    # rank_area_exponent is carried on the profile, not left at the dataclass default: it is
+    # the only record of how these scores were produced, so a caller re-ranking later (see
+    # `rank_axes`) can honour the exponent the analysis actually ran with instead of guessing
+    # the current default. Left unset, a profile built at exponent 0 would claim 2.0.
     profile = AmbiguityProfile(epsilon_m=epsilon, f_tau=cfg.f_tau, diameter_m=diameter,
                                rank_area_exponent=cfg.rank_area_exponent)
 
@@ -1226,137 +1223,3 @@ def _point_line_distance(query: np.ndarray, direction: np.ndarray, point: np.nda
     d = np.asarray(direction, float)
     d = d / (np.linalg.norm(d) + 1e-12)
     return float(np.linalg.norm(v - float(v @ d) * d))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Persistence
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _axis_to_dict(ax: AmbiguityAxis) -> dict:
-    d = asdict(ax)
-    d["direction"] = [float(x) for x in ax.direction]
-    d["point"] = [float(x) for x in ax.point]
-    d["angles_deg"] = [float(x) for x in ax.angles_deg]
-    d["angle_step_deg"] = ax.angle_step_deg()
-    return d
-
-
-def per_point_path(path) -> "Path":
-    """Companion ``.npy`` holding the full per-point heat map for a profile JSON."""
-    from pathlib import Path
-    p = Path(path)
-    return p.with_name(p.stem + "_per_point.npy")
-
-
-def save_ambiguity_profile(profile: AmbiguityProfile, path, per_point: bool = False) -> None:
-    """Write the profile sidecar.
-
-    The JSON carries the axes and a *summary* of ``per_point_discriminative``, because a
-    20 000-element array in JSON is neither readable nor compact.
-
-    With ``per_point=True`` the full array is additionally written to a companion ``.npy``
-    (see :func:`per_point_path`), which is what a matcher needs in order to weight votes by
-    discriminability — the summary cannot be used for that.
-
-    **It is off by default on purpose.** The array is index-aligned with the cloud the
-    analysis ran on, which is the *surface* cloud. The same profile is written next to the
-    edge / feature / flat variants too, where the axes remain valid but the per-point array
-    does not correspond to those clouds' points at all. Passing ``per_point=True`` there
-    would produce a file that looks usable and silently misattributes every score.
-    """
-    if per_point and profile.per_point_discriminative.size:
-        np.save(per_point_path(path), profile.per_point_discriminative.astype(np.float32))
-    disc = profile.per_point_discriminative
-    payload = {
-        "axes": [_axis_to_dict(a) for a in profile.axes],
-        "dominant": _axis_to_dict(profile.dominant) if profile.dominant else None,
-        "n_significant_axes": profile.n_significant_axes,
-        "discriminative_fraction": profile.discriminative_fraction,
-        "frame_changed": profile.frame_changed,
-        "ppf_degeneracy": profile.ppf_degeneracy,
-        "epsilon_m": profile.epsilon_m,
-        "f_tau": profile.f_tau,
-        "rank_area_exponent": profile.rank_area_exponent,
-        "diameter_m": profile.diameter_m,
-        "n_views": len(profile.per_view),
-        "per_view": [
-            {"direction": [float(x) for x in v.direction],
-             "n_visible": v.n_visible,
-             "n_transforms": v.n_transforms,
-             "discriminative_fraction": v.discriminative_fraction}
-            for v in profile.per_view
-        ],
-        "per_point_discriminative_summary": {
-            "n": int(disc.size),
-            "mean": float(disc.mean()) if disc.size else 1.0,
-            "p10": float(np.percentile(disc, 10)) if disc.size else 1.0,
-            "p90": float(np.percentile(disc, 90)) if disc.size else 1.0,
-        },
-    }
-    with open(path, "w") as f:
-        json.dump(payload, f, indent=4)
-
-
-def _axis_from_dict(d: dict) -> AmbiguityAxis:
-    return AmbiguityAxis(
-        direction=np.asarray(d["direction"], dtype=float),
-        point=np.asarray(d["point"], dtype=float),
-        fold=int(d["fold"]),
-        angles_deg=[float(x) for x in d["angles_deg"]],
-        is_global=bool(d["is_global"]),
-        view_fraction=float(d["view_fraction"]),
-        area_fraction=float(d["area_fraction"]),
-        score=float(d["score"]),
-    )
-
-
-def load_ambiguity_profile(path) -> AmbiguityProfile:
-    """Read a profile sidecar, including the per-point heat map when it was written.
-
-    Profiles saved without ``per_point=True`` (and every sidecar written before the
-    companion ``.npy`` existed) load fine with an empty ``per_point_discriminative`` — the
-    axes are the part that most consumers want, and callers already have to handle the
-    empty case because a part with no recovered axes has no heat map either.
-
-    **Everything derivable from the stored metrics is re-derived**, never trusted from the
-    file: `is_global` via :func:`reclassify_global`, and the axis order, `score` and
-    `dominant` via :func:`rank_axes`. A file records measurements; the decisions taken from
-    them belong to the current code.
-
-    Re-ranking is not hypothetical. The `25333MB000` sidecar was written before
-    `rank_area_exponent` existed, so its order came from the old `score = view_fraction`
-    and named a C2 axis as dominant. Re-ranking those same stored numbers puts the
-    off-centroid disc axis first instead — and `dominant` is what selects MechVision's
-    `rotationStrategy` and `angleStep`, so trusting the stored order ships the wrong axis.
-    """
-    with open(path) as f:
-        d = json.load(f)
-    pp = per_point_path(path)
-    disc = np.load(pp).astype(np.float64) if pp.exists() else np.empty(0)
-
-    # A key present but null must fall back to the default, so this cannot be a plain
-    # `.get(key, default)` — and `or` would swallow a deliberate exponent of 0.0.
-    exponent = d.get("rank_area_exponent")
-    exponent = AmbiguityConfig.rank_area_exponent if exponent is None else float(exponent)
-
-    profile = AmbiguityProfile(
-        per_point_discriminative=disc,
-        axes=[_axis_from_dict(a) for a in d.get("axes", [])],
-        dominant=_axis_from_dict(d["dominant"]) if d.get("dominant") else None,
-        n_significant_axes=int(d.get("n_significant_axes", 0)),
-        discriminative_fraction=float(d.get("discriminative_fraction", 1.0)),
-        per_view=[ViewAmbiguity(np.asarray(v["direction"], dtype=float),
-                                int(v["n_visible"]), int(v["n_transforms"]),
-                                float(v["discriminative_fraction"]))
-                  for v in d.get("per_view", [])],
-        frame_changed=bool(d.get("frame_changed", False)),
-        ppf_degeneracy=d.get("ppf_degeneracy", {}),
-        epsilon_m=float(d.get("epsilon_m", 0.0)),
-        f_tau=float(d.get("f_tau", 0.0)),
-        rank_area_exponent=exponent,
-        diameter_m=float(d.get("diameter_m", 0.0)),
-    )
-    reclassify_global(profile)
-    # Ranked with the profile's OWN exponent, so a file saved under a deliberate setting
-    # keeps that intent; only a file that never recorded one adopts the current default.
-    return rank_axes(profile, exponent)

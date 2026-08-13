@@ -17,7 +17,6 @@ Two properties matter and both are asserted here.
 Settings are reduced (fewer viewpoints, lower raycast resolution) so the suite stays
 quick; the defaults in `AmbiguityConfig` are what production uses.
 """
-import json
 import os
 import sys
 
@@ -38,9 +37,7 @@ from geometry.ambiguity import (
     analyse_ambiguity,
     discriminative_colours,
     heat_colour,
-    load_ambiguity_profile,
     rank_axes,
-    save_ambiguity_profile,
 )
 from geometry.geom_utils import trimesh_to_o3d
 
@@ -311,106 +308,88 @@ def test_result_is_scale_invariant(scale):
     assert profile.epsilon_m == pytest.approx(expected, rel=0.15)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 5. Persistence round-trip
-# ─────────────────────────────────────────────────────────────────────────────
-
-def test_profile_round_trips_through_json(tmp_path):
-    profile = _analyse(_prism(6, 0.025, 0.050))
-    path = tmp_path / "ambiguity_profile.json"
-    save_ambiguity_profile(profile, path)
-    back = load_ambiguity_profile(path)
-
-    assert isinstance(back, AmbiguityProfile)
-    assert back.dominant is not None
-    assert back.dominant.fold == profile.dominant.fold
-    assert np.allclose(back.dominant.direction, profile.dominant.direction)
-    assert np.allclose(back.dominant.point, profile.dominant.point)
-    assert back.dominant.angle_step_deg() == pytest.approx(60.0)
-    assert len(back.per_view) == len(profile.per_view)
-
-
 def test_angle_step_matches_the_fold():
     profile = _analyse(_prism(4, 0.025, 0.050))
     assert profile.dominant.fold == 4
     assert profile.dominant.angle_step_deg() == pytest.approx(90.0)
 
 
-def _write_profile(path, axes, exponent=None):
-    """Hand-write a sidecar so the stored order can be made to disagree with the metrics."""
-    payload = {
-        "axes": axes,
-        "dominant": axes[0],
-        "n_significant_axes": len(axes),
-        "discriminative_fraction": 0.5,
-        "frame_changed": False,
-        "ppf_degeneracy": {},
-        "epsilon_m": 0.0025,
-        "f_tau": 0.40,
-        "diameter_m": 0.12,
-        "per_view": [],
-    }
-    if exponent is not None:                 # absent key vs present-but-null are both real
-        payload["rank_area_exponent"] = exponent
-    path.write_text(json.dumps(payload, indent=2))
-    return path
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. Ranking
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# These were originally written against a hand-built sidecar, back when profiles were
+# persisted and `load_ambiguity_profile` re-ranked on read. The persistence layer is gone --
+# every consumer now recomputes the analysis -- but the ranking behaviour it was defending is
+# not, so the cases were kept and re-pointed at `rank_axes` directly.
 
+def _directed_axis(fold, views, area, direction):
+    """An axis with a real direction, for the ranking-order cases below.
 
-def _axis_record(fold, views, area, direction):
-    return {"direction": list(direction), "point": [0.0, 0.0, 0.0], "fold": fold,
-            "angles_deg": [180.0] if fold == 2 else [], "is_global": False,
-            "view_fraction": views, "area_fraction": area,
-            "patch_fraction": 0.65, "best_patch_fraction": 0.70,
-            "score": views}          # the OLD scheme: score == view_fraction
-
-
-# The measured 25333MB000 case: a C2 axis with more views but less coverage, against the
-# off-centroid disc axis that actually flips in real scenes.
-_C2   = _axis_record(2, 0.14, 0.36, (0.0, 0.0, 1.0))
-_DISC = _axis_record(1, 0.10, 0.50, (1.0, 0.0, 0.0))
-
-
-@pytest.mark.parametrize("exponent", [None, 2.0])
-def test_loader_reranks_a_stale_sidecar(tmp_path, exponent):
-    """A sidecar's stored order must not survive into `dominant`.
-
-    Written before the ranking exponent existed, `25333MB000`'s sidecar was ordered by the
-    old `score = view_fraction` and named the C2 axis dominant. `dominant` is what selects
-    MechVision's rotationStrategy and angleStep, so trusting the stored order ships the
-    wrong axis — re-ranking the same stored numbers is what puts the disc axis first.
+    Deliberately not named `_axis`: there is already a `_axis(view_fraction, area_fraction,
+    fold, is_global)` further down for the tie-break tests, and the later definition would win
+    at module scope and silently feed these calls through the wrong signature.
     """
-    path = _write_profile(tmp_path / "ambiguity_profile.json", [_C2, _DISC], exponent)
-    back = load_ambiguity_profile(path)
+    return AmbiguityAxis(
+        direction=np.asarray(direction, dtype=float),
+        point=np.zeros(3),
+        fold=fold,
+        angles_deg=[180.0] if fold == 2 else [],
+        is_global=False,
+        view_fraction=views,
+        area_fraction=area,
+        patch_fraction=0.65,
+        best_patch_fraction=0.70,
+        score=views,                 # the OLD scheme: score == view_fraction
+    )
 
-    assert back.rank_area_exponent == 2.0        # a null/absent key must reach the default
+
+def _stale_profile():
+    """Two axes in the OLD `score = view_fraction` order, i.e. C2 first.
+
+    The measured 25333MB000 case: a C2 axis with more views but less coverage, against the
+    off-centroid disc axis that actually flips in real scenes.
+    """
+    c2 = _directed_axis(2, 0.14, 0.36, (0.0, 0.0, 1.0))
+    disc = _directed_axis(1, 0.10, 0.50, (1.0, 0.0, 0.0))
+    return AmbiguityProfile(axes=[c2, disc], dominant=c2, rank_area_exponent=2.0)
+
+
+def test_rank_axes_overrides_a_stale_order():
+    """A pre-existing axis order must not survive into `dominant`.
+
+    Ordered by the old `score = view_fraction`, `25333MB000` named the C2 axis dominant.
+    `dominant` is what selects MechVision's rotationStrategy and angleStep, so carrying that
+    order forward ships the wrong axis — re-ranking the same numbers puts the disc axis first.
+    """
+    profile = _stale_profile()
+    rank_axes(profile, 2.0)
+
     # views*area^2: disc 0.10*0.25 = 0.0250 beats C2 0.14*0.1296 = 0.0181
-    assert back.dominant is not None
-    assert np.allclose(np.abs(back.dominant.direction), [1.0, 0.0, 0.0]), \
-        "loaded profile kept the stale write-time order instead of re-ranking"
-    assert back.axes[0].area_fraction == pytest.approx(0.50)
+    assert profile.dominant is not None
+    assert np.allclose(np.abs(profile.dominant.direction), [1.0, 0.0, 0.0]), \
+        "kept the stale order instead of re-ranking"
+    assert profile.axes[0].area_fraction == pytest.approx(0.50)
 
 
-def test_loader_honours_a_deliberate_exponent(tmp_path):
-    """A file that recorded its own exponent keeps that intent; only a file that never
-    recorded one adopts the current default."""
-    path = _write_profile(tmp_path / "ambiguity_profile.json", [_C2, _DISC], exponent=0.0)
-    back = load_ambiguity_profile(path)
-
-    assert back.rank_area_exponent == 0.0        # 0.0 is meaningful, not a missing value
-    # At k=0 the score is view_fraction alone, so the C2 axis leads again.
-    assert np.allclose(np.abs(back.dominant.direction), [0.0, 0.0, 1.0])
+def test_rank_axes_honours_a_zero_exponent():
+    """0.0 is a meaningful exponent, not a missing value: at k=0 the score is view_fraction
+    alone, so the C2 axis leads again."""
+    profile = _stale_profile()
+    rank_axes(profile, 0.0)
+    assert np.allclose(np.abs(profile.dominant.direction), [0.0, 0.0, 1.0])
 
 
-def test_rank_axes_is_reversible_on_a_loaded_profile(tmp_path):
+def test_rank_axes_is_reversible():
     """Re-ranking needs no re-analysis — that is what makes the exponent cheap to tune."""
-    path = _write_profile(tmp_path / "ambiguity_profile.json", [_C2, _DISC])
-    back = load_ambiguity_profile(path)
-    assert np.allclose(np.abs(back.dominant.direction), [1.0, 0.0, 0.0])
+    profile = _stale_profile()
 
-    rank_axes(back, 0.0)
-    assert np.allclose(np.abs(back.dominant.direction), [0.0, 0.0, 1.0])
-    rank_axes(back, 2.0)
-    assert np.allclose(np.abs(back.dominant.direction), [1.0, 0.0, 0.0])
+    rank_axes(profile, 2.0)
+    assert np.allclose(np.abs(profile.dominant.direction), [1.0, 0.0, 0.0])
+    rank_axes(profile, 0.0)
+    assert np.allclose(np.abs(profile.dominant.direction), [0.0, 0.0, 1.0])
+    rank_axes(profile, 2.0)
+    assert np.allclose(np.abs(profile.dominant.direction), [1.0, 0.0, 0.0])
 
 
 # ─────────────────────────────────────────────────────────────────────────────

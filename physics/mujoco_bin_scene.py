@@ -46,7 +46,8 @@ class SceneObject:
 
 class MujocoBinScene:
     def __init__(self, part_mesh, part_convex_meshes, n_parts=1, bin_dim=MAX_BIN_DIM, settle_time=5.0, render=True, arrangement: str = "random", stable_pose_R: np.ndarray = None, timestep: float = 0.001,
-                 structure_type: str = "none", structure_height_frac: float = 0.75, clearance_mode: str = "medium"):
+                 structure_type: str = "none", structure_height_frac: float = 0.75, clearance_mode: str = "medium",
+                 body_offset=None):
         # Timestep is the primary anti-tunneling lever: MuJoCo has no continuous collision
         # detection, so per-step displacement (~vel_cap*dt) must stay under ~o_margin. With
         # vel_cap=1.5 m/s and o_margin=1 mm the hard-safe bound is dt <= 6.7e-4; the stiff
@@ -68,6 +69,15 @@ class MujocoBinScene:
 
         self.part_mesh = part_mesh
         self.part_convex_meshes = part_convex_meshes
+        # Translation the CALLER subtracted from its mesh to put the part on the body origin:
+        # `p_body = p_model - body_offset`. Every rotation, spawn height, stable pose and tray
+        # pocket here is computed about (0,0,0), so callers must hand over a centred mesh -- but
+        # the poses this class reports then describe the CENTRED body, not the caller's model
+        # frame. Recording the offset lets `export_scene_state` hand back poses in the frame the
+        # caller actually asked about; see its docstring. Zero (the default) means the caller
+        # centred nothing and the two frames coincide.
+        self.body_offset = (np.zeros(3) if body_offset is None
+                            else np.asarray(body_offset, dtype=np.float64).reshape(3))
         self.n_parts = n_parts
         self.settle_time = settle_time
         self.scene_objects = []
@@ -1147,6 +1157,35 @@ class MujocoBinScene:
         the bin geometry (dims + placement). Camera extrinsics/intrinsics are owned by the
         rendering stage, not the sim, so they are added there.
 
+        **Poses are reported in the CALLER's model frame, not the centred body frame.**
+        ``extract_scene_state`` reports raw MuJoCo body poses, which describe the mesh this
+        class was handed -- and that mesh had to be centred on its own origin (see
+        ``body_offset``). Composing the offset back in here is what makes ``T_gt`` mean
+        "model frame -> world", the same thing ``sample_<i>.ply``'s ``gt_*`` header and
+        ``sample_<i>.npz``'s ``T_gt`` mean, so every pose in an exported scene directory can
+        be compared against ``reference_cloud.ply`` without the reader knowing anything about
+        how the physics body was built.
+
+        It did not always. This used to return the raw body poses while ``SceneStage`` fixed
+        up only the per-instance copies, so ``scene_state.npz`` and ``sample_<i>.*`` disagreed
+        by the mesh AABB offset -- 5.3 mm on a 100x30x20 L-part in the PCA frame, 13.5 mm in
+        the ambiguity frame, and larger the further the model frame origin sits from the mesh
+        bounding-box centre.
+
+        ``body_offset`` is written out as permanent provenance, not as a flag: it is the only
+        record of where the physics body origin sat relative to the model frame, so it is what
+        lets anyone recover the raw body poses -- to line a scene up against MuJoCo state, or
+        to rebuild the sim that produced it -- from the npz alone. Keep writing it even once
+        no reader cares which frame the file is in.
+
+        It doubles, for now, as the marker for the change above: a ``scene_state.npz``
+        **without** the key predates it and its ``T_gt`` is in the centred body frame. That
+        reading of the key expires once no pre-change scene directories remain; the key itself
+        does not.
+
+        Note ``quaternions_wxyz`` is unaffected -- the offset is a pure translation -- so it
+        is equally valid in either frame. ``positions`` follows ``T_gt``.
+
         Returns a flat dict of numpy arrays ready to splat into np.savez.
         """
         state = self.extract_scene_state()
@@ -1159,11 +1198,19 @@ class MujocoBinScene:
             T_gt[i, :3, :3] = R.from_quat(quaternions[i], scalar_first=True).as_matrix()
             T_gt[i, :3, 3]  = positions[i]
 
+        # p_world = T_body @ (p_model - body_offset) = (T_body @ T_shift) @ p_model
+        T_shift = np.eye(4)
+        T_shift[:3, 3] = -self.body_offset
+        T_gt = T_gt @ T_shift
+        positions = T_gt[:, :3, 3].copy()
+
         return {
             "body_names":       np.array(body_names),
-            "positions":        positions,                                   # (n,3) world xyz
+            "positions":        positions,                                   # (n,3) world xyz of the model origin
             "quaternions_wxyz": quaternions,                                 # (n,4) world wxyz
-            "T_gt":             T_gt,                                        # (n,4,4) part_frame -> world
+            "T_gt":             T_gt,                                        # (n,4,4) model_frame -> world
+            "body_offset":      np.asarray(self.body_offset, dtype=np.float64),  # model origin -> body origin; provenance, keep
+
             "bin_dim":          np.asarray(self.bin_dim, dtype=np.float64),  # (width, length, height, wall_thickness) m
             "bin_transform":    np.asarray(self.bin_transform, dtype=np.float64),
             "camera_distance":  np.float64(self.camera_distance),

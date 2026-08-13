@@ -39,6 +39,7 @@ from registration.ppf_saliency.bench import SYNTH_ROOT, MESH_ROOT, REPO_ROOT
 from registration.ppf_saliency.bench.arms import (ARMS, ArmContext, build_arm,
                                                   resolve_weights)
 from registration.ppf.bench.dataset import list_scenes, load_reference, load_scene
+from geometry.geom_utils import reference_frames_agree
 from registration.ppf_saliency.bench.metrics import (LOOSE, TIGHT, evaluate_pose, summarise,
                            symmetry_transforms_from_bop,
                            symmetry_transforms_from_profile)
@@ -69,21 +70,74 @@ def symmetry_class(rec: Optional[dict]) -> str:
     return "asymmetric"
 
 
-def _load_profile(scene_dir: str):
-    from geometry.ambiguity import load_ambiguity_profile
-    p = os.path.join(scene_dir, "ambiguity_profile.json")
-    if not os.path.exists(p):
-        return None
-    try:
-        return load_ambiguity_profile(p)
-    except Exception:
-        return None
+def _bundle_mesh(part: str) -> str:
+    """The part's own exported STL -- the only mesh guaranteed to share the cloud's frame."""
+    return os.path.join(REPO_ROOT, "output", "reference_pcd", part, f"{part}.stl")
+
+
+def _needs_profile(arm_names: List[str], rec: Optional[dict], mode: str) -> bool:
+    """Does anything in this run actually consume the ambiguity profile?
+
+    The analysis costs 1-3 min per part, so it is not paid unless something reads it: a
+    heat-weighted arm, or a part with no BOP annotation, where the profile's global axes are
+    the only symmetry group available to score against. ``always`` forces it so the
+    ``ambiguity_tagged`` and axis/phase diagnostics are populated on uniform-only runs too.
+    """
+    if mode == "never":
+        return False
+    if mode == "always":
+        return True
+    return any(ARMS[a].needs_heat for a in arm_names) or rec is None
+
+
+def _compute_profile(part: str, ref_pts: np.ndarray, ref_nrm: np.ndarray):
+    """Analyse this part's ambiguity, in the frame its scenes are actually in.
+
+    Returns ``(profile, None)`` or ``(None, reason)``.
+
+    Two things make this correct, and both are easy to get wrong:
+
+    * **The mesh must be the bundle's own STL.** ``SaveStage`` writes
+      ``output/reference_pcd/<part>/<part>.stl`` in the same run and the same model frame as
+      ``<part>_surface.ply``, which is the cloud each scene's ``reference_cloud.ply`` is
+      written from. A BOP mesh under ``mesh_raw/`` is in the pre-recentre frame *and* in
+      millimetres; pairing one with a scene cloud does not raise, it silently produces a
+      visibility sweep over a sliver (measured: 13% of points ever visible against 99%, and
+      12 reported axes against 3). ``pairing_error`` is what rejects that, so it runs before
+      the analysis rather than after something looks wrong.
+    * **Analysing on the scene's own reference cloud** makes ``per_point_discriminative``
+      index-aligned with ``ref_pts`` by construction. The sidecar this replaced could only
+      hope for that alignment and check it after the fact.
+    """
+    from geometry.ambiguity import AmbiguityConfig, analyse_ambiguity
+    from geometry.geom_utils import pairing_error
+    import open3d as o3d
+
+    path = _bundle_mesh(part)
+    if not os.path.exists(path):
+        return None, f"no bundle STL at {os.path.relpath(path, REPO_ROOT)}"
+
+    mesh = o3d.io.read_triangle_mesh(path)
+    if len(mesh.triangles) == 0:
+        return None, f"bundle STL has no triangles: {os.path.relpath(path, REPO_ROOT)}"
+    mesh.compute_vertex_normals()
+
+    why = pairing_error(mesh, ref_pts)
+    if why is not None:
+        return None, f"bundle STL does not match the scene cloud -- {why}"
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(ref_pts)
+    pcd.normals = o3d.utility.Vector3dVector(ref_nrm)
+    print("    analysing pose ambiguity (1-3 min)...", flush=True)
+    return analyse_ambiguity(mesh, pcd, AmbiguityConfig()), None
 
 
 def run_part(part: str, arm_names: List[str], models_info: Dict[str, dict],
              max_scenes: Optional[int] = None,
              model_points: int = 500,
-             max_instances: Optional[int] = None) -> Dict[str, list]:
+             max_instances: Optional[int] = None,
+             ambiguity: str = "auto") -> Dict[str, list]:
     """Every arm against the instances of one part.
 
     ``max_instances`` caps the per-part budget, and matters more than it looks. Instance
@@ -103,6 +157,21 @@ def run_part(part: str, arm_names: List[str], models_info: Dict[str, dict],
     rec = models_info.get(part)
     results: Dict[str, list] = defaultdict(list)
 
+    # ONCE per part, not per scene. Every scene of a part shares one reference cloud --
+    # `generate_scenes.py` refuses to mix model frames within a part -- so the analysis is
+    # valid for all of them, and paying for it per scene would multiply a 1-3 min cost by the
+    # scene count for an identical answer.
+    profile = None
+    analysed_pts = None
+    if _needs_profile(arm_names, rec, ambiguity):
+        base_pts, base_nrm = load_reference(scenes[0])
+        if len(base_pts) >= 100:
+            profile, why = _compute_profile(part, base_pts, base_nrm)
+            if why is not None:
+                print(f"    [no ambiguity] {why}")
+            else:
+                analysed_pts = base_pts
+
     for scene_dir in scenes:
         if max_instances is not None and used >= max_instances:
             break
@@ -110,10 +179,17 @@ def run_part(part: str, arm_names: List[str], models_info: Dict[str, dict],
         if len(ref_pts) < 100:
             continue
         cfg = PPFConfig.derive(ref_pts, model_target_points=model_points)
-        profile = _load_profile(scene_dir)
         heat = None
         if profile is not None and profile.per_point_discriminative.size == len(ref_pts):
-            heat = profile.per_point_discriminative
+            # The heat map is index-aligned with the cloud it was analysed on. Scenes of one
+            # part are supposed to share that cloud, but `generate_scenes.py` is resumable and
+            # a part can accumulate scenes across sessions, so agreement is checked rather
+            # than assumed -- scoring the right values against the wrong points is silent.
+            why = reference_frames_agree(ref_pts, analysed_pts)
+            if why is None:
+                heat = profile.per_point_discriminative
+            else:
+                print(f"    [no heat] {os.path.basename(scene_dir)}: {why}")
 
         # Normals estimated over 2*tau: the same neighbourhood PPFConfig assumes when it
         # turns depth noise into an angular bin. It moves recall by ~20 points, so it is
@@ -228,6 +304,10 @@ def main() -> None:
                          "table: a 63mm part packs ~160 instances per scene against ~20 for "
                          "a 190mm one, so uncapped pooling is dominated by the small parts")
     ap.add_argument("--model-points", type=int, default=500)
+    ap.add_argument("--ambiguity", choices=("auto", "always", "never"), default="auto",
+                    help="when to run the 1-3 min per-part ambiguity analysis. auto = only "
+                         "when a heat arm needs it or the part has no BOP annotation; always "
+                         "= also populate the 'tag' column on uniform-only runs; never = skip")
     ap.add_argument("--out", default=None,
                     help="write raw per-instance results as JSON. A bare filename lands in "
                          "output/bench/, which is already gitignored -- these run to several "
@@ -259,7 +339,7 @@ def main() -> None:
         cls = symmetry_class(models_info.get(part))
         print(f"[{i}/{len(parts)}] {part} ({cls}) ...", flush=True)
         res = run_part(part, arm_names, models_info, args.scenes, args.model_points,
-                       args.max_instances)
+                       args.max_instances, args.ambiguity)
         if not res:
             print("    no scenes — skipped")
             continue

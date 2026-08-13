@@ -10,19 +10,33 @@ Synthetic point cloud data generation for industrial bin-picking:
 ## Architecture Principle
 Parametric model first, learned model targets the residual. The CVAE+Flow is not a replacement for the parametric noise model — it learns what the parametric model cannot explain. Building learned-first produces redundant representations and masks systematic biases.
 
-## Conda Env Locations
-Use pcd-sampling for all scripts in the workspace.
+## Conda Env
+**One env: `autotune`**, defined by `environment.yaml`. (`pcd-sampling` is obsolete — if you
+find it named anywhere, that reference is stale.)
 
-base                   C:\ProgramData\anaconda3
-pcd-sampling           C:\Users\Hmgics\.conda\envs\pcd-sampling
-autotune               C:\Users\Hmgics\.conda\envs\autotune
+**Never hardcode an interpreter path in code, docs or docstrings.** The install location is
+user- and OS-specific, and Windows and Linux do not even agree on the shape
+(`<env>\python.exe` vs `<env>/bin/python`), so a literal path cannot be correct in both. Use
+the `PCL_PY` environment variable, set once per machine:
 
-use "C:\Users\Hmgics\.conda\envs\pcd-sampling\python.exe" for running scripts
+```bash
+export PCL_PY="$LOCALAPPDATA/anaconda3/envs/autotune/python.exe"   # Git Bash on Windows
+export PCL_PY="$HOME/miniconda3/envs/autotune/bin/python"          # Linux / macOS
+```
+```powershell
+$env:PCL_PY = "$env:LOCALAPPDATA\anaconda3\envs\autotune\python.exe"
+```
 
-**Dependency gaps, verified 2026-08-08.** `pcd-sampling` has open3d / scipy / trimesh but
-**not pytest, mujoco or optuna**, so the test suite and every full-app path (which imports
-`physics.mujoco_bin_scene` via `stages/import_mesh_stage.py`) fail there. `autotune` has mujoco
-but also no pytest. Install pytest into `pcd-sampling` before running tests.
+Then `"$PCL_PY" -m pytest ...`. Note `conda` is **not on PATH** in Git Bash or PowerShell here,
+so `conda run` / `conda activate` are not available as a substitute.
+
+**Optional dependency, deliberately not installed.** `bop_toolkit_lib` is commented out in
+`environment.yaml` and must be installed `--no-deps` (its pyproject pins `numpy<2.0.0`, which
+would drag open3d and scipy down with it). Without it,
+`registration/ppf_saliency/bench/metrics.py::evaluate_pose` raises at its top-level import, so
+the `ppf_saliency` ablation and one test in `registration/tests` cannot run. `registration/ppf`
+implements the same metrics directly and is unaffected — that is the point of its dependency
+pin.
 
 ## Package Dependency Graph
 ```

@@ -32,8 +32,8 @@ part of any package here.
 
 ```bash
 python bench/fetch_dataset.py --dataset tless             # 30 industrial meshes + symmetry GT
-python bench/generate_scenes.py --meshes mesh_raw/tless --scenes 4
 python bench/validate_ambiguity.py --verbose              # ambiguity module vs BOP
+python bench/generate_scenes.py --meshes mesh_raw/tless --scenes 4
 
 # then, from the packages:
 python -m registration.ppf.bench.run --all \
@@ -42,11 +42,16 @@ python -m registration.ppf.bench.run --all \
 python -m registration.ppf_saliency.bench.ablation --all --out ablation.json
 ```
 
+`validate_ambiguity.py` runs straight after the fetch: it analyses the BOP meshes directly and
+needs no scenes. It is minutes per part, so use `--parts obj_000005 ...` to spot-check.
+
 Scene generation is the slow step (~3 min per part per scene, most of it VHACD convex
 decomposition, which is one-time per part) and is **resumable** — a part that already has
-enough scenes is skipped, and one that fails is logged and stepped over. Pass
-`--no-ambiguity` when only the vanilla matcher will consume the output; it saves 1-3 min per
-part, and only the heat-map weighting arms read that sidecar.
+enough scenes is skipped, and one that fails is logged and stepped over. `--no-ambiguity`
+saves 1-3 min per part, but it is **not** merely a speed switch: it changes the exported model
+frame from ambiguity-aligned to PCA, so scenes produced with and without it are not
+interchangeable. It no longer starves any downstream arm — `ablation.py` recomputes the
+analysis itself, from each part's exported STL.
 
 Raw output goes to `output/synthetic_target/`, which is gitignored.
 
@@ -81,5 +86,6 @@ counter over instances passing the 2D filter.
 normal install downgrades numpy, open3d and scipy together. `registration/ppf/bench/metrics.py`
 deliberately does not use it at all; `registration/ppf_saliency/bench/metrics.py` still does.
 
-**`fetch_dataset.py` needs `requests` + `certifi`**, which are present in `pcd-sampling` but
-not in `autotune`. Everything else here runs in either.
+**`fetch_dataset.py` needs `requests` + `certifi`.** `requests` is imported directly at module
+scope, so it is a hard dependency of that script even though `environment.yaml` currently picks
+it up transitively rather than pinning it.
