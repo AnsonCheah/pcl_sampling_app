@@ -240,7 +240,6 @@ class RenderStage(BaseStage):
 
         voxel_size =  0.001
         ref_xyz = np.asarray(self.app.down_pcd.points)
-        min_overlap = 0.1
         bin_pcd = None
 
         # 2D candidate filter (mirrors real Mask2Former post-filter): per-part aspect-ratio
@@ -263,7 +262,6 @@ class RenderStage(BaseStage):
 
             if inst_id == bin_geom_id:
                 bin_pcd = copy.deepcopy(inst_pcd_downsampled)
-                self.app.synthetic_scenes["bin_pcd"] = bin_pcd
                 continue
 
             xyz_inst = np.asarray(inst_pcd_downsampled.points)
@@ -276,14 +274,6 @@ class RenderStage(BaseStage):
                 print(f"[WARN] Failed to compute overlap for instance {inst_id} with {len(xyz_inst)} points: {e}")
                 overlap = 0.0
             precheck_pass = True
-
-            # --- Legacy 3D gates (point count + overlap) — kept for reference, disabled. ---
-            # if not (min(self.app.point_count_range)<=len(xyz_inst)<=max(self.app.point_count_range)):
-            #     print(f"[skip] Instance {inst_id} point count out of threshold {self.app.point_count_range}: {len(xyz_inst)}")
-            #     precheck_pass = False
-            # if overlap < min_overlap:
-            #     print(f"[skip] Instance {inst_id}: overlap={overlap:.2f} < {min_overlap}")
-            #     precheck_pass = False
 
             # --- 2D candidate filter (aspect-ratio + area-ratio), as the real network does. ---
             m = seg_metrics.get(inst_id)

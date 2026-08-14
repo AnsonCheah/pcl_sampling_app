@@ -8,7 +8,7 @@ The sampling app writes `output/reference_pcd/<part>/`; MechVision matches again
 the library got a different part from the one the app produced.
 
 **One library entry per part, holding one cloud.** Coarse and fine always share a cloud type
-(see `search_config.PHASE1_REGIMES`), so the regime is expressed by *which* cloud is in the
+(see `search_config.REGIMES`), so the regime is expressed by *which* cloud is in the
 folder, not by having several:
 
     3d_matching/<part>/

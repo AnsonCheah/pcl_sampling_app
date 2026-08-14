@@ -504,7 +504,12 @@ def get_feature_vector(ws: WarmStart) -> list:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_reference_pcd(model_path: str) -> o3d.geometry.PointCloud:
-    """Load a PLY point cloud and estimate normals if missing."""
+    """Load a PLY point cloud, estimating normals if the file carries none."""
+    # Open3D returns an EMPTY cloud for a missing path, which then fails several frames
+    # later inside orient_normals_consistent_tangent_plane with "No normals in the
+    # PointCloud" — naming the real problem here saves that hunt.
+    if not os.path.isfile(model_path):
+        raise FileNotFoundError(f"reference cloud not found: {model_path}")
     pcd = o3d.io.read_point_cloud(model_path)
     if not pcd.has_normals():
         pcd.estimate_normals(

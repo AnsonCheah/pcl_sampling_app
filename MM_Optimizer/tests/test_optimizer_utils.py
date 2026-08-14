@@ -33,7 +33,7 @@ if _ROOT not in sys.path:
 
 from MM_Optimizer.eval_cache      import EvalCache
 from MM_Optimizer.mesh_analysis   import analyze_mesh, load_reference_pcd
-from MM_Optimizer.optimizer       import Optimizer, PROJ_NAME, MM_MODEL_ROOT
+from MM_Optimizer.mv_evaluator    import MVEvaluator, PROJ_NAME
 from MM_Optimizer.optimizer_utils import list_synthetic_scenes
 import MM_Optimizer.search_config  as SC
 
@@ -42,7 +42,11 @@ log = logging.getLogger(__name__)
 
 PART       = "25333MB000"
 SCENES_DIR = os.path.join(_ROOT, "output", "synthetic_target", PART)
-MODEL_PATH = os.path.join(MM_MODEL_ROOT, f"{PART}_surface", f"{PART}_surface.ply")
+# Warm-start cloud comes from the app's own bundle, exactly as tuning_stage/tuner do.
+# NOT from the deployed MechVision library: model_sync writes <part>/<part>.ply there,
+# and it is rewritten per regime.
+MODEL_PATH = os.path.join(_ROOT, "output", "reference_pcd", PART,
+                          f"{PART}_surface", f"{PART}_surface.ply")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -232,8 +236,8 @@ def test_evaluate_structure():
         projects = client.get_projects()
         assert PROJ_NAME in projects, f"Project '{PROJ_NAME}' not loaded: {projects}"
 
-        opt    = Optimizer(PART, client, projects[PROJ_NAME], groups, ws,
-                           cache=None, use_two_pass=False, dry_run=False)
+        opt    = MVEvaluator(PART, client, projects[PROJ_NAME], groups, ws,
+                           cache=None, dry_run=False)
         coarse = opt._default_coarse()
         fine   = opt._default_fine()
         scenes = opt._sample_scenes(3)
@@ -279,8 +283,8 @@ def test_cache_integration():
     try:
         projects = client.get_projects()
         cache    = EvalCache(cache_path, enabled=True)
-        opt      = Optimizer(PART, client, projects[PROJ_NAME], groups, ws,
-                             cache=cache, use_two_pass=False)
+        opt      = MVEvaluator(PART, client, projects[PROJ_NAME], groups, ws,
+                             cache=cache)
 
         coarse = opt._default_coarse()
         fine   = opt._default_fine()

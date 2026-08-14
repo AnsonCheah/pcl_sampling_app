@@ -1,52 +1,32 @@
 """
-optuna_optimizer.py — Fully Joint Optuna optimizer for MechVision pose estimation
-------------------------------------------------------------------------------------
-Replaces all three staged studies (Stage 1a/1b/2) with a single joint study covering
-all 16–18 coarse+fine parameters at once using multi-objective Optuna. Three samplers
-share the same search space and warm-start seed: NSGA-II (default), TPE, and GP
-(Gaussian process). Select via --sampler / the `sampler` constructor arg.
+tuner.py — MechVision pose-estimation parameter tuner
+-----------------------------------------------------
+`Tuner` extends `MVEvaluator` with a multi-objective Optuna study over all 16-18 coarse
+and fine parameters at once. Three samplers share one search space and warm-start seed:
+NSGA-II, TPE, and GP; select with --sampler or the `sampler` argument.
 
-The MechVision evaluation harness (scene sampling, config evaluation, Phase-1 regime
-gate, Phase-4 symmetry, export) is provided by MVEvaluator in mv_evaluator.py; this
-module owns only the joint-study sampler orchestration.
-
-Architecture
-------------
-- All params (refStep, distQ, coarse remaining, fine) suggested in one `suggest_params_joint`
-  call per trial. No stage isolation between coarse and fine.
-- referredStep uses fixed bounds [1, REFSTEP_BOUNDS[1]]; the constraint referredStep ≤ refStep
-  is enforced via NSGAIISampler(constraints_func=_referredstep_constraint) + an early-return
-  guard in _objective_joint that prevents MechVision blowup without relying on dynamic bounds.
-- Edge-only params (filterCandidatePoseByAxis, angleThreshold) are conditionally suggested
-  only when coarse_mode=1 (edge).
-- Multi-round: same study extended by calling study.optimize() again in round 1+.
-
-Key design decisions
---------------------
-- NSGAIISampler(population_size=100, constraints_func=_referredstep_constraint): population-
-  based search handles multi-modal landscape (surface vs edge regimes) and mixed types
-  (int/float/bool/categorical) natively via genetic crossover.
-- create_study(directions=["maximize","minimize"]): multi-objective (coverage, mean_time).
-  Winner selected from Pareto front: max coverage first, min time as tiebreaker.
-- Minimal pruning (MOO can't use trial.report/should_prune): (0) referredStep
-  constraint short-circuit (early-return, no MV call), (1) coverage floor, and
-  (2) a FIXED absolute time safety cap. There is deliberately NO competitive time
-  pruning — the old best_mean_time × RATIO guard ratcheted down after a fast
-  low-quality trial and cascaded into pruning ~90% of trials, starving the sampler
-  and biasing away from the slow-but-accurate (precision-first) region.
-- The multi-objective objective returns (coverage, mean_time); the sampler resolves
-  the time/accuracy trade-off via the Pareto front, not via pruning.
-- Phases 0 (mesh analysis warm-start), 1 (regime gate), and 4 (symmetry) are unchanged and
-  delegate to the wrapped Optimizer instance.
-- Visualization: after run(), exports all Optuna plots to a timestamped folder.
-- SQLite storage enables crash-resume (skipped in dry_run).
+Non-obvious behaviour
+---------------------
+- The objective returns (coverage, mean_time) and the winner comes off the Pareto front:
+  max coverage first, min time as tiebreaker. The trade-off is resolved there, not by
+  pruning.
+- referredStep <= refStep is enforced twice: `constraints_func` on the sampler, plus an
+  early-return guard in `_objective`. The guard is what prevents a MechVision blowup;
+  the sampler constraint only steers away from that region.
+- Pruning is deliberately minimal: a coverage floor and a FIXED absolute time cap. There
+  is no competitive time pruning — a `best_mean_time × ratio` guard ratchets down after
+  one fast low-quality trial and then prunes most of the search, biasing away from the
+  slow-but-accurate region that matters here.
+- Edge-only params are suggested only when coarse_mode=1, and the samplers use
+  group=True so surface and edge trials form separate joint groups.
+- SQLite storage gives crash-resume; rounds extend the same study, so the sampler keeps
+  its model across them.
 
 CLI
 ---
-  python MM_Optimizer/optuna_optimizer.py --part 25333MB000 [--dry_run]
-      [--n_trials_joint N] [--n_rounds N]
-      [--scenes_dir PATH] [--m_full N] [--no_cache] [--seed N]
-      [--export_best] [--storage PATH]
+  python MM_Optimizer/tuner.py --part 25333MB000 [--dry_run]
+      [--n_trials N] [--n_rounds N] [--sampler nsgaii|tpe|gp]
+      [--scenes_dir PATH] [--m_full N] [--no_cache] [--seed N] [--storage PATH]
 """
 
 import argparse
@@ -82,10 +62,10 @@ log = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# suggest_params_joint — all 16/18D params in one function
+# suggest_params — all 16/18D params in one function
 # ─────────────────────────────────────────────────────────────────────────────
 
-def suggest_params_joint(
+def suggest_params(
     trial: optuna.Trial,
     regime: dict,
     pairs_candidates: List[int],
@@ -97,21 +77,21 @@ def suggest_params_joint(
     suggested when coarse_mode=1. group=True in the sampler ensures surface and edge
     trials form separate joint groups, preventing missing-value noise.
 
-    Returns flat dict suitable for splitting into coarse/fine via _split_joint_params().
+    Returns flat dict suitable for splitting into coarse/fine via _split_params().
     """
     min_lo, min_hi, width_lo, width_hi = voxel_bounds
     lo_ref, hi_ref = SC.REFSTEP_BOUNDS
-    dlo, dhi       = SC.OPTUNA_DISTQ_BOUNDS
-    vlo, vhi       = SC.OPTUNA_VOTERATIO_BOUNDS
+    dlo, dhi       = SC.DISTQ_BOUNDS
+    vlo, vhi       = SC.VOTERATIO_BOUNDS
     rlo            = SC.REFSTEP_BOUNDS[0]   # lower = 1
-    olo, ohi       = SC.OPTUNA_OUTPUTNUM_BOUNDS
+    olo, ohi       = SC.OUTPUTNUM_BOUNDS
 
     # ── Coarse params ─────────────────────────────────────────────────────────
     coarse_mode         = regime["coarse_mode"]   # fixed by Phase 1; not a free param
 
     refStep             = trial.suggest_int(  "refStep",  lo_ref, hi_ref)
     distQ               = trial.suggest_float("distQ",    dlo,    dhi)
-    angleQuantification = trial.suggest_categorical("angleQuantification", SC.OPTUNA_ANGLQ_CHOICES)
+    angleQuantification = trial.suggest_categorical("angleQuantification", SC.ANGLQ_CHOICES)
     pairs_i             = trial.suggest_int(  "pairs_idx",  0, len(pairs_candidates) - 1)
     voteRatio           = trial.suggest_float("maxVoteRatio", vlo, vhi)
     referredStep        = trial.suggest_int("referredStep", rlo, hi_ref)
@@ -121,7 +101,7 @@ def suggest_params_joint(
     vox_w               = trial.suggest_float("voxel_width_mm",    width_lo, width_hi)
 
     # Edge-only params — conditionally suggested so TPE models them in a separate group
-    atlo, athi = SC.OPTUNA_ANGLETHRESH_BOUNDS
+    atlo, athi = SC.ANGLETHRESH_BOUNDS
     if coarse_mode == 1.0:
         filter_by_axis = trial.suggest_categorical("filterByAxis", [True, False])
         if filter_by_axis:
@@ -134,8 +114,8 @@ def suggest_params_joint(
 
     # ── Fine params ───────────────────────────────────────────────────────────
     fine_mode  = regime["fine_mode"]   # fixed by Phase 1
-    oplo, ophi = SC.OPTUNA_OPAPP_BOUNDS
-    dvlo, dvhi = SC.OPTUNA_DEVCAP_BOUNDS
+    oplo, ophi = SC.OPAPP_BOUNDS
+    dvlo, dvhi = SC.DEVCAP_BOUNDS
     opApproach = trial.suggest_int("opApproach", oplo, ophi)
     devCap     = trial.suggest_int("devCap",     dvlo, dvhi)
     visibleSurf = trial.suggest_categorical("visibleSurf", [True, False])
@@ -168,7 +148,7 @@ def suggest_params_joint(
     }
 
 
-def _split_joint_params(p: dict) -> Tuple[dict, dict]:
+def _split_params(p: dict) -> Tuple[dict, dict]:
     """Convert flat joint param dict → (coarse_dict, fine_dict)."""
     coarse_mode = p["coarse_mode"]
     fine_mode   = p["fine_mode"]
@@ -210,7 +190,7 @@ def _expand_winner_params(
     """Reconstruct the full expanded param dict from winner.params (short trial-level names).
 
     winner.params only contains names as used in trial.suggest_*; this mirrors the
-    transformation in suggest_params_joint to produce the same expanded dict.
+    transformation in suggest_params to produce the same expanded dict.
     """
     p = trial_params
     pairs_i  = p["pairs_idx"]
@@ -255,7 +235,7 @@ def _expand_winner_params(
 # Warm-start builders
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_warm_joint(
+def _build_warm(
     coarse_dict: dict,
     fine_dict: dict,
     regime: dict,
@@ -268,14 +248,14 @@ def _build_warm_joint(
     Clamps referredStep to refStep so the enqueued trial is valid (external dict may violate this).
     """
     min_lo, min_hi, width_lo, width_hi = voxel_bounds
-    vlo, vhi       = SC.OPTUNA_VOTERATIO_BOUNDS
-    olo, ohi       = SC.OPTUNA_OUTPUTNUM_BOUNDS
+    vlo, vhi       = SC.VOTERATIO_BOUNDS
+    olo, ohi       = SC.OUTPUTNUM_BOUNDS
     lo_ref, hi_ref = SC.REFSTEP_BOUNDS
     rlo, rhi       = SC.REFSTEP_BOUNDS   # same as REFSTEP_BOUNDS (1–20)
-    dlo, dhi       = SC.OPTUNA_DISTQ_BOUNDS
+    dlo, dhi       = SC.DISTQ_BOUNDS
 
     # Snap angleQ to nearest valid categorical value
-    aq_choices = SC.OPTUNA_ANGLQ_CHOICES
+    aq_choices = SC.ANGLQ_CHOICES
     aq_val = coarse_dict.get("angleQuantification", aq_choices[0])
     aq_snap = min(aq_choices, key=lambda c: abs(c - aq_val))
 
@@ -292,8 +272,8 @@ def _build_warm_joint(
     vox_w   = float(np.clip(max_vox - min_vox, width_lo, width_hi))
 
     # Fine integer indices
-    oplo, ophi = SC.OPTUNA_OPAPP_BOUNDS
-    dvlo, dvhi = SC.OPTUNA_DEVCAP_BOUNDS
+    oplo, ophi = SC.OPAPP_BOUNDS
+    dvlo, dvhi = SC.DEVCAP_BOUNDS
     op  = int(np.clip(round(fine_dict.get("operationApproach", 1.0)),           oplo, ophi))
     dev = int(np.clip(round(fine_dict.get("deviationCorrectionCapacity", 0.0)), dvlo, dvhi))
 
@@ -318,7 +298,7 @@ def _build_warm_joint(
         "normalAng":            bool(fine_dict.get("considerErrorofNormalAngles", False)),
     }
     if regime["coarse_mode"] == 1.0:
-        atlo, athi = SC.OPTUNA_ANGLETHRESH_BOUNDS
+        atlo, athi = SC.ANGLETHRESH_BOUNDS
         p["filterByAxis"]   = bool(coarse_dict.get("filterCandidatePoseByAxis", True))
         p["angleThreshold"] = int(np.clip(coarse_dict.get("angleThreshold", 135), atlo, athi))
     return p
@@ -332,7 +312,7 @@ def _referredstep_constraint(trial: optuna.trial.FrozenTrial) -> List[float]:
     """NSGA-II constraints_func: returns [violation] where >0 means infeasible.
 
     Violation = referredStep - refStep when referredStep > refStep, else 0.
-    The value is written by _objective_joint's early-return guard before the
+    The value is written by _objective's early-return guard before the
     trial completes, so it is available on the FrozenTrial passed here.
     """
     return [float(trial.user_attrs.get("constraint_violation", 0.0))]
@@ -393,13 +373,14 @@ def _select_pareto_winner(study: optuna.Study) -> optuna.trial.FrozenTrial:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# OptunaOptimizer
+# Tuner
 # ─────────────────────────────────────────────────────────────────────────────
 
-SAMPLER_CHOICES = ("nsgaii", "tpe", "gp")
+SAMPLER_CHOICES = SC.SAMPLER_CHOICES
+SAMPLER_DEFAULT = SC.SAMPLER_DEFAULT
 
 
-class OptunaOptimizer:
+class Tuner(MVEvaluator):
     """Fully joint Optuna optimizer for MechVision pose estimation.
 
     Replaces Phases 2–3–5–6 of the hierarchical coordinate descent with a
@@ -414,8 +395,8 @@ class OptunaOptimizer:
     warm_start     : WarmStart from mesh_analysis.analyze_mesh().
     cache          : EvalCache instance, or None to disable.
     dry_run        : Build param dicts but do not call MechVision.
-    n_trials_joint : Round 0 trial budget (default: SC.OPTUNA_N_TRIALS_JOINT).
-    n_rounds       : Number of optimization rounds (default: SC.OPTUNA_N_ROUNDS).
+    n_trials : Round 0 trial budget (default: SC.N_TRIALS).
+    n_rounds       : Number of optimization rounds (default: SC.N_ROUNDS).
     seed           : Random seed for reproducibility.
     storage_path   : SQLite DB path prefix for crash-resume, e.g. "results/"
                      (include a trailing separator to keep DBs in a directory).
@@ -423,7 +404,7 @@ class OptunaOptimizer:
                      None = in-memory study (no persistence).
     sampler        : Joint-study sampler — "nsgaii" (default), "tpe", or "gp".
                      All three run multi-objective (coverage, mean_time) over the
-                     same suggest_params_joint search space and warm-start seed.
+                     same suggest_params search space and warm-start seed.
                      "nsgaii" enforces referredStep ≤ refStep via constraints_func;
                      "tpe" uses multivariate=True, group=True to handle the
                      conditional edge-only params;
@@ -441,31 +422,30 @@ class OptunaOptimizer:
         warm_start,
         cache:          Optional[EvalCache] = None,
         dry_run:        bool = False,
-        n_trials_joint: Optional[int] = None,
+        n_trials: Optional[int] = None,
         n_rounds:       Optional[int] = None,
         seed:           int = 42,
         storage_path:   Optional[str] = None,
         pos_thresh_k:     float = 0.01,
         adaptive_thresh:  bool  = True,
-        sampler:          str   = "nsgaii",
+        sampler:          str   = SAMPLER_DEFAULT,
     ):
         if sampler not in SAMPLER_CHOICES:
             raise ValueError(
                 f"sampler={sampler!r} not in {SAMPLER_CHOICES}")
-        self._sampler = sampler
-        self.opt = MVEvaluator(
+        super().__init__(
             part_name    = part_name,
             client       = client,
             project_id   = project_id,
             scene_groups = scene_groups,
             warm_start   = warm_start,
             cache        = cache,
-            use_two_pass = False,
             dry_run      = dry_run,
         )
-        self.n_trials_joint  = (n_trials_joint if n_trials_joint is not None
-                                else SC.OPTUNA_N_TRIALS_JOINT)
-        self.n_rounds        = n_rounds if n_rounds is not None else SC.OPTUNA_N_ROUNDS
+        self._sampler = sampler
+        self.n_trials  = (n_trials if n_trials is not None
+                                else SC.N_TRIALS)
+        self.n_rounds        = n_rounds if n_rounds is not None else SC.N_ROUNDS
         self._seed           = seed
         self._storage_path   = storage_path
 
@@ -473,7 +453,7 @@ class OptunaOptimizer:
         warm_pairs = ws.maxNumOfPointPairsPerFeature
         self._pairs_candidates: List[int] = sorted(set(
             max(1, min(10000, int(warm_pairs * s)))
-            for s in SC.OPTUNA_PAIRS_SCALES
+            for s in SC.PAIRS_SCALES
         ))
         self._voxel_bounds: Tuple[float, float, float, float] = (
             max(0.1, ws.minVoxelLength_mm * 0.2),
@@ -504,7 +484,7 @@ class OptunaOptimizer:
     # Default param helpers
     # ─────────────────────────────────────────────────────────────────────
 
-    def _default_fine(self, regime: dict) -> dict:
+    def _warm_fine(self, regime: dict) -> dict:
         return {
             "registrationMode":                  regime["fine_mode"],
             "operationApproach":                 1.0,
@@ -516,8 +496,8 @@ class OptunaOptimizer:
             "candidateTopNum":                   1,
         }
 
-    def _default_coarse_remaining(self, regime: dict) -> dict:
-        ws = self.opt.ws
+    def _warm_coarse(self, regime: dict) -> dict:
+        ws = self.ws
         snapped_pairs = min(self._pairs_candidates,
                             key=lambda x: abs(x - ws.maxNumOfPointPairsPerFeature))
         base = {
@@ -542,10 +522,52 @@ class OptunaOptimizer:
     # Study factory
     # ─────────────────────────────────────────────────────────────────────
 
-    def _create_study_joint(self, name: str, storage_suffix: str = "") -> optuna.Study:
+    def _create_study(self, name: str, storage_suffix: str = "") -> optuna.Study:
+        """Build the multi-objective study for `self._sampler`.
+
+        All three samplers are multi-objective and accept `constraints_func`, so they are
+        interchangeable here; they differ in how many trials they need to pay off. Optuna's
+        own recommended budgets, against this project's default of ~150-250 trials:
+
+        nsgaii : NSGA-II genetic algorithm. Recommended 100-10,000 trials — this budget is
+                 at the very bottom of its range, and Optuna notes it handles float and
+                 integer parameters inefficiently, which is most of this search space.
+                 Optuna also documents it as NOT supporting dynamic search spaces.
+        tpe    : Tree-structured Parzen Estimator, O(d·n·log n) per trial. Recommended
+                 100-1,000 trials. Plain TPE does support dynamic search spaces, but this
+                 study needs `multivariate=True`, and multivariate TPE does not: it cannot
+                 reuse trials recorded before a range changed, and without `group=True`
+                 conditional params degrade to independent random sampling.
+        gp     : Gaussian-process Bayesian optimization, O(n³) per trial — the most expensive
+                 per trial but the most sample-efficient. Recommended up to 500 trials, which
+                 fits this budget; the default. It infers its relative search space via
+                 `intersection_search_space()` and delegates anything outside it to the
+                 independent sampler, so a parameter whose range moved, or one suggested
+                 conditionally, loses GP guidance individually while the rest stay modelled.
+                 Needs scipy and torch (a CPU build is enough).
+
+        Why that matters here, in two places:
+
+        1. `referredStep <= refStep`. The natural encoding is a dynamic upper bound,
+           `suggest_int("referredStep", 1, refStep)`, which makes the space dynamic by
+           construction on every trial. That is why it is NOT written that way: instead
+           referredStep takes fixed bounds and the coupling is enforced by
+           `_referredstep_constraint` plus the early-return guard in `_objective`. Note the
+           guard is the part that actually prevents the MechVision blowup — `constraints_func`
+           only steers — and it is wired for nsgaii and gp but not tpe, so under tpe the
+           coupling is enforced solely by the guard.
+        2. `_voxel_bounds` and `_pairs_candidates` are derived from the part's warm start,
+           and studies resume with `load_if_exists=True` in "extend" mode. Regenerate a
+           reference cloud and the bounds move while the DB still holds trials sampled under
+           the old ones — a dynamic value range within one study. GP degrades per-parameter
+           there; NSGA-II has no support for it at all.
+
+        `deterministic_objective=False` for GP because the objective genuinely is noisy:
+        scenes are sampled at random and MechVision timings jitter.
+        """
         if self._sampler == "nsgaii":
             sampler = optuna.samplers.NSGAIISampler(
-                population_size=SC.OPTUNA_NSGA_POPULATION_SIZE,
+                population_size=SC.NSGA_POPULATION_SIZE,
                 seed=self._seed,
                 constraints_func=_referredstep_constraint,
             )
@@ -553,27 +575,21 @@ class OptunaOptimizer:
             sampler = optuna.samplers.TPESampler(
                 multivariate=True,
                 group=True,
-                n_startup_trials=SC.OPTUNA_N_STARTUP_JOINT,
+                n_startup_trials=SC.N_STARTUP,
                 seed=self._seed,
             )
         elif self._sampler == "gp":
-            # Gaussian-process sampler at full parity with NSGA-II: constrained
-            # multi-objective (coverage, mean_time). GPSampler enforces
-            # referredStep ≤ refStep via the same constraints_func + objective guard.
-            # deterministic_objective=False: the objective is stochastic (random
-            # scene sampling + MechVision timing jitter). Requires torch (CPU is fine).
             sampler = optuna.samplers.GPSampler(
                 seed=self._seed,
-                n_startup_trials=SC.OPTUNA_N_STARTUP_JOINT,
+                n_startup_trials=SC.N_STARTUP,
                 deterministic_objective=False,
                 constraints_func=_referredstep_constraint,
             )
         else:
             raise ValueError(f"Unknown sampler: {self._sampler!r}")
-        # trial.report/should_prune are not supported in multi-objective mode;
-        # pruning is handled explicitly (coverage floor + absolute time cap) in _objective_joint.
-        # NSGA-II and GP enforce referredStep ≤ refStep via constraints_func + objective
-        # guard; TPE ignores the constraint_violation user-attr (it is harmless metadata).
+        # trial.report/should_prune are unsupported in multi-objective mode, so pruning is
+        # explicit in _objective. TPE ignores the constraint_violation user-attr, which is
+        # harmless metadata there.
         storage = None
         if self._storage_path and storage_suffix:
             storage = f"sqlite:///{self._storage_path}{storage_suffix}.db"
@@ -592,7 +608,7 @@ class OptunaOptimizer:
     # Objective
     # ─────────────────────────────────────────────────────────────────────
 
-    def _objective_joint(
+    def _objective(
         self,
         trial: optuna.Trial,
         regime: dict,
@@ -604,9 +620,9 @@ class OptunaOptimizer:
         time safety cap after ≥3 scenes. No time-ratio pruning — the sampler owns
         the time/accuracy trade-off via the Pareto front.
         """
-        p        = suggest_params_joint(trial, regime, self._pairs_candidates,
+        p        = suggest_params(trial, regime, self._pairs_candidates,
                                         self._voxel_bounds)
-        coarse_p, fine_p = _split_joint_params(p)
+        coarse_p, fine_p = _split_params(p)
 
         # Level 0: referredStep feasibility guard.
         # NSGA-II uses fixed bounds (1–20) for referredStep, so it can suggest
@@ -614,15 +630,15 @@ class OptunaOptimizer:
         if p["referredStep"] > p["refStep"]:
             trial.set_user_attr("constraint_violation",
                                 float(p["referredStep"] - p["refStep"]))
-            return (0.0, SC.OPTUNA_TIME_INITIAL_CAP)
+            return (0.0, SC.TIME_INITIAL_CAP)
 
         ang        = SC.ANG_THRESH_REGIME_GATE
-        all_scenes = self.opt._sample_scenes(SC.M_FULL)
+        all_scenes = self._sample_scenes(SC.M_FULL)
         total_cov  = 0.0
         total_time = 0.0
 
         for step, scene in enumerate(all_scenes):
-            res = self.opt.evaluate_config(
+            res = self.evaluate_config(
                 coarse_p, fine_p, [scene], self._pos_thresh_study, ang)
 
             total_cov  += res.coverage
@@ -637,12 +653,12 @@ class OptunaOptimizer:
             # never the slow-but-accurate (precision-first) region. This replaces the old
             # best_mean_time × RATIO guard, which ratcheted down after a fast low-quality
             # trial and cascaded into pruning ~90% of trials, starving the sampler.
-            if step >= 2 and running_time > SC.OPTUNA_TIME_ABS_CAP:
+            if step >= 2 and running_time > SC.TIME_ABS_CAP:
                 trial.set_user_attr("prune_reason", f"time@{step}")
                 raise optuna.TrialPruned()
 
             # Level 2: Coverage floor (after 3rd scene)
-            if step >= 2 and running_cov < SC.OPTUNA_COV_PRUNE_FLOOR:
+            if step >= 2 and running_cov < SC.COV_PRUNE_FLOOR:
                 trial.set_user_attr("prune_reason", f"cov@{step}, running_cov={running_cov:.2f}")
                 raise optuna.TrialPruned()
 
@@ -659,15 +675,15 @@ class OptunaOptimizer:
         """Execute full optimization: Phase 1 → joint NSGA-II study (multi-round) → Phase 4."""
         t0 = time.time()
         log.info(f"\n{'='*60}")
-        log.info(f"OptunaOptimizer: part={self.opt.part_name}  "
-                 f"n_trials_joint={self.n_trials_joint}  n_rounds={self.n_rounds}  "
+        log.info(f"Tuner: part={self.part_name}  "
+                 f"n_trials={self.n_trials}  n_rounds={self.n_rounds}  "
                  f"seed={self._seed}  M_FULL={SC.M_FULL}  "
-                 f"cache={'ON' if self.opt.cache else 'OFF'}  "
+                 f"cache={'ON' if self.cache else 'OFF'}  "
                  f"pos_thresh_study={self._pos_thresh_study*1e3:.1f}mm  "
                  f"pos_thresh_final={SC.POS_THRESH_TIGHT*1e3:.1f}mm")
 
         # ── Phase 1: regime gate ──────────────────────────────────────────
-        passing = self.opt.phase1_regime_gate()
+        passing = self.phase1_regime_gate()
         if not passing:
             log.error("Optimization failed at Phase 1 — no regime passes.")
             return None
@@ -676,21 +692,21 @@ class OptunaOptimizer:
         log.info(f"Phase 1 done: best regime = {best_regime['id']}  "
                  f"(cov={best_regime['coverage']:.2f})")
 
-        part = self.opt.part_name
+        part = self.part_name
 
         # ── Pre-study look-ahead: geometry coarse → opApproach hint ──────
         log.info("Pre-study look-ahead: evaluating geometry warm-start config...")
-        _geom_coarse = self._default_coarse_remaining(best_regime)
-        _geom_fine   = self._default_fine(best_regime)
-        _la_result   = self.opt.evaluate_config(
+        _geom_coarse = self._warm_coarse(best_regime)
+        _geom_fine   = self._warm_fine(best_regime)
+        _la_result   = self.evaluate_config(
             _geom_coarse, _geom_fine,
-            self.opt._sample_scenes(SC.M_FULL),
+            self._sample_scenes(SC.M_FULL),
             SC.POS_THRESH_TIGHT, SC.ANG_THRESH_REGIME_GATE,
         )
         _pos_errs   = [e for s in _la_result.per_scene
                        for e in s.get("pos_errors", []) if e is not None]
         _median_err = float(np.median(_pos_errs)) if _pos_errs else 0.01
-        _op_hint    = SC.phase3_approach_candidates(_median_err)[0]
+        _op_hint    = SC.approach_candidates(_median_err)[0]
         log.info(f"  median coarse pos err = {_median_err*1e3:.2f}mm → "
                  f"opApproach hint = {_op_hint}")
 
@@ -699,11 +715,11 @@ class OptunaOptimizer:
         log.info(f"JOINT STUDY — fully joint coarse+fine {self._sampler.upper()} "
                  f"(multi-objective)")
 
-        self._study = self._create_study_joint(
+        self._study = self._create_study(
             f"{part}_{self._sampler}", f"{part}_{self._sampler}")
 
         if not self._study.trials:
-            warm_p = _build_warm_joint(
+            warm_p = _build_warm(
                 _geom_coarse, _geom_fine, best_regime,
                 self._pairs_candidates, self._voxel_bounds,
             )
@@ -718,9 +734,9 @@ class OptunaOptimizer:
             n_done = sum(1 for t in self._study.trials
                          if t.state != optuna.trial.TrialState.WAITING)
             if round_idx == 0:
-                n_target = self.n_trials_joint
+                n_target = self.n_trials
             else:
-                n_target = n_done + SC.OPTUNA_N_TRIALS_JOINT_REFINE
+                n_target = n_done + SC.N_TRIALS_REFINE
 
             remaining = max(0, n_target - n_done)
             log.info(f"  Round {round_idx}: running {remaining} trials "
@@ -731,7 +747,7 @@ class OptunaOptimizer:
                 if self.on_trial_complete is not None:
                     callbacks.append(self.on_trial_complete)
                 self._study.optimize(
-                    lambda t: self._objective_joint(t, best_regime),
+                    lambda t: self._objective(t, best_regime),
                     n_trials=remaining,
                     callbacks=callbacks,
                 )
@@ -752,7 +768,7 @@ class OptunaOptimizer:
                      f"Pareto front size={len(self._study.best_trials)}")
 
             if (round_idx > 0
-                    and (prev_best_score - round_score) < SC.OPTUNA_SCORE_IMPROVE_MIN):
+                    and (prev_best_score - round_score) < SC.SCORE_IMPROVE_MIN):
                 log.info(f"  Round {round_idx}: improvement "
                          f"{prev_best_score - round_score:.4f} < threshold — stopping.")
                 break
@@ -761,7 +777,7 @@ class OptunaOptimizer:
         # ── Extract best config ───────────────────────────────────────────
         winner      = _select_pareto_winner(self._study)
         expanded    = _expand_winner_params(winner.params, best_regime, self._pairs_candidates)
-        best_coarse, best_fine = _split_joint_params(expanded)
+        best_coarse, best_fine = _split_params(expanded)
 
         log.info(f"Best config: refStep={best_coarse.get('refStep')}  "
                  f"distQ={best_coarse.get('distQuantification', 0):.2f}  "
@@ -769,8 +785,8 @@ class OptunaOptimizer:
                  f"outputNum={best_coarse.get('outputNum')}")
 
         # ── Post-study re-eval with tight angular threshold ───────────────
-        scenes_final = self.opt._sample_scenes(SC.M_FULL)
-        best_result  = self.opt.evaluate_config(
+        scenes_final = self._sample_scenes(SC.M_FULL)
+        best_result  = self.evaluate_config(
             best_coarse, best_fine, scenes_final,
             SC.POS_THRESH_TIGHT, SC.ANG_THRESH_TIGHT,
         )
@@ -780,11 +796,11 @@ class OptunaOptimizer:
                  f"time={best_result.mean_time:.3f}s")
 
         # ── Phase 4: symmetry (conditional) ──────────────────────────────
-        if best_result.coverage >= SC.PHASE_GATES["after_phase2"][0]:
-            final_result = self.opt.phase4_symmetry(best_coarse, best_fine, best_result)
+        if best_result.coverage >= SC.SYMMETRY_COVERAGE_GATE:
+            final_result = self.phase4_symmetry(best_coarse, best_fine, best_result)
         else:
             log.info(f"PHASE 4 skipped: coverage {best_result.coverage:.2f} "
-                     f"< gate {SC.PHASE_GATES['after_phase2'][0]}")
+                     f"< gate {SC.SYMMETRY_COVERAGE_GATE}")
             final_result = best_result
 
         # ── Summary ──────────────────────────────────────────────────────
@@ -793,23 +809,22 @@ class OptunaOptimizer:
                          if t.state == optuna.trial.TrialState.COMPLETE)
         n_pruned   = sum(1 for t in self._study.trials
                          if t.state == optuna.trial.TrialState.PRUNED)
-        cache_stats = self.opt.cache.stats() if self.opt.cache else {}
+        cache_stats = self.cache.stats() if self.cache else {}
 
         log.info(f"\n{'='*60}")
-        log.info(f"OPTUNA COMPLETE: {self.opt.part_name}")
+        log.info(f"OPTUNA COMPLETE: {self.part_name}")
         log.info(f"  coverage      = {final_result.coverage:.3f}")
         log.info(f"  mean_time     = {final_result.mean_time:.3f} s")
         log.info(f"  score         = {final_result.score:.3f}")
         log.info(f"  score_quality = {final_result.score_quality:.3f}")
-        log.info(f"  mv_evals      = {self.opt._n_evals}")
+        log.info(f"  mv_evals      = {self._n_evals}")
         log.info(f"  trials        = {n_complete} complete, {n_pruned} pruned")
         log.info(f"  Pareto size   = {len(self._study.best_trials)}")
         log.info(f"  wall_time     = {elapsed:.0f} s")
         if cache_stats:
             log.info(f"  cache         = {cache_stats}")
 
-        ts = int(time.time())
-        self._log_result_json(final_result, ts=ts)
+        self._log_result_json(final_result)
         return final_result
 
     # ─────────────────────────────────────────────────────────────────────
@@ -832,24 +847,9 @@ class OptunaOptimizer:
         for t in trials:
             expanded = _expand_winner_params(t.params, self._best_regime,
                                              self._pairs_candidates)
-            coarse, fine = _split_joint_params(expanded)
+            coarse, fine = _split_params(expanded)
             out.append((t, coarse, fine))
         return out
-
-    # ─────────────────────────────────────────────────────────────────────
-    # Export / logging
-    # ─────────────────────────────────────────────────────────────────────
-
-    def export_best(self, result: EvalResult, prefix: str = "", suffix: str = "") -> str:
-        return self.opt.export_best(result, prefix=prefix, suffix=suffix)
-
-    def _log_result_json(self, result: EvalResult, ts: Optional[int] = None) -> None:
-        if ts is None:
-            ts = int(time.time())
-        self.opt._log_result_json(result)
-
-    def cleanup(self) -> None:
-        self.opt.cleanup()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -858,19 +858,18 @@ class OptunaOptimizer:
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="OptunaOptimizer — fully joint MechVision tuning "
+        description="Tuner — fully joint MechVision tuning "
                     "(NSGA-II / TPE / GP samplers)")
     p.add_argument("--part",           required=True)
     p.add_argument("--scenes_dir",     default=None)
-    p.add_argument("--n_trials_joint", type=int, default=None,
-                   help=f"Joint study trial budget (default: {SC.OPTUNA_N_TRIALS_JOINT})")
+    p.add_argument("--n_trials", type=int, default=None,
+                   help=f"Joint study trial budget (default: {SC.N_TRIALS})")
     p.add_argument("--n_rounds",       type=int, default=None,
-                   help=f"Number of optimization rounds (default: {SC.OPTUNA_N_ROUNDS})")
+                   help=f"Number of optimization rounds (default: {SC.N_ROUNDS})")
     p.add_argument("--m_full",         type=int, default=None)
     p.add_argument("--dry_run",        action="store_true")
     p.add_argument("--no_cache",       action="store_true")
     p.add_argument("--seed",           type=int, default=42)
-    p.add_argument("--export_best",    default=True, action="store_true")
     p.add_argument("--storage",        default=None,
                    help="SQLite path prefix (e.g. MM_Optimizer/results/); "
                         "creates {prefix}{part}_{sampler}.db")
@@ -880,7 +879,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--pos_thresh_k",   type=float, default=0.01,
                    help="k for adaptive study threshold: clip(k × longest_OBB_m, 2mm, 5mm). "
                         "Only used when adaptive_thresh is enabled (default: 0.01).")
-    p.add_argument("--sampler",        choices=list(SAMPLER_CHOICES), default="gp",
+    p.add_argument("--sampler",        choices=list(SAMPLER_CHOICES), default=SAMPLER_DEFAULT,
                    help="Optuna sampler for the joint study (default: gp)")
     return p
 
@@ -904,8 +903,7 @@ def main() -> None:
     if args.m_full is not None:
         SC.M_FULL = args.m_full
     else:
-        SC.M_FULL  = len(scene_groups)
-        SC.M_SMALL = max(1, len(scene_groups) // 2)
+        SC.M_FULL = len(scene_groups)
 
     model_path = os.path.join(_ROOT, "output", "reference_pcd", args.part,
                               f"{args.part}_surface", f"{args.part}_surface.ply")
@@ -934,7 +932,7 @@ def main() -> None:
     if storage_path is None and not args.dry_run:
         storage_path = os.path.join(RESULTS_DIR, "")
 
-    opt = OptunaOptimizer(
+    opt = Tuner(
         part_name      = args.part,
         client         = client,
         project_id     = project_id,
@@ -942,7 +940,7 @@ def main() -> None:
         warm_start     = ws,
         cache          = cache,
         dry_run        = args.dry_run,
-        n_trials_joint = args.n_trials_joint,
+        n_trials = args.n_trials,
         n_rounds       = args.n_rounds,
         seed           = args.seed,
         storage_path   = storage_path,
@@ -956,9 +954,8 @@ def main() -> None:
         if result is None:
             log.error("Optimization did not converge.")
             sys.exit(1)
-        if args.export_best:
-            out = opt.export_best(result, prefix=f"{args.sampler.upper()}_")
-            log.info(f"Best config exported → {out}")
+        out = opt.export_best(result, prefix=f"{args.sampler.upper()}_")
+        log.info(f"Best config exported -> {out}")
         log.info("Done.")
     finally:
         opt.cleanup()

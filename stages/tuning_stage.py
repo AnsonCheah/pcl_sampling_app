@@ -7,7 +7,7 @@ The last stage of the pipeline. For the part currently loaded in the wizard
 2. launch the joint Optuna study against a live MechVision instance, with a live 3D
    overlay of the matched reference cloud that follows whichever scene the optimizer
    is evaluating (via ``MVEvaluator.on_scene_eval``) and a trial-level progress bar
-   (via ``OptunaOptimizer.on_trial_complete``),
+   (via ``Tuner.on_trial_complete``),
 3. browse the resulting Pareto configs and run any one live against the selected
    scene (coverage + time), and
 4. open the Optuna dashboard (a subprocess pointed at the study's SQLite DB).
@@ -55,8 +55,8 @@ DASH_HOST = "127.0.0.1"
 DASH_PORT = 8080
 DASH_URL  = f"http://{DASH_HOST}:{DASH_PORT}/"
 
-SAMPLER_DEFAULT = "gp"
-SAMPLER_CHOICES = ("nsgaii", "tpe", "gp")
+SAMPLER_DEFAULT = SC.SAMPLER_DEFAULT
+SAMPLER_CHOICES = SC.SAMPLER_CHOICES
 
 _SCENE_VOXEL = 0.002   # m — downsample the ~34 MB scene cloud for a light preview
 _REF_VOXEL   = 0.004   # m — downsample the reference cloud placed at each match
@@ -168,7 +168,7 @@ def instance_color(i):
 
 
 class TuningStage(BaseStage):
-    """Wrap MM_Optimizer/optuna_optimizer.py into the GUI (see module docstring)."""
+    """Wrap MM_Optimizer/tuner.py into the GUI (see module docstring)."""
 
     downstream = {}   # last stage; owns no cross-stage app.* state
 
@@ -377,11 +377,11 @@ class TuningStage(BaseStage):
         self.slider_trials = self.register_widget(
             gui.Slider(gui.Slider.INT), lambda: not self._running)
         self.slider_trials.set_limits(5, 300)
-        self.slider_trials.int_value = int(SC.OPTUNA_N_TRIALS_JOINT)
+        self.slider_trials.int_value = int(SC.N_TRIALS)
         self.slider_rounds = self.register_widget(
             gui.Slider(gui.Slider.INT), lambda: not self._running)
         self.slider_rounds.set_limits(1, 5)
-        self.slider_rounds.int_value = int(SC.OPTUNA_N_ROUNDS)
+        self.slider_rounds.int_value = int(SC.N_ROUNDS)
         self.combo_sampler = self.register_widget(
             gui.Combobox(), lambda: not self._running)
         for s in SAMPLER_CHOICES:
@@ -577,7 +577,7 @@ class TuningStage(BaseStage):
         # If a study with prior trials exists, ask whether to add to it or start fresh.
         n_prior = self._count_prior_trials()
         if n_prior > 0 and not self.app.headless:
-            slider = self.n_trials if self.n_trials is not None else SC.OPTUNA_N_TRIALS_JOINT
+            slider = self.n_trials if self.n_trials is not None else SC.N_TRIALS
             self.app.choice_dialog(
                 f"A study for this part already has {n_prior} trials.",
                 [(f"Extend +{slider}", lambda: self._launch_tuning("extend")),
@@ -671,7 +671,7 @@ class TuningStage(BaseStage):
         from MM_Optimizer.optimizer_utils import list_synthetic_scenes
         from MM_Optimizer.mesh_analysis   import analyze_mesh, load_reference_pcd
         from MM_Optimizer.eval_cache      import EvalCache
-        from MM_Optimizer.optuna_optimizer import OptunaOptimizer
+        from MM_Optimizer.tuner import Tuner
         from mm_adapter.mm_adapter        import MechVisionClient
         import optuna
 
@@ -697,10 +697,9 @@ class TuningStage(BaseStage):
 
         # Per-run scene budget (SC globals are mutated the same way the CLI does).
         SC.M_FULL  = len(scene_groups)
-        SC.M_SMALL = max(1, len(scene_groups) // 2)
 
-        slider   = self.n_trials if self.n_trials is not None else SC.OPTUNA_N_TRIALS_JOINT
-        n_rounds = self.n_rounds if self.n_rounds is not None else SC.OPTUNA_N_ROUNDS
+        slider   = self.n_trials if self.n_trials is not None else SC.N_TRIALS
+        n_rounds = self.n_rounds if self.n_rounds is not None else SC.N_ROUNDS
 
         os.makedirs(RESULTS_DIR, exist_ok=True)
         if self._resume_mode == "restart":
@@ -724,7 +723,7 @@ class TuningStage(BaseStage):
         # `done` in _trial_progress counts ALL trials, so the progress total must use this budget.
         budget = self._resolve_trial_budget(self._resume_mode, n_prior, slider)
         self._total_trials = max(
-            1, budget + (n_rounds - 1) * SC.OPTUNA_N_TRIALS_JOINT_REFINE)
+            1, budget + (n_rounds - 1) * SC.N_TRIALS_REFINE)
 
         # Connect to MechVision (handled failure, not a crash).
         try:
@@ -747,7 +746,7 @@ class TuningStage(BaseStage):
         ws  = analyze_mesh(pcd)
         cache = EvalCache(self._cache_path(), enabled=ENABLE_CACHE)
 
-        self._optimizer = OptunaOptimizer(
+        self._optimizer = Tuner(
             part_name      = part,
             client         = client,
             project_id     = project_id,
@@ -755,12 +754,12 @@ class TuningStage(BaseStage):
             warm_start     = ws,
             cache          = cache,
             dry_run        = False,
-            n_trials_joint = budget,
+            n_trials = budget,
             n_rounds       = n_rounds,
             storage_path   = os.path.join(RESULTS_DIR, ""),
             sampler        = self.sampler,
         )
-        self._optimizer.opt.on_scene_eval = self._on_scene_eval
+        self._optimizer.on_scene_eval = self._on_scene_eval
         self._optimizer.on_trial_complete = self._on_trial_complete
 
         self._launch_dashboard()
@@ -873,7 +872,7 @@ class TuningStage(BaseStage):
             print(f"[TUNING] No sample_*.ply in {scene_dir}.")
             return
 
-        ev = self._optimizer.opt
+        ev = self._optimizer
         _, gt_poses = ev._prepare_scene(plys)   # (scene_dir, gt_poses), cached
         res = ev._run_one_scene(coarse, fine, scene_dir, gt_poses,
                                 SC.POS_THRESH_TIGHT, SC.ANG_THRESH_TIGHT)  # fires _on_scene_eval

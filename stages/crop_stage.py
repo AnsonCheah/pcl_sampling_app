@@ -7,6 +7,10 @@ from enums import Stage, ToolMode
 from stages.stage_base import BaseStage
 from geometry.geom_utils import mask_point_cloud
 
+# Distance from the camera at which the selection rectangle is drawn.
+_SELECTION_RECT_DEPTH_M = 0.5
+
+
 class CropStage(BaseStage):
     def __init__(self, app):
         self.name = Stage.CROP.name
@@ -76,11 +80,13 @@ class CropStage(BaseStage):
         self.app.clear_state_from(self.stage_key, inclusive=False)
         mask = np.ones(len(self.app.cropped_pcd.points), dtype=bool)
         mask[self.selected_indices] = False
+        n_deleted = len(self.selected_indices)
         self.app.cropped_pcd = mask_point_cloud(self.app.cropped_pcd, mask)
         self.selected_indices = []
         self.selected_pcd = None
         self.non_selected_pcd = None
-        print(f"[INFO] Deleted selected {len(self.selected_indices)} points. Remaining points: {len(self.app.cropped_pcd.points)}")
+        print(f"[INFO] Deleted selected {n_deleted} points. "
+              f"Remaining points: {len(self.app.cropped_pcd.points)}")
 
     def _enable_box_selection(self):
         if self.btn_box_select.is_on:
@@ -140,8 +146,9 @@ class CropStage(BaseStage):
         inv_proj_view = np.linalg.inv(proj_matrix @ view_matrix)
         cam_pos = inv_view[:3, 3]  # Camera position
         
-        # Calculate target depth
-        target_depth = self._calculate_selection_depth(x1, y1, x2, y2, cam_pos)
+        # Only the near corners of the selection frustum; the picked set is the frustum
+        # itself, so the distance the rectangle is drawn at does not affect selection.
+        target_depth = _SELECTION_RECT_DEPTH_M
         
         # Screen corners
         corners_screen = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
@@ -184,58 +191,6 @@ class CropStage(BaseStage):
             return None
         
         return corners_world
-    
-    def _calculate_selection_depth(self, x1, y1, x2, y2, cam_pos):
-        """Calculate the optimal depth for the selection rectangle"""
-        # Default depth
-        default_depth = 0.5
-        
-        if not hasattr(self, 'cropped_pcd') or self.app.cropped_pcd is None:
-            return default_depth
-        
-        points = np.asarray(self.app.cropped_pcd.points)
-        if len(points) == 0:
-            return default_depth
-        
-        # Project all points to screen (this is cached-friendly)
-        valid_idx, screen_pts = self.project_world_to_screen(points)
-        
-        if len(valid_idx) == 0:
-            return default_depth
-        
-        # Find points within the selection rectangle (vectorized)
-        xmin, xmax = sorted([x1, x2])
-        ymin, ymax = sorted([y1, y2])
-        in_rect = (
-            (screen_pts[:, 0] >= xmin) & 
-            (screen_pts[:, 0] <= xmax) & 
-            (screen_pts[:, 1] >= ymin) & 
-            (screen_pts[:, 1] <= ymax)
-        )
-        
-        if np.any(in_rect):
-            # Get the closest point within the selection (vectorized)
-            rect_points = points[valid_idx[in_rect]]
-            distances_to_cam = np.linalg.norm(rect_points - cam_pos, axis=1)
-            min_depth = np.min(distances_to_cam)
-            
-            # Place rectangle significantly in front (50% closer for better visibility)
-            return min_depth * 0.50
-        else:
-            # No points in selection, use center-based approach
-            center_x = (x1 + x2) / 2.0
-            center_y = (y1 + y2) / 2.0
-            
-            # Vectorized distance calculation
-            distances = np.linalg.norm(
-                screen_pts - np.array([center_x, center_y]), 
-                axis=1
-            )
-            closest_idx = valid_idx[np.argmin(distances)]
-            closest_point = points[closest_idx]
-            
-            # Use 90% depth for fallback (less aggressive than selected points)
-            return np.linalg.norm(closest_point - cam_pos) * 0.90
     
     def _validate_rectangle_corners(self, corners_world):
         """Validate that the rectangle corners form a non-degenerate shape"""

@@ -30,7 +30,7 @@ import MM_Optimizer.search_config as SC
 from MM_Optimizer.mv_evaluator     import MVEvaluator
 from MM_Optimizer.mesh_analysis    import analyze_mesh, load_reference_pcd, WarmStart
 from MM_Optimizer.optimizer_utils  import list_synthetic_scenes
-from MM_Optimizer.optuna_optimizer import OptunaOptimizer
+from MM_Optimizer.tuner import Tuner
 
 PART       = "25333MB000"
 SCENES_DIR = os.path.join(_ROOT, "output", "synthetic_target", PART)
@@ -110,13 +110,13 @@ def test_iter_pareto_and_trial_hook():
     pcd = load_reference_pcd(MODEL_PATH)
     ws  = analyze_mesh(pcd)
 
-    orig_full, orig_small = SC.M_FULL, SC.M_SMALL
-    SC.M_FULL, SC.M_SMALL = 3, 2
+    orig_full = SC.M_FULL
+    SC.M_FULL = 3
     try:
-        opt = OptunaOptimizer(
+        opt = Tuner(
             part_name=PART, client=None, project_id=-1,
             scene_groups=groups, warm_start=ws, cache=None, dry_run=True,
-            n_trials_joint=5, n_rounds=1, seed=0, storage_path=None)
+            n_trials=5, n_rounds=1, seed=0, storage_path=None)
 
         trial_calls = []
         opt.on_trial_complete = lambda study, trial: trial_calls.append(trial.number)
@@ -139,7 +139,7 @@ def test_iter_pareto_and_trial_hook():
         log.info(f"  pareto={len(pareto)}  trial_hook_calls={len(trial_calls)}")
         log.info("PASS: test_iter_pareto_and_trial_hook")
     finally:
-        SC.M_FULL, SC.M_SMALL = orig_full, orig_small
+        SC.M_FULL = orig_full
         opt.cleanup()
 
 
