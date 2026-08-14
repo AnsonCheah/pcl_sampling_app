@@ -47,7 +47,7 @@ class SceneObject:
 class MujocoBinScene:
     def __init__(self, part_mesh, part_convex_meshes, n_parts=1, bin_dim=MAX_BIN_DIM, settle_time=5.0, render=True, arrangement: str = "random", stable_pose_R: np.ndarray = None, timestep: float = 0.001,
                  structure_type: str = "none", structure_height_frac: float = 0.75, clearance_mode: str = "medium",
-                 body_offset=None):
+                 body_offset=None, bin_transform=None):
         # Timestep is the primary anti-tunneling lever: MuJoCo has no continuous collision
         # detection, so per-step displacement (~vel_cap*dt) must stay under ~o_margin. With
         # vel_cap=1.5 m/s and o_margin=1 mm the hard-safe bound is dt <= 6.7e-4; the stiff
@@ -59,13 +59,16 @@ class MujocoBinScene:
         self._stable_count = 0
         self.vel_cap = 1.5            # m/s — per-step linear-velocity clamp (safeguard);
         #                               at this cap v*dt = 0.75 mm < o_margin (1 mm).
-        # self.rendering_flag = True
         self.verbose = True
         self.stable_steps = int(self.stable_duration / self.timestep)
         self.camera_distance = 1.5
-        # Bin floor at world origin, camera hovering above at z=camera_distance.
-        # Gravity -Z (natural). No coordinate flip needed.
-        self.bin_transform = np.eye(4)
+        # Bin placement in world. Identity puts the bin floor at the origin with gravity
+        # along -Z, which is what every caller wants today; it is a parameter rather than a
+        # constant so a world frame anchored elsewhere (e.g. camera_frame == world_frame)
+        # needs no change here. Written into scene_state.npz and applied to the bin geometry,
+        # the partition/tray fixtures and every spawned pose.
+        self.bin_transform = np.eye(4) if bin_transform is None else \
+            np.asarray(bin_transform, dtype=float)
 
         self.part_mesh = part_mesh
         self.part_convex_meshes = part_convex_meshes
@@ -613,7 +616,7 @@ class MujocoBinScene:
                     is_collision, _, _ = collision_manager.in_collision_single(candidate_trimesh, transform=T, return_names=True, return_data=True)
                     if is_collision:
                         continue
-                    valid_poses[i, :3] = pos
+                    valid_poses[i, :3] = T[:3, 3]
                     valid_poses[i, 3:] = quat
                     collision_manager.add_object(f"part_{i}", candidate_trimesh, transform=T)
                     placed_active = True
@@ -629,10 +632,12 @@ class MujocoBinScene:
                 x = np.random.uniform(-self.hx + margin, self.hx - margin)
                 y = np.random.uniform(-self.hy + margin, self.hy - margin)
                 z = PARKING_Z + self._batch_of_body[i] * 0.2
-                R_mat = self._sample_constrained_rotation(valid_poses_for_rotation)
-                quat = R.from_matrix(R_mat).as_quat(scalar_first=True)
-                valid_poses[i, :3] = [x, y, z]
-                valid_poses[i, 3:] = quat
+                T = np.eye(4)
+                T[:3, 3]  = [x, y, z]
+                T[:3, :3] = self._sample_constrained_rotation(valid_poses_for_rotation)
+                T = self.bin_transform @ T
+                valid_poses[i, :3] = T[:3, 3]
+                valid_poses[i, 3:] = R.from_matrix(T[:3, :3]).as_quat(scalar_first=True)
         print(f"[INFO] {self.n_parts} parts in {max(self._batch_of_body) + 1} batches (batch_size={batch_size})")
         self._spawn_bodies(valid_poses)
 
@@ -677,9 +682,8 @@ class MujocoBinScene:
             T_local[:3, :3] = R_local
             T_local[:3, 3] = [x, y, pos_z]
             T = self.bin_transform @ T_local
-            quat = R.from_matrix(T[:3, :3]).as_quat(scalar_first=True)
-            valid_poses[i, :3] = [x, y, pos_z]
-            valid_poses[i, 3:] = quat
+            valid_poses[i, :3] = T[:3, 3]
+            valid_poses[i, 3:] = R.from_matrix(T[:3, :3]).as_quat(scalar_first=True)
 
         # Build fixtures on the bin body (geoms + visual mesh) before compile().
         if self.structure_type == "partition":
@@ -1161,30 +1165,16 @@ class MujocoBinScene:
         ``extract_scene_state`` reports raw MuJoCo body poses, which describe the mesh this
         class was handed -- and that mesh had to be centred on its own origin (see
         ``body_offset``). Composing the offset back in here is what makes ``T_gt`` mean
-        "model frame -> world", the same thing ``sample_<i>.ply``'s ``gt_*`` header and
-        ``sample_<i>.npz``'s ``T_gt`` mean, so every pose in an exported scene directory can
-        be compared against ``reference_cloud.ply`` without the reader knowing anything about
-        how the physics body was built.
+        "model frame -> world", matching ``sample_<i>.ply``'s ``gt_*`` header, so an exported
+        scene can be compared against ``reference_cloud.ply`` without the reader knowing how
+        the physics body was built.
 
-        It did not always. This used to return the raw body poses while ``SceneStage`` fixed
-        up only the per-instance copies, so ``scene_state.npz`` and ``sample_<i>.*`` disagreed
-        by the mesh AABB offset -- 5.3 mm on a 100x30x20 L-part in the PCA frame, 13.5 mm in
-        the ambiguity frame, and larger the further the model frame origin sits from the mesh
-        bounding-box centre.
+        ``body_offset`` is permanent provenance, not a flag: it is the only record of where
+        the body origin sat relative to the model frame, so it is what lets a reader recover
+        the raw body poses from the npz alone.
 
-        ``body_offset`` is written out as permanent provenance, not as a flag: it is the only
-        record of where the physics body origin sat relative to the model frame, so it is what
-        lets anyone recover the raw body poses -- to line a scene up against MuJoCo state, or
-        to rebuild the sim that produced it -- from the npz alone. Keep writing it even once
-        no reader cares which frame the file is in.
-
-        It doubles, for now, as the marker for the change above: a ``scene_state.npz``
-        **without** the key predates it and its ``T_gt`` is in the centred body frame. That
-        reading of the key expires once no pre-change scene directories remain; the key itself
-        does not.
-
-        Note ``quaternions_wxyz`` is unaffected -- the offset is a pure translation -- so it
-        is equally valid in either frame. ``positions`` follows ``T_gt``.
+        ``quaternions_wxyz`` is unaffected -- the offset is a pure translation -- so it is
+        valid in either frame. ``positions`` follows ``T_gt``.
 
         Returns a flat dict of numpy arrays ready to splat into np.savez.
         """

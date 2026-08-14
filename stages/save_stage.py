@@ -125,7 +125,7 @@ class SaveStage(BaseStage):
         Warn rather than block: recentring stays a deliberate user action (the GUI button),
         and the tuner re-checks frame agreement before spending a run.
         """
-        profile = getattr(self.app, "ambiguity_profile", None)
+        profile = self.app.ambiguity_profile
         dominant = profile.dominant if profile is not None else None
         if dominant is None:
             return                       # no axis to address; nothing to be wrong about

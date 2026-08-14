@@ -112,7 +112,7 @@ class RenderStage(BaseStage):
         self.worker_step = 0
 
     def _has_disk_scenes(self) -> bool:
-        part = getattr(self.app, "mesh_basename", None)
+        part = self.app.mesh_basename
         if not part:
             return False
         return bool(list_scene_dirs(Path.cwd() / "output" / "synthetic_target" / part))
@@ -245,9 +245,9 @@ class RenderStage(BaseStage):
         # 2D candidate filter (mirrors real Mask2Former post-filter): per-part aspect-ratio
         # and area-ratio ranges auto-derived in RaycastStage. area_ratio scales as 1/d^2, so
         # rescale the scene measurement to the reference camera distance before comparing.
-        aspect_range = getattr(self.app, "aspect_ratio_range", None)
-        area_range   = getattr(self.app, "area_ratio_range", None)
-        ref_cam_d    = getattr(self.app, "ref_cam_distance", None)
+        aspect_range = self.app.aspect_ratio_range
+        area_range   = self.app.area_ratio_range
+        ref_cam_d    = self.app.ref_cam_distance
         if (aspect_range is None or area_range is None or ref_cam_d is None):
             print("[WARN] 2D filter ranges unavailable (run RAYCAST) -- skipping aspect/area gate.")
             area_scale = 1.0
@@ -340,7 +340,7 @@ class RenderStage(BaseStage):
                 pointcloud_to_ply(scene_obj.geom, out_dir / "scene.ply")
 
             # Final scene state: per-part GT poses + bin geometry (from the sim) + camera matrix.
-            if getattr(self.app, "mj_scene", None) is not None:
+            if self.app.mj_scene is not None:
                 state = self.app.mj_scene.export_scene_state()
                 state.update(
                     T_cam      = np.asarray(self.T_cam, dtype=np.float64),  # world -> camera view matrix

@@ -114,10 +114,8 @@ def _resolve(target: str):
                      os.path.join(REF_ROOT, stem, f"{stem}.stl"),
                      os.path.join(REPO, f"{stem}.STL"),
                      os.path.join(REPO, f"{stem}.stl"),
-                     # Both MechVision layouts: one model per part (current, written by
-                     # MM_Optimizer/model_sync.py) and the older one folder per cloud type.
-                     os.path.join(MM_ROOT, stem, f"{stem}.ply"),
-                     os.path.join(MM_ROOT, f"{stem}_surface", f"{stem}_surface.ply")):
+                     # The deployed MechVision model, written by MM_Optimizer/model_sync.py.
+                     os.path.join(MM_ROOT, stem, f"{stem}.ply")):
             if os.path.isfile(cand):
                 path = cand
                 break

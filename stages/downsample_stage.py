@@ -41,7 +41,7 @@ class DownsampleStage(BaseStage):
         """Drop the preview when this stage's products are cleared, so a stale heat map
         cannot outlive the profile it was drawn from."""
         self.show_ambiguity = False
-        if not self.app.headless and getattr(self, "btn_preview_ambiguity", None) is not None:
+        if not self.app.headless:
             self.btn_preview_ambiguity.text = "Preview Ambiguity Axes"
 
     def analyse_ambiguity_profile(self):
@@ -146,7 +146,7 @@ class DownsampleStage(BaseStage):
         GUI path `app.ambiguity_profile` does not exist yet. Headless returns from
         `build_panel` early, so a plain attribute access fails only in the GUI.
         """
-        profile = getattr(self.app, "ambiguity_profile", None)
+        profile = self.app.ambiguity_profile
         return bool(self.run_ambiguity and profile is not None and profile.dominant is not None)
 
     def _recenter_mode_label(self) -> str:
@@ -154,7 +154,7 @@ class DownsampleStage(BaseStage):
                 else "Recenter to PCA Frame")
 
     def _sync_recenter_label(self):
-        if not self.app.headless and getattr(self, "btn_recenter", None) is not None:
+        if not self.app.headless:
             self.btn_recenter.text = self._recenter_mode_label()
 
     def _on_ambiguity_toggled(self, checked):

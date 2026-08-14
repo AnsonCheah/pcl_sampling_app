@@ -163,13 +163,17 @@ def test_frame_mode_follows_the_ambiguity_checkbox(headless_app, box_mesh):
     assert stage._use_ambiguity_frame() is False
 
 
-def test_frame_mode_survives_missing_app_state(headless_app):
-    """`build_panel` asks for the button label during stage construction, which happens
-    BEFORE `MeshSamplingApp._restart()` seeds the app attributes — so `app.ambiguity_profile`
-    does not exist yet. Headless returns from `build_panel` early, so a plain attribute access
-    here would crash only in the GUI, at startup, where no test would see it."""
+def test_owned_state_exists_before_any_panel_is_built(headless_app):
+    """Every `downstream` attribute is seeded before the stages are constructed.
+
+    `build_panel` reads app state (e.g. the recentre button's label needs
+    `app.ambiguity_profile`), so seeding has to precede construction. It used not to, and
+    each reader defended itself with `getattr(app, "x", None)`; this pins the ordering that
+    made those guards unnecessary. Headless returns from `build_panel` early, so a
+    regression here would surface only in the GUI, at startup.
+    """
+    from app import STAGE_CLASSES
     app = headless_app
-    stage = app.stages[Stage.DOWNSAMPLE]
-    del app.ambiguity_profile
-    assert stage._use_ambiguity_frame() is False
-    assert stage._recenter_mode_label() == "Recenter to PCA Frame"
+    for cls in STAGE_CLASSES.values():
+        for attr in cls.downstream:
+            assert hasattr(app, attr), f"{cls.__name__} owns {attr!r} but it was never seeded"

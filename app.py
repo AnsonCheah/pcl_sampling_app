@@ -58,6 +58,20 @@ DEFAULT_WORLD_EXTENT = 1.0
 # so navigating between stages that show the same object does not throw away a manual orbit/zoom.
 FRAME_REL_TOL = 0.05
 
+# Pipeline order. Each class also declares the app.* state it owns in its `downstream` dict,
+# which is what seeds those attributes before any panel is built.
+STAGE_CLASSES = {
+    Stage.IMPORT_MESH: ImportMeshStage,
+    Stage.RAYCAST:     RaycastStage,
+    Stage.CROP:        CropStage,
+    Stage.DOWNSAMPLE:  DownsampleStage,
+    Stage.SAVE:        SaveStage,
+    Stage.DECOMPOSE:   DecomposeStage,
+    Stage.SCENE:       SceneStage,
+    Stage.RENDER:      RenderStage,
+    Stage.TUNING:      TuningStage,
+}
+
 
 class MeshSamplingApp:
 
@@ -68,21 +82,6 @@ class MeshSamplingApp:
         self._framed_bbox = None             # (centre, diagonal) last framed; see _framing_changed
 
         self.mesh_path = Path(mesh_path) if mesh_path is not None else None
-        self.stages = {
-            Stage.IMPORT_MESH: ImportMeshStage(self),
-            Stage.RAYCAST: RaycastStage(self),
-            Stage.CROP: CropStage(self),
-            Stage.DOWNSAMPLE: DownsampleStage(self),
-            Stage.SAVE: SaveStage(self),
-            Stage.DECOMPOSE: DecomposeStage(self),
-            Stage.SCENE: SceneStage(self),
-            Stage.RENDER: RenderStage(self),
-            Stage.TUNING: TuningStage(self),
-        }
-        # Give each stage a back-reference to its own enum key so reset()/clear_state_from
-        # can locate it without a reverse lookup.
-        for st, inst in self.stages.items():
-            inst.stage_key = st
         if not self.headless:
             # Must happen after Application.initialize() and before create_window().
             self.axes_glyph = self._install_glyph_font()
@@ -134,9 +133,23 @@ class MeshSamplingApp:
             self.panel = gui.Vert(0.25 * em, gui.Margins(em, em, em, em))
             self.window.add_child(self.panel)
 
-            for stage_class in self.stages.values():
-                stage_class.panel.visible = False
-                self.panel.add_child(stage_class.panel)
+        # Stages are built AFTER the GUI shell and AFTER their owned state is seeded, because
+        # BaseStage.__init__ calls build_panel(), which reads both. Seeding comes from the
+        # classes' `downstream` dicts — the same declarations _restart() replays — so no stage
+        # has to defend itself with getattr(app, "x", None) against its own construction order.
+        for cls in STAGE_CLASSES.values():
+            for attr, factory in cls.downstream.items():
+                setattr(self, attr, factory())
+        self.stages = {st: cls(self) for st, cls in STAGE_CLASSES.items()}
+        # Back-reference to its own enum key so reset()/clear_state_from can locate a stage
+        # without a reverse lookup.
+        for st, inst in self.stages.items():
+            inst.stage_key = st
+
+        if not self.headless:
+            for stage in self.stages.values():
+                stage.panel.visible = False
+                self.panel.add_child(stage.panel)
 
             # === Unified Back/Next navigation (pinned to panel bottom) ===
             # The buttons are declared once here, not per stage. set_stage drives their
@@ -549,7 +562,7 @@ class MeshSamplingApp:
         # with `bench/generate_scenes.py` where `--no-ambiguity` is a deliberate choice.
         downsample = self.stages[Stage.DOWNSAMPLE]
         downsample.run_ambiguity = True
-        if getattr(downsample, "chk_ambiguity", None) is not None:
+        if not self.headless:
             downsample.chk_ambiguity.checked = True
         self.stages[Stage.IMPORT_MESH].enable_widgets()
         self.stages[Stage.IMPORT_MESH].center_mesh()

@@ -202,7 +202,7 @@ class TuningStage(BaseStage):
     # ─────────────────────────────────────────────────────────────────────
 
     def _part(self):
-        return getattr(self.app, "mesh_basename", None)
+        return self.app.mesh_basename
 
     def _part_dir(self):
         part = self._part()
@@ -646,7 +646,7 @@ class TuningStage(BaseStage):
             return True
 
         problems = model_sync.check_scene_frames(part, model_path, _SYNTH_ROOT)
-        live = getattr(self.app, "down_pcd_surface", None)
+        live = self.app.down_pcd_surface
         if live is not None:
             why = reference_frames_agree(live, o3d.io.read_point_cloud(model_path))
             if why:

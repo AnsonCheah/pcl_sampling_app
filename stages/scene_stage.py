@@ -230,7 +230,7 @@ class SceneStage(BaseStage):
     # ─────────────────────────────────────────────────────────────────────
 
     def _synth_dir(self):
-        part = getattr(self.app, "mesh_basename", None)
+        part = self.app.mesh_basename
         return (Path.cwd() / "output" / "synthetic_target" / part) if part else None
 
     def _has_disk_scenes(self) -> bool:
@@ -267,22 +267,6 @@ class SceneStage(BaseStage):
             state = np.load(npz_path, allow_pickle=True)
             T_gt = np.asarray(state["T_gt"], dtype=float)   # (n,4,4) model_frame->world
             bin_geom = _reconstruct_bin_mesh(state["bin_dim"], state["bin_transform"])
-            # TRANSITIONAL -- delete this block once no scene directory under
-            # output/synthetic_target/ predates the scene_state frame fix (i.e. every one of
-            # them has been regenerated). It cannot fire on a scene this build wrote, so there
-            # is nothing here worth keeping past that point; left in place forever it just
-            # looks like a live invariant nobody dares touch.
-            #
-            # Until then: `body_offset` marks a scene whose T_gt is in the model frame. Written
-            # from an older build the key is absent and T_gt is in the centred physics body
-            # frame, so pairing it with target_mesh (which is NOT centred) draws every part
-            # offset by the mesh bounding-box centre -- millimetres, enough to look like a
-            # settling artifact rather than a frame error. Say so instead of quietly drawing
-            # the wrong picture.
-            if "body_offset" not in state.files:
-                print(f"[SCENE] {os.path.basename(str(scene_dir))} predates the scene_state "
-                      f"frame fix; preview may be offset by the mesh bbox centre. "
-                      f"Regenerate the scene to clear this.")
         except Exception as e:
             print(f"[SCENE] failed to read {npz_path}: {e}")
             return []
@@ -340,15 +324,13 @@ class SceneStage(BaseStage):
             "tray": "Pocket Depth (%)"}[self._structure_type()]
 
     def _apply_option_visibility(self):
-        """Show only the option block(s) relevant to the current scene mode. Hides (not just
-        greys out) so the panel stays uncluttered. set_needs_layout is skipped until the
-        window exists (panel is built before app.window in MeshSamplingApp.__init__)."""
+        """Show only the option block(s) relevant to the current scene mode. Hides rather
+        than greys out, so the panel stays uncluttered."""
         is_random = self._is_random()
         self.random_opts.visible    = is_random
         self.orient_opts.visible    = not is_random                              # any structured mode
         self.structure_opts.visible = (not is_random) and self._structure_type() != "none"
-        if getattr(self.app, "window", None) is not None:
-            self.app.window.set_needs_layout()
+        self.app.window.set_needs_layout()
 
     def _on_arrangement_changed(self, text, idx):
         # The single combo now drives both arrangement and structure, so update the fixture
@@ -398,7 +380,7 @@ class SceneStage(BaseStage):
         self.pick_mode = False
         self._pick_down_xy = None
         self._hover_facet = None
-        if not self.app.headless and getattr(self.app, "scene", None) is not None:
+        if not self.app.headless:
             self._remove_hover()
             self.app.scene.set_view_controls(gui.SceneWidget.Controls.ROTATE_CAMERA)
 

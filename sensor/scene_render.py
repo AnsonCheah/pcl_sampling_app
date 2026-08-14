@@ -812,14 +812,11 @@ def _snr_proxy(render):
     return (raw - raw.min()) / (raw.max() - raw.min() + 1e-12)
 
 
-def subset_render(render, keep_mask, verbose=False):
+def subset_render(render, keep_mask):
+    """Shallow copy of a render dict with every per-point array filtered by keep_mask.
+
+    Image buffers, res and origin scalars pass through unchanged.
     """
-    Shallow copy with all per-point arrays filtered by keep_mask.
-    Image buffers, res, and origin scalars pass through unchanged.
-    Now also propagates snr_proxy.
-    """
-    start = time.time()
-    if verbose: rp(f"{sys._getframe().f_code.co_name} took {np.round(time.time() - start, 6)}s")
     return {k: (v[keep_mask] if k in _PER_POINT_KEYS else v) for k, v in render.items()}
 
 
