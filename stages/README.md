@@ -70,6 +70,18 @@ Key attributes written and read between stages:
 
 Stages never call each other's methods directly. All handoffs go through `app`.
 
+## Why `geocenter` is owned by IMPORT_MESH
+
+`DownsampleStage.recenter_mesh_pcd` is what *writes* `app.geocenter`, but `IMPORT_MESH`
+declares it in its `downstream` dict, so it is cleared only when a new mesh is loaded.
+
+The recentre transforms `target_mesh`, `raw_pcd` and `cropped_pcd` in place, and
+`clear_state_from(DOWNSAMPLE)` cannot undo that. If DOWNSAMPLE owned the record, re-running
+Downsample after a recentre would reset `geocenter` to identity while the geometry stayed
+moved — and the `geocenter_*` PLY comments, which are the exported provenance of the model
+frame, would silently be wrong. Loading a new mesh resets geometry and record together,
+which is the only point at which they are consistent.
+
 ## Headless mode
 
 Every stage checks `self.app.headless` at the top of `build_panel()` and `_refresh_ui()` and returns early. `worker()` runs identically headless or GUI.

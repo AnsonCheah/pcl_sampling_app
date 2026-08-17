@@ -18,11 +18,7 @@ class DownsampleStage(BaseStage):
         "pcd_flat": lambda: None,
         "ambiguity_profile": lambda: None,
     }
-    # NOTE: `geocenter` is owned by IMPORT_MESH, not by this stage, even though this stage
-    # is what writes it. `recenter_mesh_pcd` transforms `target_mesh` / `raw_pcd` /
-    # `cropped_pcd`, which `clear_state_from(DOWNSAMPLE)` cannot undo -- so if the record
-    # were cleared here, re-running Downsample after a recentre would reset it to identity
-    # while the geometry stayed moved, and the exported provenance would silently be wrong.
+    # `geocenter` is written here but OWNED by IMPORT_MESH -- see stages/README.md.
 
     def __init__(self, app):
         self.name = Stage.DOWNSAMPLE.name

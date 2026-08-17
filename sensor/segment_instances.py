@@ -688,9 +688,8 @@ def build_perturbed_masks(
     from scene_render, producing masks that replicate the boundary behaviour
     of a real 2D instance segmentation network.
 
-    Internally each instance is processed on its padded bounding-box crop (and on
-    the GPU when available); the returned masks are re-expanded to full (H, W)
-    NumPy arrays for backward compatibility.
+    Each instance is processed on its padded bounding-box crop (on the GPU when
+    available); the returned masks are full (H, W) NumPy arrays.
 
     Parameters
     ----------

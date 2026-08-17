@@ -14,11 +14,9 @@ class ImportMeshStage(BaseStage):
     downstream = {
         "target_mesh": lambda: None,
         "mesh_basename": lambda: None,
-        # Owned here rather than by DOWNSAMPLE (which is what writes it) because it records
-        # the transform applied to `target_mesh` and every cloud derived from it.
-        # `recenter_mesh_pcd` mutates this stage's geometry, and `clear_state_from(DOWNSAMPLE)`
-        # cannot undo that -- so clearing the record there would leave the geometry moved
-        # with the provenance reset to identity. Loading a new mesh resets both together.
+        # Owned here, not by DOWNSAMPLE which writes it: clearing it there would reset the
+        # provenance while `recenter_mesh_pcd`'s move to this stage's geometry stood. See
+        # stages/README.md.
         "geocenter": lambda: np.eye(4),
     }
 

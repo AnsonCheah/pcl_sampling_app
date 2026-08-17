@@ -5,53 +5,13 @@ scene_render() is the single entry point for geometry. It performs a pure
 canonical raycast and returns a render dict. Every noise, dropout, and
 outlier function in this file operates on that dict downstream.
 
-Typical call sequence
-─────────────────────
-    render = scene_render(meshes, T_cam, look_at, fov, W, H)
-    if render is None:
-        return
+Call order is load-bearing — each stage builds on the previous state:
 
-    # 1. Dropout — remove physically unreturnable points
-    keep = compute_dropout_mask(
-        render, roughness=0.4,
-        albedo_per_geom_id={2: 0.04},  # black rubber part
-        density_cos_ref=0.7,           # oblique density thinning
-    )
+    dropout -> image-space effects -> edge artifacts -> structured outliers
+            -> scan-line banding -> sensor noise -> surface noise
 
-    # 2. Image-space reconstruction artifacts
-    render = add_image_space_effects(render, keep,
-                                     smooth_sigma_px=0.5,
-                                     sigma_fringe_corr=0.0001)
-
-    # 3. Edge artifacts — displace surviving pts + inject flying pixels
-    pts, nrm = add_edge_artifacts(render, keep)
-
-    # 4. Structured outliers
-    r = subset_render(render, keep)
-    mp, mn = add_multipath_outliers(r)
-    pp, pn = add_pepper_noise(r)
-    pts = np.vstack([pts, mp, pp])
-    nrm = np.vstack([nrm, mn, pn])
-
-    # Build per-point metadata for the full combined cloud.
-    n_kept    = keep.sum()
-    n_outlier = len(pts) - n_kept
-    pix_all   = np.concatenate([render["pixel_idx"][keep],
-                                 np.full(n_outlier, -1, np.int64)])
-    cproj_all = np.concatenate([render["cos_proj"][keep],
-                                 np.ones(n_outlier)])
-
-    # 5. Scan-line banding
-    pts = add_scan_line_banding(pts, nrm, pix_all, render["res"],
-                                render["sensor_origin"])
-
-    # 6. Sensor electronics noise
-    pts = add_sensor_noise(pts, nrm, render["sensor_origin"],
-                           pixel_idx=pix_all, res=render["res"],
-                           cos_proj=cproj_all)
-
-    # 7. Surface microgeometry
-    pts = add_surface_noise(pts, nrm)
+``RenderStage.worker`` is the reference caller and runs exactly that sequence; read it
+rather than a copy kept here, which would drift.
 
 render dict fields
 ──────────────────
@@ -250,15 +210,12 @@ def _specular_keep(normals, ray_dirs, proj_dirs, roughness):
     """
     Bidirectional GGX specular keep-mask  (N,) bool.
 
-    FIX 1 — Wrong light path (was reflecting camera ray, should reflect projector):
-    For structured light the projector emits; the physical path is
-      projector → surface → camera.
-    We reflect v_proj (surface→projector) about n and check alignment with v_cam.
+    The projector emits, so the physical path is projector -> surface -> camera: reflect
+    v_proj about n and check alignment with v_cam, not the camera ray.
 
-    FIX 2 — No diffuse floor (Lambertian surfaces were incorrectly dropped):
-    lobe = (1 − r) · specular_term  +  r   (r = roughness acts as diffuse floor)
-    At roughness=1 the floor equals 1.0, so Lambertian surfaces always pass.
-    At roughness=0 it is pure specular — mirrors drop unless perfectly aligned.
+    lobe = (1 - r) * specular_term + r, where r = roughness is a diffuse floor. At r=1 the
+    floor is 1.0 so Lambertian surfaces always pass; at r=0 it is pure specular and mirrors
+    drop unless perfectly aligned.
     """
     v_cam  = -ray_dirs
     v_proj = -proj_dirs
@@ -349,9 +306,8 @@ def _albedo_pepper_keep(snr, albedo, base_rate, rng):
     """
     Albedo- and SNR-weighted pepper dropout  (N,) bool.
 
-    NEW — Dark surfaces were not modelled. A surface with albedo 0.03 (black
-    rubber) absorbs ~97 % of the projected light regardless of geometry,
-    driving effective SNR near zero and causing near-total dropout.
+    A surface with albedo 0.03 (black rubber) absorbs ~97 % of the projected light
+    regardless of geometry, driving effective SNR near zero and hence near-total dropout.
 
         effective_snr = snr_proxy * albedo      (both in [0, 1])
         p_drop = base_rate * (1 − effective_snr)
@@ -369,9 +325,8 @@ def _density_keep(cos_proj, cos_ref, rng):
     """
     Oblique-surface point density thinning  (N,) bool.
 
-    NEW — At projector incidence angle θ the fringe pattern stretches by
-    1/cos_proj across the surface, reducing the effective number of fringe
-    cycles per camera pixel and hence spatial point density.
+    At projector incidence angle theta the fringe pattern stretches by 1/cos_proj across
+    the surface, reducing fringe cycles per camera pixel and hence point density.
 
         p_keep = min(1, cos_proj / cos_ref)
     """
@@ -730,12 +685,10 @@ def add_edge_artifacts(render, keep_mask=None, max_bleed=0.006,
     A pixel straddling a depth edge integrates fringe from both surfaces.
     The SL decoder places the output point between them.
 
-    FIX — depth distribution: was Uniform(fg, bg). Now Beta(1.5, 3.0),
-    mean ≈ 0.33. A pixel crossing an edge has the nearer surface covering
-    more than half its area → decoded depth biased toward foreground.
-
-    FIX — background depth: was Python for-loop + 7×7 patch per pixel.
-    Now maximum_filter(full_depth, 7), computed once — O(H×W).
+    Depth is drawn Beta(1.5, 3.0), mean ~0.33, not uniformly between the two surfaces: a
+    pixel crossing an edge has the nearer surface covering more than half its area, so the
+    decoded depth is biased toward the foreground. Background depth comes from one
+    maximum_filter(full_depth, 7) pass, O(H*W).
     """
     start = time.time()
     rng = np.random.default_rng(seed)
@@ -830,11 +783,10 @@ def add_multipath_outliers(render, fringe_period=0.003, rate=0.01,
     → positive phase offset → the ghost is almost always BEHIND (farther from
     sensor).
 
-    FIX 1 — Sign bias was 50/50. Now 75 % positive (ghost farther from sensor).
+    Sign is 75 % positive rather than even, matching that bias. Displacement is not purely
+    quantised either — indirect-path BRDF uncertainty adds phase noise:
 
-    FIX 2 — Displacement was exactly ±k·λ (purely quantised). Real multipath
-    adds phase noise from the indirect-path BRDF uncertainty.
-    Now:  t_ghost = t_true + sign·k·λ + N(0, λ·phase_sigma_rel)
+        t_ghost = t_true + sign*k*lambda + N(0, lambda*phase_sigma_rel)
 
     Parameters
     ----------
@@ -999,13 +951,12 @@ def _fixed_pattern_noise(pts, origin, fpn_sigma, fpn_scale, seed,
     """
     Per-pixel persistent depth bias from sensor non-uniformity.
 
-    FIX — Was evaluated in world-space 3D. FPN is a SENSOR PIXEL property:
-    the same pixel always reads the same bias regardless of what it images.
-    The same scene point scanned from a different pose gets different FPN.
-
-    Correct domain: image-space (u, v) ∈ [0, fpn_scale]² for canonical points
-    (pixel_idx >= 0).  Outlier/injected points (pixel_idx = -1) fall back to
-    world-space Perlin with a seed offset to decorrelate from systematic bias.
+    FPN is a property of the sensor PIXEL, not of the scene: the same pixel always reads
+    the same bias whatever it images, and the same scene point scanned from a different
+    pose gets a different one. So it is evaluated in image space, (u, v) in
+    [0, fpn_scale]^2, for canonical points (pixel_idx >= 0). Outlier and injected points
+    (pixel_idx = -1) have no pixel, and fall back to world-space Perlin with a seed offset
+    that decorrelates them from the systematic bias.
     """
     ray = _sensor_ray(pts, origin)
     if pixel_idx is not None and res is not None:
@@ -1029,12 +980,11 @@ def _axial_noise(pts, origin, sigma_z_ref, z_ref, model, rng, cos_proj):
     """
     Gaussian noise along the sensor ray (Z-repeatability spec).
 
-    FIX — Was angle-independent. For SL, fringe stretching at oblique
-    projector incidence (angle θ from normal, cos θ = cos_proj) reduces the
-    number of fringe cycles per pixel → lower phase-measurement SNR →
-    higher depth noise.
+    Angle-dependent: fringe stretching at oblique projector incidence (cos theta =
+    cos_proj) reduces fringe cycles per pixel, lowering phase-measurement SNR and so
+    raising depth noise.
 
-        σ_eff = σ_ref · depth_scale(z) / cos_proj
+        sigma_eff = sigma_ref * depth_scale(z) / cos_proj
 
     cos_proj clipped to [0.2, 1] to avoid divergence (heavily oblique points
     should be dropped by compute_dropout_mask before reaching here).

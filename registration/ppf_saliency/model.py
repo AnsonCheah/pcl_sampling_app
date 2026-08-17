@@ -71,9 +71,8 @@ class PPFModel:
     # Carried through `with_weights` automatically -- it rebuilds from `self.__dict__`.
     key_offsets: Optional[np.ndarray] = None
 
-    # cKDTree over `points`, in the MODEL frame, built once at train time. Verification maps
-    # the scene into the model frame and queries this instead of rebuilding a tree over the
-    # moved model for every candidate pose. Read-only, so safe to share across threads.
+    # cKDTree over `points` in the MODEL frame, built once at train time and queried by
+    # _verify. Read-only, so it is safe to share across threads.
     point_tree: Optional[object] = None
 
     # Device copies of the table arrays, keyed by array-module name; see `table_for`.

@@ -99,17 +99,9 @@ class PPFConfig:
     spread_angle_bins: bool = True   # tolerate a correspondence falling in an adjacent bin
     steep_pair_readmit_deg: float = 30.0   # re-admit sub-min_pair_dist pairs this divergent
 
-    # Cap on entries stored per feature bin.
-    #
-    # This is NOT redundant with `vote_dedup`, though it is easy to assume so. Deduplication
-    # fixes the *bias* a planar region introduces (Hinterstoisser's problem: flat geometry
-    # out-voting distinctive geometry by repetition) but it runs *after* the table lookup has
-    # been expanded, so it does nothing about *cost*. On a 100x30x20 box the feature space
-    # collapses onto six distinct normals: bucket sizes reach 12k entries and a single
-    # instance would expand to ~1.8e9 votes. The cap bounds that at the source.
-    #
-    # Entries are kept evenly strided within a bin, not truncated, so the survivors still
-    # span the bin's alpha range instead of clustering at whichever pairs sorted first.
+    # Cap on entries stored per feature bin. NOT redundant with `vote_dedup`: dedup fixes
+    # planar-region bias but runs after expansion, so it does nothing about cost. Entries are
+    # strided, never truncated. See registration/CLAUDE.md.
     max_bucket_entries: int = 256
 
     # --- policy (shared across all parts, not per-part) ---

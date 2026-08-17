@@ -645,14 +645,8 @@ class Tuner(MVEvaluator):
             total_time += res.mean_time
             running_cov   = total_cov  / (step + 1)
             running_time  = total_time / (step + 1)
-            # logging.info(f"  Trial {trial.number:3d}  Scene {step+1}/{SC.M_FULL}  "
-            #              f"cov={res.coverage:.3f}  mean_time={res.mean_time:.2f}s  "
-            #              f"running_cov={running_cov:.3f}  running_time={running_time:.2f}s")
-            # Level 1: Absolute time safety cap (after ≥3 scenes to avoid first-scene noise).
-            # A FIXED ceiling — not competitive — so only pathological configs are pruned,
-            # never the slow-but-accurate (precision-first) region. This replaces the old
-            # best_mean_time × RATIO guard, which ratcheted down after a fast low-quality
-            # trial and cascaded into pruning ~90% of trials, starving the sampler.
+            # Absolute time cap, after 3+ scenes so first-scene noise cannot trip it. Fixed,
+            # never competitive -- see the pruning note in this module's docstring.
             if step >= 2 and running_time > SC.TIME_ABS_CAP:
                 trial.set_user_attr("prune_reason", f"time@{step}")
                 raise optuna.TrialPruned()

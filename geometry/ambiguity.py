@@ -85,11 +85,13 @@ __all__ = [
 class AmbiguityConfig:
     """Tolerances for the ambiguity search.
 
-    Everything that scales with the part is expressed as a fraction of the part diameter
-    or of the visible point count.  The absolute floors exist for sensor-physics reasons,
-    not as size rules: geometric agreement finer than sensor noise is not meaningful, and
-    a feature the sensor cannot resolve cannot disambiguate however large it is relative
-    to the part.
+    Everything that scales with the part is a fraction of its diameter or of the visible
+    point count. The absolute floors are sensor-physics limits, not size rules: agreement
+    finer than sensor noise is not meaningful, and a feature the sensor cannot resolve
+    cannot disambiguate however large it is relative to the part.
+
+    These values are calibrated against the 30 T-LESS objects and 25333MB000; the evidence
+    and the retuning caveats are in geometry/README.md.
     """
 
     # Viewpoint sweep
@@ -126,57 +128,24 @@ class AmbiguityConfig:
     max_candidates: int = 50
     min_votes: int = 8
 
-    # Verification.  The tolerance is set by the cloud's own resolution, not by the part
-    # size: a rotated point lands *between* samples, so anything below the sampling pitch
-    # reports missing symmetry that is really missing resolution.  The factor is the
-    # covering radius of the sample, not its nearest-neighbour distance -- calibrated on
-    # exact symmetries of cylinder/torus/box/sphere, which explain 0.998-0.999 at 3.0
-    # while non-symmetry rotations of the same parts stay at 0.20-0.31.
+    # Verification. Tolerance follows the cloud's resolution, not the part size: below the
+    # sampling pitch a rotated point lands between samples, reporting missing resolution as
+    # missing symmetry. The factor is the sample's covering radius, not its NN distance.
     epsilon_spacing_factor: float = 3.0   # multiples of the median nearest-neighbour spacing
     epsilon_floor_m: float = 0.0005       # sensor-physics floor (~3*sigma_depth)
     normal_cos_tol: float = 0.70          # a point must also agree in normal direction
+    # An axis is global if it preserves the whole model, OR is ambiguous from essentially
+    # every viewpoint while still explaining most of the surface. Coverage alone is too
+    # strict for manufactured parts; view_fraction alone is too permissive. The two classes
+    # are separated by only 0.006 of area_fraction — read the README before retuning, and
+    # prefer a published annotation where one exists.
     global_area_frac: float = 0.95        # coverage above which an axis preserves the whole model
-    # ...OR the axis is ambiguous from essentially every viewpoint.
-    #
-    # Surface coverage alone is too strict for real manufactured parts.  Validated against
-    # BOP's published symmetry annotations for the 30 T-LESS objects: 10 parts BOP calls
-    # symmetric were missed on coverage alone, their best area_fraction spanning 0.81-0.95
-    # (a symmetric body with a small boss, hole or chamfer breaking exact surface agreement
-    # at the 5-20% level).  Every one of those 10 had view_fraction == 1.00 and the correct
-    # fold, so the axis was recovered perfectly and only the *label* was wrong.
-    #
-    # view_fraction is the more direct measure of what "global" has to mean operationally:
-    # an axis that makes every viewpoint ambiguous will flip the matcher from anywhere,
-    # whether or not the last few percent of the surface agrees.
     global_view_frac: float = 0.98
-    # ...but that clause on its own is too permissive, so it carries a coverage floor.
-    #
-    # Without one, the three BOP-asymmetric T-LESS objects all get promoted to global: they
-    # too have an axis ambiguous from every viewpoint, explaining 0.71-0.80 of the surface.
-    # They are *nearly* symmetric, and a matcher looking at partial views really will flip
-    # them -- BOP calls them asymmetric because with the whole model in hand the poses are
-    # separable.
-    #
-    # Be aware how thin the separation is: across the 30 objects, symmetric parts bottom out
-    # at area_fraction 0.809 and asymmetric ones top out at 0.803. A 0.006 gap is not a
-    # natural boundary, it is a continuum of "how nearly symmetric", and this threshold is
-    # calibrated on 30 samples sitting either side of it. It gets 29/30 here; do not read it
-    # as a law. Where a published annotation exists, prefer it -- `bench/metrics.py` already
-    # does, and only falls back to this classification for parts BOP has never seen.
     global_view_area_floor: float = 0.80
 
-    # Per-view survival.
-    #
-    # This asks "would the matcher plausibly land on this pose", NOT BOP-Distrib's "is
-    # this pose provably indistinguishable".  Their tau (~28 points, well under 1% of the
-    # model) answers the second question; using it here rejects every real case, because
-    # ambiguity on a manufactured part is partial -- a large chunk of the visible patch
-    # aligns elsewhere and the remainder does not, which is exactly the pose a matcher
-    # scoring by inlier fraction will happily return.
-    #
-    # Calibrated on 25333MB000: 300 random rotations reach a best-per-view explained
-    # fraction of p50 0.033, p99 0.273, max 0.315, and NONE reach 0.60; the genuine
-    # ambiguity axes reach 0.709-0.735.  Requiring 60% explained sits in the gap.
+    # Per-view survival: "would the matcher plausibly land on this pose", not BOP-Distrib's
+    # "is this pose provably indistinguishable". Ambiguity on a manufactured part is partial,
+    # so their much tighter tau rejects every real case.
     f_tau: float = 0.40             # unexplained fraction of the visible patch allowed
     n_floor: int = 4                # sensor-resolution floor on disambiguating evidence
 
@@ -191,21 +160,10 @@ class AmbiguityConfig:
     # have.
     significant_score: float = 0.05
 
-    # Ranking.  score = view_fraction * area_fraction ** rank_area_exponent, estimating
-    # P(the matcher returns this wrong pose):
-    #     view_fraction  -- how often the ambiguity is geometrically available
-    #     area_fraction  -- how much of the WHOLE model still coincides, i.e. whether the
-    #                       hypothesis survives verification against the unseen part
-    # The exponent models the shape of that second term.  k=0 means verification ignores
-    # the unseen model (equivalent to onlyConsiderVisibleSurfaceOfModel=True); k=1 means
-    # a linear fit score; k>1 reflects verification being a *threshold*, which collapses
-    # acceptance faster than linearly once overlap drops below it.  A logistic centred on
-    # the effective threshold would be the honest form; this is a one-knob approximation.
-    #
-    # Calibrated against observed behaviour on 25333MB000, where only the off-centroid
-    # disc axis produces flips in real scenes: it leads for k > 1.40, and at k = 2.0 leads
-    # by 32%.  Ranking is a pure function of the stored per-axis metrics, so `rank_axes`
-    # can retune this without re-running the analysis.
+    # Ranking: score = view_fraction * area_fraction ** rank_area_exponent, estimating
+    # P(the matcher returns this wrong pose). The exponent models how sharply verification
+    # against the unseen model rejects a hypothesis. Ranking is a pure function of the stored
+    # per-axis metrics, so `rank_axes` can retune it without re-running the analysis.
     rank_area_exponent: float = 2.0
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -718,24 +676,9 @@ def rank_axes(profile: "AmbiguityProfile",
 
     profile.axes.sort(key=lambda ax: -ax.score)
 
-    # Score decides the order.  The fold preference is a *tie-break only*, and only among
-    # GLOBAL axes -- it says "of two axes that are equally likely to be returned, prefer
-    # the one that costs more to get wrong", which is a statement about a symmetry group:
-    # a hex prism's C2 and C6 axes are both global and score within a thousandth of each
-    # other, and reporting C2/180deg for a part that needs C6/60deg leaves two thirds of
-    # the ambiguity unmitigated.  A cylinder's continuous axis beats its perpendicular C2s
-    # the same way.
-    #
-    # It must NOT reach view-dependent axes.  Their scores are two orders of magnitude
-    # smaller (0.01-0.03, not ~1.0), so the old absolute `round(score, 2)` tie window put
-    # every one of them in a single bucket and silently promoted fold to the primary sort
-    # key.  Measured on 25333MB000: six axes scoring 0.0017-0.0172, the highest being the
-    # off-centroid disc axis at fold 1 -- which was demoted to rank 2 behind two C2 axes
-    # scoring LESS, because 0.0172 and 0.0170 both round to 0.02 and fold 2 > fold 1.
-    # That is the ranking the exponent was calibrated to avoid.
-    #
-    # The window is a fraction of the leading score rather than an absolute step, so it
-    # means the same thing whether scores sit near 1.0 or near 0.01.
+    # Score decides the order; fold breaks ties among GLOBAL axes only. The window is a
+    # fraction of the leading score, never absolute — an absolute one promotes fold to the
+    # primary key for view-dependent axes. See geometry/README.md.
     if profile.axes:
         lead = profile.axes[0].score
         tied = [i for i, ax in enumerate(profile.axes)
@@ -880,22 +823,8 @@ def analyse_ambiguity(mesh: o3d.geometry.TriangleMesh,
         return AmbiguityProfile(per_point_discriminative=np.ones(len(pts)))
     normals = normals / np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-12)
 
-    # Work at the origin, whatever the caller hands us, and put the axes back at the end.
-    #
-    # The result is *supposed* to be translation-invariant and is not: a part left in its
-    # assembly coordinates (25333MB000's STL sits 0.85 m out) yields a different answer
-    # from the same cloud centred. Measured on that part -- centred: 4 axes, dominant
-    # area 0.496 (the disc axis); at 0.85 m: 5 axes, dominant area 0.359, with the disc
-    # axis split into 0.415 + 0.461 fragments that individually lose to a C2 axis. The
-    # frame then gets built around the wrong axis.
-    #
-    # The pipeline centres the mesh on every path that goes through the app
-    # (`start_express_sampling`, `run_headless`, batch), which is why this stayed hidden
-    # -- only `bench/generate_scenes.py` skipped it. Rather than rely on every caller
-    # remembering, the invariance is enforced here where it can be guaranteed.
-    #
-    # Only axis *points* are translation-dependent: directions, angles, per-view and
-    # per-point scores are all unaffected.
+    # Analyse at the origin whatever the caller hands us, and restore the axes at the end:
+    # the result is supposed to be translation-invariant and is not. See geometry/README.md.
     analysis_origin = 0.5 * (pts.min(axis=0) + pts.max(axis=0))
     if np.linalg.norm(analysis_origin) > 1e-9:
         pts = pts - analysis_origin

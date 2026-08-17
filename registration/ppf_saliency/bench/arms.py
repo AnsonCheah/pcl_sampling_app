@@ -87,18 +87,9 @@ def _knee_mask(values: np.ndarray) -> np.ndarray:
     if v.size < 10 or float(v.max() - v.min()) < 1e-9:
         return np.ones(v.size, dtype=bool)         # no structure to split on: keep everything
 
-    # Exclude the atom at the minimum before looking for a knee.
-    #
-    # The heat map is not a smooth distribution: a large share of points are explained
-    # *exactly* by some ambiguity transform and score a hard 0.0 — measured 41.5% of
-    # T-LESS obj_000018. That spike is a vertical jump in the CDF at its left edge, which is
-    # by far the furthest point from the chord, so the knee lands *on* the atom, the
-    # threshold comes back as 0.0, and `v >= 0` keeps every point. The pruning arm then
-    # silently becomes a copy of the baseline and the ablation reports that pruning is
-    # harmless because pruning never happened.
-    #
-    # Those zero-scoring points are exactly what the arm means to drop, so they are removed
-    # first and the knee is fitted to what remains.
+    # Drop the zero-score atom before fitting the knee, or the knee lands on it, the
+    # threshold comes back 0.0, and the pruning arm silently becomes the baseline.
+    # See registration/README.md.
     atom = v <= v.min() + 1e-9
     rest = v[~atom]
     if rest.size < 10:

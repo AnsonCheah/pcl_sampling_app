@@ -146,58 +146,27 @@ def _fix_axis_signs(rotation_matrix):
 
 
 def pcd_geocenter(pcd, axis=None):
-    """
-    Returns transformation matrix with consistent orientation.
+    """Model-frame transform for a cloud, with a deterministic axis convention.
 
-    With ``axis=None`` this is the historical PCA-canonical frame: axes are the
-    covariance eigenvectors through the cloud mean.
-
-    With an ``AmbiguityAxis`` (see ``geometry.ambiguity``) the frame is built so the
-    ambiguity axis IS the frame's **Z** and passes through the frame origin. That is what
-    makes the axis addressable by MechVision's ``rotationStrategy``, which can only rotate
-    about a geocenter frame axis: a PCA frame is derived from mass distribution and has no
-    reason to line up with an ambiguity axis, so without this the symmetry search rotates
-    about the wrong line no matter what ``angleStep`` is used.
-
-    **The part will NOT end up centred on the origin, and that is correct.** An ambiguity
-    axis generally misses the centroid — that is the entire reason this argument exists —
-    so the axis and the centroid cannot both sit on the origin. Putting the axis there
-    leaves the part displaced by exactly the axis's off-centroid distance (10.6 mm measured
-    on 25333MB000, whose disc axis is that far from the centroid). Centring the part
-    instead would move the axis off the origin and MechVision would rotate about the wrong
-    line, which is the failure this whole mechanism exists to remove. A viewer will show
-    the part sitting off-origin; that is the trade, not a bug.
-
-    The remaining freedom is *where along* the axis the origin sits, which does not affect
-    whether ``rotationStrategy`` works. It is placed at the projection of the cloud mean
-    onto the axis, so the along-axis offset is zero and the part stays as close to the
-    origin as the perpendicular constraint allows.
-
-    There is deliberately **no "the PCA frame already agrees" shortcut**. One used to
-    return the PCA frame whenever a PCA axis sat within 5 degrees of the ambiguity axis and
-    the axis passed within 1% of the extent of the PCA origin, on the theory that such
-    parts needed no regeneration. It silently produced a frame that does not satisfy this
-    function's contract: measured on a 100x30x20 box with an ambiguity axis parallel to
-    PCA-1 and offset 0.8 mm, the axis came back as frame **X** sitting **0.83 mm off the
-    origin** — so a rotation search about frame Z was aimed at the wrong line entirely, and
-    even about X it swept a line 0.83 mm away. The axis is now always made frame Z through
-    the origin, whatever the PCA says.
-
-    This function is pure and deterministic: same cloud in, bitwise-identical matrix out.
-    ``_fix_axis_signs`` exists to remove the eigen-decomposition's arbitrary sign choice,
-    which would otherwise make the frame differ run to run. The in-plane X direction is
-    also well conditioned in practice — dropping 0.1% / 1% / 5% of the cloud's points
-    rotates it by 0.045 / 0.35 / 0.21 degrees on 25333MB000, whose in-plane PCA eigenvalue
-    ratio is 1.20 (the direction only becomes arbitrary as that ratio approaches 1.0).
-    What is *not* stable across re-analyses is which ambiguity axis wins in the first
-    place; see ``geometry.ambiguity.analyse_ambiguity``.
+    pcd  : point cloud.
+    axis : ``None`` for the PCA frame (covariance eigenvectors through the cloud mean), or
+           an ``AmbiguityAxis`` (see ``geometry.ambiguity``) to build the frame around it.
 
     Returns
     -------
-    tf : (4, 4) — the transform to APPLY to the cloud to put it in this frame.
+    tf : (4, 4) transform to APPLY to the cloud to put it in this frame. It is the *inverse*
+         frame transform, so the translation sits in column 3; see geometry/CLAUDE.md.
 
-    Note the return convention is the *inverse* transform, so the translation sits in
-    column 3 and row 3 is always ``[0, 0, 0, 1]``; see geometry/CLAUDE.md.
+    With an ``AmbiguityAxis`` the axis becomes frame **Z** through the origin, always —
+    MechVision's ``rotationStrategy`` can only rotate about a geocenter axis, and a PCA frame
+    has no reason to line up with an ambiguity axis. Consequently **the part is not centred
+    on the origin, and that is correct**: an ambiguity axis generally misses the centroid, so
+    both cannot sit at the origin, and centring the part would aim the symmetry search at the
+    wrong line. The origin is placed at the projection of the cloud mean onto the axis, which
+    zeroes the along-axis offset without disturbing that.
+
+    Pure and deterministic: same cloud in, bitwise-identical matrix out. Which ambiguity axis
+    wins is *not* stable across re-analyses — see ``geometry.ambiguity.analyse_ambiguity``.
     """
     points = np.asarray(pcd.points)
     center = points.mean(axis=0)
@@ -452,33 +421,19 @@ def _as_points(obj) -> np.ndarray:
 
 
 def model_diameter(obj, max_hull_points: int = 3000) -> float:
-    """Diameter — the largest distance between any two points.
+    """Largest distance between any two points, searched over the convex hull.
 
-    The diameter is always realised by a pair of convex-hull vertices, so the search runs
-    over the hull. Exact whenever the hull has at most ``max_hull_points`` vertices, which
-    covers most parts (the Stanford bunny's 21 668-point cloud has a 1 416-vertex hull).
+    Exact while the hull has at most ``max_hull_points`` vertices; above that the hull is
+    strided down and the result is a tight lower bound. The subsample keeps the six
+    axis-extreme points, so it can never come back shorter than the longest AABB edge. The
+    cap is not theoretical: a sphere sampled at 20 000 points has a 19 172-vertex hull, and
+    an unguarded all-pairs distance matrix over that would ask for 8.8 GB.
 
-    Above that the hull is strided down and the result is a tight lower bound rather than
-    exact. The subsample always retains the six axis-extreme points, so it can never come
-    back shorter than the longest AABB edge. This matters more than it sounds: a sphere
-    sampled at 20 000 points has a 19 172-vertex hull — nearly every point is a vertex —
-    and an unguarded all-pairs distance matrix over that would ask for 8.8 GB.
-
-    Pairwise distances go through ``scipy.spatial.distance.pdist``, which stores only the
-    lower triangle and is ~15x faster than an ``(n, n, 3)`` broadcast at a sixth of the
-    memory.
-
-    This is the single definition of "diameter": the longest minimal-OBB extent and the AABB
-    diagonal disagree by 1.55x on the bunny (94.4 mm vs 146.5 mm), so a threshold written as
-    "5% of diameter" means two different things unless every caller uses this one.
-
-    PPF needs this value specifically: it is the upper bound on the point-pair distance, so
-    anything smaller silently discards long pairs (the ones with the best lever arm on
-    rotation) and anything larger wastes distance bins on pairs that cannot occur.
-
-    ``geometry.ambiguity`` deliberately keeps its own AABB-diagonal measure: its tolerances
-    are calibrated against that number, and swapping the anchor underneath them would move
-    every threshold in a module that currently works.
+    This is the single definition of "diameter". The longest minimal-OBB extent and the AABB
+    diagonal disagree by 1.55x on the bunny (94.4 mm vs 146.5 mm), so "5% of diameter" means
+    two different things unless every caller uses this one. The exception is
+    ``geometry.ambiguity``, which deliberately keeps its own AABB-diagonal measure because
+    its tolerances are calibrated against that number.
     """
     from scipy.spatial.distance import pdist
 

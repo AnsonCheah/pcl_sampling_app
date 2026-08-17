@@ -20,14 +20,8 @@ from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
 # --- Debris thresholds -------------------------------------------------------------------
-# A cluster must be negligible in area AND spatially detached AND materially inflating the
-# bounding box before it is dropped. Measured against every STL in the repo:
-#   96330MB000.STL  1 candidate (2 tris, area frac 3.8e-11, gap 0.98 m), 75.8% shrink -> drop
-#   96330MB100.STL  11 clusters, 0 candidates (nested shells, all inside main AABB) -> keep
-#   40mm.STL        208 clusters, 135 candidates totalling 42% of triangles, 0.0% shrink -> refuse
-# The last case is why DEBRIS_MIN_SHRINK and DEBRIS_MAX_TRI_FRAC both exist: a multi-body
-# assembly trips the area+gap test on nearly every body, and dropping them would silently
-# delete most of the model.
+# A cluster is dropped only if negligible in area AND detached AND inflating the bounding
+# box. All three are needed -- see geometry/README.md for the per-mesh measurements.
 DEBRIS_MAX_AREA_FRAC = 1e-3    # cluster surface area below 0.1% of the total is "negligible"
 DEBRIS_MIN_SHRINK    = 0.02    # only cut if the AABB diagonal shrinks by >= 2%
 DEBRIS_MAX_TRI_FRAC  = 0.05    # candidates above 5% of triangles => assembly file, refuse to cut

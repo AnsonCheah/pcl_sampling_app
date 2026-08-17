@@ -202,12 +202,9 @@ def _verify(model: PPFModel, T: np.ndarray, scene_pts: np.ndarray, scene_nrm: np
     """
     R, t = T[:3, :3], T[:3, 3]
 
-    # Scene -> model frame rather than model -> scene frame. A rigid transform preserves
-    # distances and angles, so `dist(scene_i, R*model_j + t) == dist(R^T(scene_i - t),
-    # model_j)` exactly -- but the second form queries a tree over the MODEL, which never
-    # moves and was therefore built once at train time. The previous form rebuilt a KD-tree
-    # per candidate pose, ~16 times per instance, for no information gain.
-    # (`x @ R` is `R^T @ x` for row vectors.)
+    # Query scene->model, not model->scene: a rigid transform preserves distances, so this
+    # reuses the train-time tree instead of rebuilding one per pose. Do not "simplify" back
+    # to transforming the model -- see registration/CLAUDE.md. (`x @ R` is `R^T @ x` here.)
     tree = model.point_tree if model.point_tree is not None else cKDTree(model.points)
     d_scene, i_scene = tree.query((scene_pts - t) @ R, k=1)
     local_n = scene_nrm @ R
@@ -345,14 +342,8 @@ def match(model: PPFModel,
             continue
 
         m_idx, a_idx = best // NA, best % NA
-        # Runner-up excludes the winner's own alpha neighbourhood, which is where vote
-        # spreading deposits copies of the winner -- counting those would report a tiny
-        # margin for every clean detection.
-        #
-        # Masked in place rather than on a copy. Copying the accumulator to blank three cells
-        # per row was 8% of match time (it is R x M x NA floats); `peak` has already been read
-        # out above and `acc` is reallocated at the top of the next chunk, so nothing
-        # downstream observes the mutation.
+        # Exclude the winner's own alpha neighbourhood, where vote spreading deposits copies
+        # of it. Masked IN PLACE deliberately -- see registration/CLAUDE.md.
         for off in (-1, 0, 1):
             flat[rows, m_idx * NA + (a_idx + off) % NA] = -1.0
         runner = np.maximum(flat.max(axis=1), 0.0)

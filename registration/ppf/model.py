@@ -64,12 +64,8 @@ class PPFModel:
     # which case `lookup` falls back to binary search. See `_build_key_offsets`.
     key_offsets: Optional[np.ndarray] = None
 
-    # cKDTree over `points`, in the MODEL frame, built once at train time.
-    # Verification needs scene->model nearest neighbours for every candidate pose. Doing that
-    # by moving the model and building a fresh tree per pose rebuilt it ~16 times per
-    # instance; a rigid transform preserves distances, so the scene can be mapped into the
-    # model frame instead and queried against this one fixed tree. Read-only, so it is safe
-    # to share across threads.
+    # cKDTree over `points` in the MODEL frame, built once at train time and queried by
+    # _verify. Read-only, so it is safe to share across threads.
     point_tree: Optional[object] = None
 
     # Device copies of the four table arrays, keyed by array-module name. Populated on first

@@ -240,3 +240,15 @@ No weighting or pruning scheme beat plain uniform voting. That machinery therefo
 ```bash
 python -m pytest registration/tests -q
 ```
+
+## Why the saliency knee excludes the zero-score atom
+
+The ambiguity heat map is not a smooth distribution. A large share of points are explained
+*exactly* by some ambiguity transform and score a hard 0.0 — measured at 41.5% on T-LESS
+`obj_000018`. That spike is a vertical jump in the CDF at its left edge, and therefore by far
+the furthest point from the chord, so `find_cdf_knee` lands *on* the atom, the threshold comes
+back as 0.0, and `v >= 0` keeps every point.
+
+The pruning arm then silently becomes a copy of the baseline, and the ablation reports that
+pruning is harmless — because pruning never happened. Those zero-scoring points are exactly
+what the arm means to drop, so `arms.py` removes them first and fits the knee to the rest.

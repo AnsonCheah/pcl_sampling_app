@@ -51,21 +51,13 @@ class SaveStage(BaseStage):
     def _geocenter_comments(self):
         """The `geocenter_*` PLY header comments: this cloud's model-frame provenance.
 
-        `app.geocenter` is the transform that has been APPLIED to the geometry, so its
-        inverse is the model frame expressed in the pre-recentre frame -- i.e. where the
-        geocenter origin sat, and how its axes were oriented, before `recenter_mesh_pcd`
-        moved everything. That is what these key names have always claimed to hold.
+        `app.geocenter` is the transform APPLIED to the geometry, so its inverse is the model
+        frame expressed in the pre-recentre frame — where the geocenter origin sat, and how
+        its axes were oriented, before `recenter_mesh_pcd` moved anything.
 
-        They did not hold it. The old code read `geocenter[3, 0..2]`, but `pcd_geocenter`
-        returns `inv([R|o])`, whose row 3 is always `[0, 0, 0, 1]` -- so `geocenter_x/y/z`
-        was `0.0` for every part ever exported, whatever the frame. The quaternion was
-        likewise taken from the *inverse* rotation. Getting that inversion wrong by hand in
-        `geo_center.json` is the "180 degree flip in X" incident in
-        MM_Optimizer/project_state_log.md, which cost two debugging sessions chasing a
-        phantom symmetry problem.
-
-        An un-recentred export gives identity, hence zeros and a unit quaternion -- which is
-        honest rather than uninformative: nothing was applied.
+        Read the translation from **column 3**, not row 3: `pcd_geocenter` returns
+        `inv([R|o])`, whose row 3 is always `[0, 0, 0, 1]`. An un-recentred export gives
+        identity, so zeros and a unit quaternion — honest, not missing.
         """
         G = np.linalg.inv(np.asarray(self.app.geocenter, dtype=float))
         quat = R.from_matrix(G[:3, :3]).as_quat()
