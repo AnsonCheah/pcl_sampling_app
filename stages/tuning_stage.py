@@ -38,6 +38,8 @@ import open3d.visualization.rendering as rendering
 
 from enums import Stage
 from stages.stage_base import BaseStage
+from geometry.file_utils import list_scene_dirs, list_sample_plys
+from geometry.geom_utils import pose_to_matrix, golden_hue_color
 
 # ── repo-root paths (kept off the import chain so the pure helpers stay testable) ──
 _STAGES_DIR  = os.path.dirname(os.path.abspath(__file__))
@@ -150,21 +152,10 @@ def _close_handle(handle):
         pass
 
 
-def pose_to_T(pose):
-    """[x, y, z, qw, qx, qy, qz] (scalar-first) -> 4x4. Mirror of visualize_match.pose_to_T."""
-    x, y, z, qw, qx, qy, qz = pose
-    rot = o3d.geometry.get_rotation_matrix_from_quaternion(
-        np.array([qw, qx, qy, qz], dtype=float))
-    T = np.eye(4)
-    T[:3, :3] = rot
-    T[:3, 3]  = (x, y, z)
-    return T
-
-
 def instance_color(i):
     """One colour per instance — golden-ratio hue walk at RenderStage's HSV tone
     (saturation 0.4, value 0.9) so the overlay matches the segmented-scene look."""
-    return colorsys.hsv_to_rgb((i * 0.618033988749895) % 1.0, 0.4, 0.9)
+    return golden_hue_color(i, 0.4, 0.9)
 
 
 class TuningStage(BaseStage):
@@ -222,17 +213,7 @@ class TuningStage(BaseStage):
     def _scan_scenes(self):
         """Sorted scene_NNNNN directory names for the current part ([] if none)."""
         d = self._part_dir()
-        if not d or not os.path.isdir(d):
-            return []
-        return sorted(
-            name for name in os.listdir(d)
-            if name.startswith("scene_") and os.path.isdir(os.path.join(d, name)))
-
-    def _scene_sample_plys(self, scene_dir):
-        return sorted(
-            (os.path.join(scene_dir, f) for f in os.listdir(scene_dir)
-             if f.startswith("sample_") and f.endswith(".ply")),
-            key=lambda p: int(re.search(r"\d+", os.path.basename(p)).group()))
+        return list_scene_dirs(d) if d else []
 
     def _delete_scene(self, scene_dir):
         """rmtree one scene directory (the Delete Scene button's real work)."""
@@ -291,7 +272,7 @@ class TuningStage(BaseStage):
         geoms = [("tuning_scene", o3d.geometry.PointCloud(scene_pcd), (0.55, 0.55, 0.55))]
         for i, pose in enumerate(fine_poses):
             inst = o3d.geometry.PointCloud(ref_pcd)
-            inst.transform(pose_to_T(pose))
+            inst.transform(pose_to_matrix(pose))
             geoms.append((f"tuning_match_{i}", inst, instance_color(i)))
         return geoms
 
@@ -867,7 +848,7 @@ class TuningStage(BaseStage):
             return
         _, coarse, fine = self._pareto[idx]
         scene_dir = os.path.join(self._part_dir(), scene_name)
-        plys = self._scene_sample_plys(scene_dir)
+        plys = list_sample_plys(scene_dir)
         if not plys:
             print(f"[TUNING] No sample_*.ply in {scene_dir}.")
             return

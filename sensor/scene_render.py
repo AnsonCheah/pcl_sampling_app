@@ -223,11 +223,6 @@ def make_depth_image(render):
     return img.reshape(H, W)
 
 
-def make_full_depth_image(render):
-    """(H,W) float32 from ALL hits including shadow-occluded."""
-    return render["depth_img"].copy()
-
-
 def compute_edge_strength(depth_img):
     """Sobel magnitude, NaN→far, normalised [0,1] by 99th pct."""
     gx, gy = compute_depth_gradient(depth_img)
@@ -753,7 +748,8 @@ def add_edge_artifacts(render, keep_mask=None, max_bleed=0.006,
 
     H, W       = render["res"]
     vis_depth  = make_depth_image(render)
-    full_depth = make_full_depth_image(render)
+    # ALL hits, including shadow-occluded ones.
+    full_depth = render["depth_img"].copy()
     edge_img   = compute_edge_strength(vis_depth)
     gx, gy     = compute_depth_gradient(vis_depth)
 

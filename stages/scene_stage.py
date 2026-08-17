@@ -315,9 +315,6 @@ class SceneStage(BaseStage):
     def _structure_type(self) -> str:
         return self._SCENE_MODES[self.arrangement_combo.selected_text][1]
 
-    def _clearance_mode(self) -> str:
-        return ["snug", "medium", "loose"][self.clearance_radio.selected_index]
-
     def _apply_structure_label(self):
         self.structure_slider_label.text = {
             "none": "Structure Height (%)", "partition": "Partition Height (%)",
@@ -595,18 +592,6 @@ class SceneStage(BaseStage):
         rp(f"[PACKING] OBB aspect ratio={aspect_ratio:.2f} -> packing_factor={packing_factor:.3f}")
         return int(np.clip(n, MIN_AUTO_PARTS, MAX_AUTO_PARTS))
 
-    def _display_convex_meshes(self):
-        """GUI helper: show each convex hull in a distinct HSV colour."""
-        n = len(self.app.convex_meshes)
-        for i, mesh in enumerate(self.app.convex_meshes):
-            material = rendering.MaterialRecord()
-            material.shader = "defaultLit"
-            rgb = colorsys.hsv_to_rgb(i / max(n, 1), 0.6, 0.9)
-            material.base_color = list(rgb) + [1.0]
-            geom = o3d.geometry.TriangleMesh(mesh)
-            geom.compute_vertex_normals()
-            self.app.scene.scene.add_geometry(f"convex_{i}", geom, material)
-
     def _show_scene_mesh(self):
         """GUI helper: show the settled physical scene, framed on the bin. Everything runs on the main
         thread (Open3D GUI is not thread-safe — touching it from the worker silently corrupts the scene,
@@ -637,7 +622,8 @@ class SceneStage(BaseStage):
             # Stage entry, before generation: show the decomposed convex hulls.
             self.app.main_thread(lambda: self.app._clear_scene())
             if len(self.app.convex_meshes) > 0:
-                self.app.main_thread(self._display_convex_meshes)
+                self.app.main_thread(
+                lambda: self.add_meshes_in_distinct_colors(self.app.convex_meshes, "convex"))
             elif self.app.target_mesh is not None:
                 self.app.main_thread(lambda: self.app.scene.scene.add_geometry(
                     "mesh", self.app.target_mesh, self.app.default_material))
@@ -696,7 +682,7 @@ class SceneStage(BaseStage):
                 self.num_targets = int(self.gen_slider.int_value)
             self.structure_type = self._structure_type()
             self.structure_height_pct = int(self.structure_slider.int_value)
-            self.clearance_mode = self._clearance_mode()
+            self.clearance_mode = ["snug", "medium", "loose"][self.clearance_radio.selected_index]
             # Optional manual override: when the user picked a face-up direction, force that
             # orientation instead of the auto stable pose. Otherwise None -> _generate_structured_scene
             # falls back to the most-probable stable pose (unchanged GUI behavior).

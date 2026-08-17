@@ -46,6 +46,7 @@ import open3d as o3d
 sys.path.insert(0, os.path.abspath(os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', '..', '..')))
 
+from geometry.geom_utils import golden_hue_color
 from registration.ppf_saliency.bench import SYNTH_ROOT
 from registration.ppf.bench.dataset import (list_parts, list_scenes, load_reference,
                                             load_scene)
@@ -109,7 +110,7 @@ def _ambiguity_weights(model: PPFModel, scene) -> Optional[np.ndarray]:
 # ── geometry helpers (visual language shared with MM_Optimizer/visualize_match.py) ──
 
 def _instance_color(i: int) -> Tuple[float, float, float]:
-    return colorsys.hsv_to_rgb((i * 0.618033988749895) % 1.0, 0.75, 0.98)
+    return golden_hue_color(i, 0.75, 0.98)
 
 
 def _triads(transforms: List[np.ndarray], length: float, dim: bool) -> o3d.geometry.LineSet:

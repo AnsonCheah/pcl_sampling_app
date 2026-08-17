@@ -39,26 +39,17 @@ from mm_adapter.mm_adapter        import MechVisionClient, VisionRunError
 from MM_Optimizer.mv_evaluator    import MVEvaluator, _rotation_error_deg, PROJ_NAME
 from MM_Optimizer.optimizer_utils import read_gt_pose_from_ply
 import MM_Optimizer.search_config as SC
+from geometry.file_utils import list_sample_plys
+from geometry.geom_utils import pose_to_matrix, golden_hue_color
 
 PART_ROOT_DEFAULT = os.path.join(_ROOT, "output", "synthetic_target")
 
 
 # ── geometry helpers ──────────────────────────────────────────────────────────
 
-def pose_to_T(pose):
-    """[x,y,z,qw,qx,qy,qz] (scalar-first) -> 4x4 homogeneous transform."""
-    x, y, z, qw, qx, qy, qz = pose
-    R = o3d.geometry.get_rotation_matrix_from_quaternion(
-        np.array([qw, qx, qy, qz], dtype=float))
-    T = np.eye(4)
-    T[:3, :3] = R
-    T[:3, 3]  = (x, y, z)
-    return T
-
-
-def instance_color(i, n):
-    """Evenly-spaced, high-saturation colour for instance i of n."""
-    return colorsys.hsv_to_rgb((i * 0.618033988749895) % 1.0, 0.75, 0.98)
+def instance_color(i):
+    """High-saturation colour for instance i."""
+    return golden_hue_color(i, 0.75, 0.98)
 
 
 def triad_lineset(transforms, length, axis_colors):
@@ -120,18 +111,11 @@ def match_gt_to_returned(returned, gt, thresh):
 
 # ── per-scene pipeline ──────────────────────────────────────────────────────────
 
-def scene_sample_plys(scene_dir):
-    import re
-    return sorted(
-        (os.path.join(scene_dir, f) for f in os.listdir(scene_dir)
-         if f.startswith("sample_") and f.endswith(".ply")),
-        key=lambda p: int(re.search(r"\d+", os.path.basename(p)).group()))
-
 
 def build_scene_geometry(scene_dir, ref_pcd, fine_poses,
                          ref_voxel=0.004, axis_len=0.035):
     """Return (geometries, stats) for one scene."""
-    sample_plys = scene_sample_plys(scene_dir)
+    sample_plys = list_sample_plys(scene_dir)
     gt_poses    = [read_gt_pose_from_ply(p, scalar_first=True) for p in sample_plys]
     n_gt        = len(gt_poses)
 
@@ -149,14 +133,14 @@ def build_scene_geometry(scene_dir, ref_pcd, fine_poses,
     n_matched = 0
 
     for gi, gt in enumerate(gt_poses):
-        T_gt = pose_to_T(gt)
+        T_gt = pose_to_matrix(gt)
         gt_T.append(T_gt)
         ri = match_idx[gi]
         if ri is None:
             continue                              # miss: GT frame only
         n_matched += 1
         pred = fine_poses[ri]
-        T_m  = pose_to_T(pred)
+        T_m  = pose_to_matrix(pred)
         match_T.append(T_m)
         gt_o.append(T_gt[:3, 3])
         match_o.append(T_m[:3, 3])
@@ -164,7 +148,7 @@ def build_scene_geometry(scene_dir, ref_pcd, fine_poses,
         # reference cloud placed at the matched pose, one colour per instance
         inst = o3d.geometry.PointCloud(ref_ds)
         inst.transform(T_m)
-        inst.paint_uniform_color(instance_color(gi, n_gt))
+        inst.paint_uniform_color(instance_color(gi))
         geoms.append(inst)
 
         pos_errs.append(float(np.linalg.norm(np.asarray(pred[:3]) - np.asarray(gt[:3]))))

@@ -89,26 +89,14 @@ class DecomposeStage(BaseStage):
     def next_enabled(self) -> bool:
         return len(self.app.convex_meshes) > 0
 
-    def _display_convex_meshes(self):
-        """GUI helper: show each convex hull in a distinct HSV colour."""
-        saturation, value = 0.6, 0.9
-        n = len(self.app.convex_meshes)
-        for i, mesh in enumerate(self.app.convex_meshes):
-            material = rendering.MaterialRecord()
-            material.shader = "defaultLit"
-            rgb = colorsys.hsv_to_rgb(i / max(n, 1), saturation, value)
-            material.base_color = list(rgb) + [1.0]
-            geom = o3d.geometry.TriangleMesh(mesh)
-            geom.compute_vertex_normals()
-            self.app.scene.scene.add_geometry(f"convex_{i}", geom, material)
-
     def _refresh_ui(self):
         if self.app.headless:
             return
         self.app.main_thread(lambda: self.app._clear_scene())
         if len(self.app.convex_meshes) > 0:
             # After decomposition: show the convex hulls.
-            self.app.main_thread(self._display_convex_meshes)
+            self.app.main_thread(
+                lambda: self.add_meshes_in_distinct_colors(self.app.convex_meshes, "convex"))
         elif self.app.target_mesh is not None:
             # On stage entry, before decomposition: show the original mesh.
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry(

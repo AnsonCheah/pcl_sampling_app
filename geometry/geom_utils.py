@@ -637,6 +637,37 @@ def estimate_surface_area(obj, k: int = 8) -> float:
     return float(len(pts) / max(density, 1e-12))
 
 
+def golden_hue_color(i: int, saturation: float, value: float):
+    """RGB for item `i`, hue advanced by the golden ratio so adjacent indices contrast.
+
+    Unlike an even split over n, this needs no total up front and stays well separated
+    however many items appear. Callers pick the tone: overlays match whatever they sit on.
+    """
+    return colorsys.hsv_to_rgb((i * 0.618033988749895) % 1.0, saturation, value)
+
+
+def make_transform(rotation=None, translation=None) -> np.ndarray:
+    """4x4 homogeneous transform from a 3x3 rotation and/or a 3-vector translation."""
+    T = np.eye(4)
+    if rotation is not None:
+        T[:3, :3] = rotation
+    if translation is not None:
+        T[:3, 3] = translation
+    return T
+
+
+def pose_to_matrix(pose) -> np.ndarray:
+    """MuJoCo/MechVision pose [x, y, z, qw, qx, qy, qz] (scalar-first) -> 4x4."""
+    x, y, z, qw, qx, qy, qz = pose
+    return make_transform(R.from_quat([qw, qx, qy, qz], scalar_first=True).as_matrix(),
+                          (x, y, z))
+
+
+def mat_to_wxyz(T) -> np.ndarray:
+    """Rotation part of a 3x3/4x4 matrix as a scalar-first (w, x, y, z) quaternion."""
+    return R.from_matrix(np.asarray(T, dtype=float)[:3, :3]).as_quat(scalar_first=True)
+
+
 def project_to_so3(R: np.ndarray) -> np.ndarray:
     """Nearest rotation matrix to ``R``. Accepts ``(3,3)`` or a batch ``(..., 3, 3)``.
 

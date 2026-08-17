@@ -37,15 +37,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 SYNTH_ROOT = os.path.join(_ROOT, "output", "synthetic_target")
 
+from geometry.file_utils import list_scene_dirs
+
 MESH_EXT = (".stl", ".ply", ".obj")
 
 
 def existing_scene_count(part: str) -> int:
-    d = os.path.join(SYNTH_ROOT, part)
-    if not os.path.isdir(d):
-        return 0
-    return sum(1 for n in os.listdir(d)
-               if n.startswith("scene_") and os.path.isdir(os.path.join(d, n)))
+    return len(list_scene_dirs(os.path.join(SYNTH_ROOT, part)))
 
 
 def _check_existing_scenes(part: str) -> list:

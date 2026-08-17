@@ -11,7 +11,9 @@ import open3d as o3d
 from rich import print as rp
 from scipy.spatial.transform import Rotation as R
 import copy
-from geometry.geom_utils import o3d_to_trimesh, trimesh_to_o3d, camera_view_matrix, o3d_display, init_open3d, O3DSceneObject
+from geometry.geom_utils import (o3d_to_trimesh, trimesh_to_o3d, camera_view_matrix, o3d_display,
+                                 init_open3d, O3DSceneObject, mat_to_wxyz, pose_to_matrix,
+                                 make_transform)
 import trimesh
 from trimesh.collision import CollisionManager
 from pathlib import Path
@@ -155,7 +157,7 @@ class MujocoBinScene:
         ]
 
         # Precompute the quaternion for the bin rotation (MuJoCo: [w, x, y, z])
-        geom_quat = np.array(R.from_matrix(self.bin_transform[:3, :3]).as_quat(scalar_first=True))        # scipy: [x, y, z, w]
+        geom_quat = mat_to_wxyz(self.bin_transform)
 
         # Build Open3D mesh with transform applied
         combined = o3d.geometry.TriangleMesh()
@@ -612,7 +614,7 @@ class MujocoBinScene:
                     T[:3, 3] = pos
                     T[:3, :3] = self._sample_constrained_rotation(valid_poses_for_rotation)
                     T = self.bin_transform @ T
-                    quat = R.from_matrix(T[:3, :3]).as_quat(scalar_first=True)
+                    quat = mat_to_wxyz(T)
                     is_collision, _, _ = collision_manager.in_collision_single(candidate_trimesh, transform=T, return_names=True, return_data=True)
                     if is_collision:
                         continue
@@ -637,7 +639,7 @@ class MujocoBinScene:
                 T[:3, :3] = self._sample_constrained_rotation(valid_poses_for_rotation)
                 T = self.bin_transform @ T
                 valid_poses[i, :3] = T[:3, 3]
-                valid_poses[i, 3:] = R.from_matrix(T[:3, :3]).as_quat(scalar_first=True)
+                valid_poses[i, 3:] = mat_to_wxyz(T)
         print(f"[INFO] {self.n_parts} parts in {max(self._batch_of_body) + 1} batches (batch_size={batch_size})")
         self._spawn_bodies(valid_poses)
 
@@ -683,7 +685,7 @@ class MujocoBinScene:
             T_local[:3, 3] = [x, y, pos_z]
             T = self.bin_transform @ T_local
             valid_poses[i, :3] = T[:3, 3]
-            valid_poses[i, 3:] = R.from_matrix(T[:3, :3]).as_quat(scalar_first=True)
+            valid_poses[i, 3:] = mat_to_wxyz(T)
 
         # Build fixtures on the bin body (geoms + visual mesh) before compile().
         if self.structure_type == "partition":
@@ -720,7 +722,7 @@ class MujocoBinScene:
 
         x_lines = _cell_boundaries(np.asarray(xs) + off_x, pitch_x, inner_hx)   # column boundaries
         y_lines = _cell_boundaries(np.asarray(ys) + off_y, pitch_y, inner_hy)   # row boundaries
-        geom_quat = np.array(R.from_matrix(self.bin_transform[:3, :3]).as_quat(scalar_first=True))
+        geom_quat = mat_to_wxyz(self.bin_transform)
         combined = o3d.geometry.TriangleMesh()
 
         def add_divider(half_sizes, pos):
@@ -778,7 +780,7 @@ class MujocoBinScene:
         matching pocket surface into self.bin_mesh (shared bin geom id -> background)."""
         cx, cy = hf["center_xy"]
         z_offset = float(hf.get("z_offset", 0.0))
-        geom_quat = np.array(R.from_matrix(self.bin_transform[:3, :3]).as_quat(scalar_first=True)).tolist()
+        geom_quat = mat_to_wxyz(self.bin_transform).tolist()
         bxy = np.asarray(body_positions)[:, :2]
         tiles = []
         for (bx, by) in bxy:
@@ -886,7 +888,7 @@ class MujocoBinScene:
             if R_mat is None:           # crowded — accept the last candidate unchecked (rare)
                 x, y, z, R_mat = cx, cy, cz, R_cand
             cm.add_object(f"b{k}_{i}", self.part_mesh, transform=T)
-            quat = R.from_matrix(R_mat).as_quat(scalar_first=True)
+            quat = mat_to_wxyz(R_mat)
             qadr, vadr = self._adr_of_body[i]
             self.data.qpos[qadr:qadr+3]   = [x, y, z]
             self.data.qpos[qadr+3:qadr+7] = quat        # [w, x, y, z]
@@ -1189,8 +1191,7 @@ class MujocoBinScene:
             T_gt[i, :3, 3]  = positions[i]
 
         # p_world = T_body @ (p_model - body_offset) = (T_body @ T_shift) @ p_model
-        T_shift = np.eye(4)
-        T_shift[:3, 3] = -self.body_offset
+        T_shift = make_transform(translation=-self.body_offset)
         T_gt = T_gt @ T_shift
         positions = T_gt[:, :3, 3].copy()
 
@@ -1226,9 +1227,7 @@ class MujocoBinScene:
         for key, body_data in scene_dict.items():
             pos = body_data["position"]
             quat = body_data["quaternion"]
-            T = np.eye(4)
-            T[:3, :3] = R.from_quat(quat, scalar_first=True).as_matrix()
-            T[:3, 3] = pos
+            T = pose_to_matrix([*pos, *quat])
 
             mesh = trimesh_to_o3d(self.part_mesh)
             if not mesh.has_vertices():

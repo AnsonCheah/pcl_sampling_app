@@ -253,7 +253,7 @@ class MeshSamplingApp:
         self.stages[stage]._refresh_ui()
         self.stages[stage].enable_widgets()
         self.stages[stage].on_enter()   # entry-only hook (safe for initial previews)
-        self._update_title()
+        self.window.title = f"Mesh Sampling Wizard | Stage: {self.stage.name}"
 
     # ===============================
     # Unified Back/Next navigation
@@ -320,9 +320,6 @@ class MeshSamplingApp:
     # ===============================
     # UI helpers
     # ===============================
-    def _update_title(self):
-        self.window.title = f"Mesh Sampling Wizard | Stage: {self.stage.name}"
-
     @staticmethod
     def _framing_key(bbox):
         """(centre, diagonal) — the shape-and-place summary _framing_changed compares."""
