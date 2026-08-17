@@ -147,8 +147,7 @@ class PPFConfig:
         nearest-neighbour distance is ``0.4697/sqrt(density)``, not ``1/sqrt(density)``, so
         that formula understates area by ~4.5x — measured 4.63x on a box whose true area is
         known.  Since ``M`` scales as ``tau^-2`` and cost as ``M^2``, a 2x error in tau is a
-        ~20x error in work.  (The helper this replaced,
-        ``registration/ppf_helpers.derive_ppf_params``, used exactly that formula.)
+        ~20x error in work.
         Bisecting on the real count is regime-independent — it does not care whether the
         cloud is Poisson-sampled, gridded, or already decimated.
 

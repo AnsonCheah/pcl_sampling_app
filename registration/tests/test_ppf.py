@@ -52,19 +52,27 @@ from registration.ppf import (
 FAST = dict(model_target_points=220)
 N_SAMPLE = 6000
 
-_PKG_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ppf")
+_REGISTRATION_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Everything in this repository that ``registration.ppf`` must not reach for. "registration"
-# is on the list too: an absolute ``registration.ppf.bench.dataset`` import inside the
-# package would work here and nowhere else, which is the coupling the extraction removed.
+# The copyable unit: the vanilla matcher plus the code it shares with ppf_saliency. Copying
+# it into another project means copying BOTH directories. It is deliberately not all of
+# ``registration/`` — ``ppf_saliency`` imports ``geometry`` and ``registration.ppf.bench``
+# absolutely, by design, and so cannot travel alone.
+_PKG_DIRS = [os.path.join(_REGISTRATION_DIR, "ppf"),
+             os.path.join(_REGISTRATION_DIR, "_shared")]
+
+# Everything in this repository the unit must not reach for. "registration" is on the list
+# too: an absolute ``registration.ppf.bench.dataset`` import inside it would work here and
+# nowhere else, which is the coupling the extraction removed. ``_shared`` is reached by
+# relative import (``from .._shared import ...``), which this walk allows.
 _REPO_PACKAGES = {"geometry", "sensor", "physics", "stages", "bench", "enums", "app",
                   "registration", "MM_Optimizer"}
 
 
 def _package_sources():
-    """Every .py in the package, including the bench subpackage."""
-    return sorted(glob.glob(os.path.join(_PKG_DIR, "**", "*.py"), recursive=True))
+    """Every .py in the copyable unit, including ppf's bench subpackage."""
+    return sorted(f for d in _PKG_DIRS
+                  for f in glob.glob(os.path.join(d, "**", "*.py"), recursive=True))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -140,7 +148,7 @@ def _box_c2_group():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_package_imports_nothing_from_this_repository():
-    """The extraction claim, asserted statically over every import in the package.
+    """The extraction claim, asserted statically over every import in the copyable unit.
 
     A runtime import check cannot catch this: the repo root is on ``sys.path`` for the whole
     test session, so ``from geometry import ...`` would simply succeed and the package would
@@ -188,7 +196,7 @@ def test_third_party_dependencies_are_only_numpy_scipy_open3d():
 
 
 def test_cupy_is_an_optional_dependency_not_a_required_one():
-    """CuPy must never be imported at module scope anywhere in the package.
+    """CuPy must never be imported at module scope anywhere in the copyable unit.
 
     A top-level ``import cupy`` would make the whole package fail to import on any machine
     without a CUDA build — turning an optional accelerator into a hard requirement, which is
@@ -365,7 +373,7 @@ def test_vote_weighting_api_is_absent():
     for gone in ("saliency", "ppf_saliency", "transfer_weights", "combine"):
         assert not hasattr(pkg, gone), f"package still exports {gone!r}"
     assert "weight_mode" not in inspect.signature(match).parameters
-    assert not os.path.exists(os.path.join(_PKG_DIR, "saliency.py"))
+    assert not os.path.exists(os.path.join(_REGISTRATION_DIR, "ppf", "saliency.py"))
 
 
 def test_the_saliency_package_still_exists_and_is_separate():

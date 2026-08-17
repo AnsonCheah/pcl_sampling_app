@@ -45,8 +45,8 @@ Parameters are derived, never tuned
     all 5000 parts.
 """
 
-from ._backend import cupy_available
-from ._frames import alpha_of, frames_to_x, pose_from_correspondence
+from .._shared._backend import cupy_available
+from .._shared._frames import alpha_of, frames_to_x, pose_from_correspondence
 from .config import MECHVISION_NAMES, PPFConfig, SensorProfile
 from .match import MatchResult, Pose, downsample, match, match_many
 from .model import PPFModel, pair_features

@@ -32,9 +32,9 @@ import numpy as np
 import open3d as o3d
 from scipy.spatial import cKDTree
 
-from ._backend import asnumpy, cupy_available
-from ._backend import resolve as resolve_backend
-from ._frames import alpha_of, frames_to_x, pose_from_correspondence
+from .._shared._backend import asnumpy, cupy_available
+from .._shared._backend import resolve as resolve_backend
+from .._shared._frames import alpha_of, frames_to_x, pose_from_correspondence
 from .config import PPFConfig
 from .model import PPFModel, lookup_ranges, pair_features
 

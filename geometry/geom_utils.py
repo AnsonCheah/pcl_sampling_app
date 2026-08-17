@@ -468,11 +468,9 @@ def model_diameter(obj, max_hull_points: int = 3000) -> float:
     lower triangle and is ~15x faster than an ``(n, n, 3)`` broadcast at a sixth of the
     memory.
 
-    This replaces two disagreeing definitions that were in use: the longest *minimal-OBB*
-    extent (``registration/ppf_helpers.compute_model_diameter``) and the AABB *diagonal*
-    (``geometry.ambiguity``). On the bunny those give 94.4 mm and 146.5 mm — a 1.55x spread
-    — so a threshold expressed as "5% of diameter" meant two different things depending on
-    which module you were standing in.
+    This is the single definition of "diameter": the longest minimal-OBB extent and the AABB
+    diagonal disagree by 1.55x on the bunny (94.4 mm vs 146.5 mm), so a threshold written as
+    "5% of diameter" means two different things unless every caller uses this one.
 
     PPF needs this value specifically: it is the upper bound on the point-pair distance, so
     anything smaller silently discards long pairs (the ones with the best lever arm on

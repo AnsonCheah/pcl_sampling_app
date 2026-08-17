@@ -28,7 +28,7 @@ from typing import Optional, Tuple
 import numpy as np
 from scipy.spatial import cKDTree
 
-from ._frames import alpha_of, frames_to_x
+from .._shared._frames import alpha_of, frames_to_x
 from .config import PPFConfig
 
 __all__ = ["PPFModel"]

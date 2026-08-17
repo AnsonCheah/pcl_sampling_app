@@ -10,7 +10,7 @@ offers no way to weight a vote.
 
 Typical use, one segmented bin instance at a time::
 
-    from registration.ppf import PPFConfig, PPFModel, match, downsample
+    from registration.ppf_saliency import PPFConfig, PPFModel, match, downsample
 
     cfg = PPFConfig.derive(model_pcd)                 # no per-part tuning
     m_pts, m_nrm = downsample(model_pts, model_nrm, cfg.tau)
@@ -29,8 +29,8 @@ worse again — curvature-only reached 0.16. The weighting machinery is kept bec
 only way to test the question on a new part catalogue, not because it currently wins.
 """
 
-from ._backend import cupy_available
-from ._frames import alpha_of, frames_to_x, pose_from_correspondence
+from .._shared._backend import cupy_available
+from .._shared._frames import alpha_of, frames_to_x, pose_from_correspondence
 from .config import MECHVISION_NAMES, PPFConfig, SensorProfile
 from .match import MatchResult, Pose, downsample, match, match_many
 from .model import PPFModel, pair_features

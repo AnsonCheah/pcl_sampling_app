@@ -36,9 +36,9 @@ import numpy as np
 import open3d as o3d
 from scipy.spatial import cKDTree
 
-from ._backend import asnumpy, cupy_available
-from ._backend import resolve as resolve_backend
-from ._frames import alpha_of, frames_to_x, pose_from_correspondence
+from .._shared._backend import asnumpy, cupy_available
+from .._shared._backend import resolve as resolve_backend
+from .._shared._frames import alpha_of, frames_to_x, pose_from_correspondence
 from .config import PPFConfig
 from .model import PPFModel, lookup_ranges, pair_features
 
@@ -151,10 +151,9 @@ def _cluster(T: np.ndarray, votes: np.ndarray, peaks: np.ndarray, runners: np.nd
              pos_tol: float, ang_tol_deg: float, max_clusters: int = 64):
     """Greedy SE(3) agglomeration, strongest hypothesis first.
 
-    Both position *and* rotation are compared.  Translation-only clustering — which is what
-    the previous ``coarse_match._distance_nms`` did — merges two genuinely different
-    orientations of the same part at the same location, which is exactly the symmetry-flip
-    case this project is trying to measure.  Collapsing it would hide the failure.
+    Both position *and* rotation are compared.  Translation-only clustering merges two
+    genuinely different orientations of the same part at the same location, which is
+    exactly the symmetry-flip case this project is trying to measure.
     """
     from geometry.geom_utils import project_to_so3
 
