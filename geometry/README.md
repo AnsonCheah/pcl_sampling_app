@@ -6,10 +6,14 @@ Base layer for 3D math, file I/O, and the shared `O3DSceneObject` dataclass. No 
 
 | File | Description |
 |------|-------------|
-| `geom_utils.py` | `O3DSceneObject` dataclass, Open3D helpers, trimesh↔Open3D conversion |
-| `file_utils.py` | PLY export with comment metadata, file-dialog helpers |
-| `math_utils.py` | Curvature analytics (`plot_curvature_cdf`, `find_cdf_knee`) |
-| `debug_utils.py` | Ray visualisation (`visualize_rays`, `visualize_projector_rays`) |
+| `geom_utils.py` | `O3DSceneObject`, transform/quaternion helpers, normals, diameter and spacing, Open3D↔trimesh conversion |
+| `file_utils.py` | PLY export with the comment protocol, scene/sample listing, file dialogs |
+| `math_utils.py` | `find_cdf_knee` — CDF knee split, used for adaptive downsampling |
+| `ambiguity.py` | Ambiguity-axis search, fold fitting, per-point heat map |
+| `mesh_repair.py` | Mesh diagnosis, debris removal, unit normalisation |
+| `tray_utils.py` | Footprint polygons, tray collision frames and conforming height fields |
+| `convex_decomp.py` | VHACD convex decomposition wrapper |
+| `visualize_ambiguity.py` | Standalone viewer for an ambiguity profile |
 
 ## `O3DSceneObject`
 
@@ -50,17 +54,29 @@ a bundle that was never recentred, which is honest: nothing was applied.
 ## Key helpers
 
 ```python
-# Open3D display wrapper (blocking)
-o3d_display(geometries: list) -> o3d.visualization.Visualizer
+# Transforms — the single definitions; do not re-inline these
+make_transform(rotation=None, translation=None) -> np.ndarray      # 4x4
+pose_to_matrix([x, y, z, qw, qx, qy, qz])       -> np.ndarray      # 4x4, scalar-first
+mat_to_wxyz(T)                                  -> np.ndarray      # (w, x, y, z)
 
-# Uniform random rotation
-random_rotation_matrix() -> np.ndarray  # 4×4
+# Model frame. Returns the transform to APPLY; translation is in column 3.
+pcd_geocenter(pcd, axis=None) -> np.ndarray                        # 4x4
+
+# Scale references. model_diameter is THE diameter definition (see below).
+model_diameter(obj) -> float
+median_spacing(obj) -> float
 
 # Camera extrinsic from position + look-at
-camera_view_matrix(eye, center, up) -> np.ndarray  # 4×4
+camera_view_matrix(eye, center, up) -> np.ndarray                  # 4x4
 
-# Curvature-based knee detection for adaptive downsampling
-find_cdf_knee(curvatures: np.ndarray) -> float
+# CDF knee split, used for adaptive downsampling and edge extraction
+find_cdf_knee(values) -> tuple[float, int, int]   # (threshold, percentile, index)
+
+# Distinct colour per index, golden-ratio hue walk; caller picks the tone
+golden_hue_color(i, saturation, value) -> tuple[float, float, float]
+
+# Open3D display wrapper (blocking)
+o3d_display(geometries: list) -> o3d.visualization.Visualizer
 ```
 
 ## Constraints

@@ -23,28 +23,37 @@ Every off-the-shelf option was unusable for this work:
 This work needs accumulator internals (peak margin, supporting model points), and those live
 on the far side of a C++ compile step in every alternative.
 
-## `ppf/` — the standalone package
+## `ppf/` + `_shared/` — the standalone unit
 
-Its contract is that it depends on **NumPy, SciPy and Open3D and nothing else**, so the
-directory can be copied into another project unchanged. Two tests enforce that rather than
-trusting it: `test_package_imports_nothing_from_this_repository` walks the AST of every
-source file (a runtime check cannot catch this — the repo is always on `sys.path` during the
-suite), and `test_third_party_dependencies_are_only_numpy_scipy_open3d` pins the dependency
-surface so a future convenience import cannot quietly widen it.
+The contract is that these depend on **NumPy, SciPy and Open3D and nothing else**, so they can
+be copied into another project unchanged — as a **pair**. Copying `ppf/` alone does not work:
+it reaches `_shared/` by relative import.
+
+It is deliberately *not* all of `registration/`. `ppf_saliency/` imports `geometry` and
+`registration.ppf.bench.dataset` by design and cannot travel alone.
+
+Three tests enforce this rather than trusting it: `test_package_imports_nothing_from_this_repository`
+walks the AST of every source file in both directories (a runtime check cannot catch it — the
+repo is always on `sys.path` during the suite),
+`test_third_party_dependencies_are_only_numpy_scipy_open3d` pins the dependency surface, and
+`test_cupy_is_an_optional_dependency_not_a_required_one` asserts every cupy import is indented.
 
 | File | Contents |
 |---|---|
 | `ppf/config.py` | `SensorProfile`, `PPFConfig.derive()` — parameter derivation |
 | `ppf/model.py` | Feature quantisation, sorted-key lookup table, bucket capping |
 | `ppf/match.py` | Voting, peak extraction, SE(3) pose clustering, verification |
-| `ppf/_frames.py` | Local reference frames, the alpha angle, pose reconstruction |
 | `ppf/_geometry.py` | Inlined `model_diameter` / `median_spacing` / `project_to_so3` |
 | `ppf/bench/` | Scene loader, symmetry-aware pose metrics, the benchmark sweep |
+| `_shared/_frames.py` | Local reference frames, the alpha angle, pose reconstruction |
+| `_shared/_backend.py` | CuPy probing and array marshalling |
 | `tests/test_ppf.py` | Standalone-ness, recovery, symmetry orbit, derivation, metrics |
 
-`ppf/_geometry.py` duplicates three helpers from `geometry/geom_utils.py` on purpose. That is
-the price of the package being liftable; the one that must not drift is `model_diameter`,
-because every part-relative tolerance is normalised against it.
+`_shared/` exists because `_backend.py` was byte-identical between the two packages and
+`_frames.py` differed only in punctuation — with nothing preventing a real fork.
+`ppf/_geometry.py` still duplicates three helpers from `geometry/geom_utils.py` on purpose:
+that is the price of the unit being liftable, and the one that must not drift is
+`model_diameter`, because every part-relative tolerance is normalised against it.
 
 ### Usage
 
@@ -252,3 +261,36 @@ back as 0.0, and `v >= 0` keeps every point.
 The pruning arm then silently becomes a copy of the baseline, and the ablation reports that
 pruning is harmless — because pruning never happened. Those zero-scoring points are exactly
 what the arm means to drop, so `arms.py` removes them first and fits the knee to the rest.
+
+## Implementation details that were each got wrong once
+
+**BOP symmetry transforms.** `bop_toolkit`'s `get_symmetry_transformations` has three details
+that each silently change the symmetry group, and the direct implementation in
+`ppf/bench/metrics.py` reproduces all three:
+
+- `max_sym_disc_step` is **a fraction of the diameter, not an angle** — the step count is
+  `ceil(pi/step)`, not `ceil(2*pi/step)`.
+- The discretised continuous set **includes the identity** (`i` runs from 0).
+- When a continuous axis exists the output is **only** the composed transforms; appending the
+  bare discrete ones duplicates every one of them.
+
+Also `adi` runs ground-truth → estimated, and nearest-neighbour is asymmetric: reversing it
+gives 29.4 mm instead of 25.2 mm on the same pose.
+
+**`tau` is bisected on the real downsampled point count**, never from a surface-area formula.
+`tau = sqrt(SA/M)` with `SA ~ N*s^2` is wrong by ~4.5x on randomly sampled clouds — a Poisson
+process has median nearest-neighbour distance `0.4697/sqrt(density)`, not `1/sqrt(density)`.
+Model point count goes as `tau^-2` and work as its square, so a 2x error in `tau` is a ~20x
+error in runtime.
+
+**`PPFModel.lookup` indexes, it does not search.** The key space is a dense integer range, so
+bin boundaries are tabulated once at train time as CSR offsets. Two `searchsorted` passes over
+the ~2 M-entry key array were 42% of match time; the table is **19–35x faster** for ~5–7 MB per
+part. It falls back to binary search above `MAX_KEY_INDEX` (8 M elements) because the key space
+grows as `n_angle^3` — at `n_angle=180` it would want 616 MB to index 2 M pairs. Both paths
+return identical ranges, including on empty bins, which are most of the key space and where an
+off-by-one would return a neighbour's entries.
+
+**Dedup uses sort-then-diff, not `np.unique`.** NumPy 2.x routes `unique` through a hash table
+that is pathologically slow on wide int64 keys: **0.411 s vs 0.020 s** on 1.4 M values, and it
+is the hottest call in the matcher.

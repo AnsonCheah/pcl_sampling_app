@@ -32,39 +32,45 @@ so `conda run` / `conda activate` are not available as a substitute.
 
 **Optional dependency, deliberately not installed.** `bop_toolkit_lib` is commented out in
 `environment.yaml` and must be installed `--no-deps` (its pyproject pins `numpy<2.0.0`, which
-would drag open3d and scipy down with it). Without it,
-`registration/ppf_saliency/bench/metrics.py::evaluate_pose` raises at its top-level import, so
-the `ppf_saliency` ablation and one test in `registration/tests` cannot run. `registration/ppf`
-implements the same metrics directly and is unaffected — that is the point of its dependency
-pin.
+would drag open3d and scipy down with it). Its imports in
+`registration/ppf_saliency/bench/metrics.py` are **function-local**, so the module imports
+fine without it and only the calls (`evaluate_pose`, `symmetry_transforms_from_bop`) raise —
+which is what stops the `ppf_saliency` ablation and one test in `registration/tests`.
+`registration/ppf` implements the same metrics directly and is unaffected; that is the point
+of its dependency pin.
 
 ## Package Dependency Graph
 ```
-registration/ppf/  ← NO local imports at all. Standalone vanilla PPF + its own benchmark
-                     harness (ppf/bench/). Copyable into another project; two tests enforce
-                     that, and relative imports are mandatory inside it.
+registration/ppf/ + registration/_shared/
+                   ← NO local imports at all, not even `registration.*`. The vanilla PPF
+                     matcher, its benchmark harness (ppf/bench/), and the backend/frames
+                     code it shares with ppf_saliency. Copyable into another project as a
+                     PAIR; relative imports are mandatory inside both, and three tests in
+                     registration/tests/test_ppf.py enforce it.
 
 geometry/          ← no local imports (base layer)
     ↑
 sensor/            ← geometry only
 physics/           ← geometry only
 registration/ppf_saliency/
-                   ← geometry + registration.ppf.bench.dataset. The weighted-voting variant
-                     and its ablation harness (ppf_saliency/bench/). Not standalone: its arms
-                     are defined by the ambiguity heat map.
+                   ← geometry + registration.ppf.bench.dataset + registration._shared. The
+                     weighted-voting variant and its ablation harness. NOT standalone and
+                     not part of the copyable unit: its arms are defined by the ambiguity
+                     heat map.
     ↑
-stages/            ← geometry, sensor, physics (not registration yet)
+stages/            ← geometry, sensor, physics, and MM_Optimizer (TuningStage only)
     ↑
 app.py             ← stages only
 
+MM_Optimizer/      ← geometry; drives MechVision through the mm_adapter pip package.
+                     Imported by stages/tuning_stage.py and bench/generate_scenes.py.
+
 bench/             ← top tier; may import everything. Scene GENERATION, dataset fetch, and
                      ambiguity validation only — matcher benchmarking lives in the packages.
-                     Reserved for an Optuna tuning benchmark (deferred).
 ```
 
-`DecomposeStage` runs VHACD in a `ProcessPoolExecutor` and blocks on the result — it is a
-normal synchronous stage. (It used to be a daemon thread callers had to `join()`; anything
-still saying so is stale.)
+`DecomposeStage` runs VHACD in a `ProcessPoolExecutor` and blocks on the result — a normal
+synchronous stage, with no thread to join.
 
 
 ## Cross-Domain Contracts
@@ -72,11 +78,14 @@ still saying so is stale.)
 **`O3DSceneObject`** (defined in `geometry/geom_utils.py`) — the universal geometry carrier.
 `id` field is unset until `sensor.scene_render()` assigns it as a side effect of adding geometry to the raycast scene. Do not read `id` before calling `scene_render`.
 
-**`render dict`** — output of `sensor.scene_render()`, input to all noise functions.
-Keys: `points, normals, geom_ids, pixel_idx, cos_cam, cos_proj, snr_proxy, depth_img, res, sensor_origin`.
-Noise functions return modified arrays; they do not return a new render dict.
+**`render dict`** — output of `sensor.scene_render()`, input to all noise functions. The
+field table lives in that module's docstring and nowhere else; do not copy it. Noise
+functions return modified arrays, not a new render dict, and their **call order is
+load-bearing** — see `sensor/CLAUDE.md`.
 
-**`app` state** — the only communication channel between stages. Stages never call each other directly. See `stages/CLAUDE.md` for the full attribute table.
+**`app` state** — the only communication channel between stages; stages never call each
+other directly. Each stage declares the attributes it owns in a `downstream` class dict,
+which is also what seeds them before any panel is built. Full table: `stages/README.md`.
 
 **PLY comment keys** — load-bearing, used by downstream loaders. Do not rename:
 `geocenter_x/y/z`, `geocenter_qx/qy/qz/qw`, `gt_x/y/z`, `gt_qx/qy/qz/w`

@@ -10,7 +10,7 @@ the segmentation stage) or that validate a repo module against external ground t
 | `bench/dataset.py` | `registration/ppf/bench/dataset.py` |
 | `bench/metrics.py` | `registration/ppf_saliency/bench/metrics.py` (a standalone reimplementation lives in `registration/ppf/bench/metrics.py`) |
 | `bench/ablation.py`, `arms.py`, `visualize_ppf.py` | `registration/ppf_saliency/bench/` |
-| `bench/tests/test_bench.py` | `registration/tests/test_ppf_saliency_bench.py` |
+| `registration/tests/test_ppf_saliency_bench.py` | `registration/tests/test_ppf_saliency_bench.py` |
 
 A package whose accuracy claims can only be reproduced from a directory two levels above it
 is not really shippable, and `registration/ppf/` is meant to be liftable into another project.
@@ -86,6 +86,5 @@ counter over instances passing the 2D filter.
 normal install downgrades numpy, open3d and scipy together. `registration/ppf/bench/metrics.py`
 deliberately does not use it at all; `registration/ppf_saliency/bench/metrics.py` still does.
 
-**`fetch_dataset.py` needs `requests` + `certifi`.** `requests` is imported directly at module
-scope, so it is a hard dependency of that script even though `environment.yaml` currently picks
-it up transitively rather than pinning it.
+**`fetch_dataset.py` needs `requests` + `certifi`.** `requests` is imported at module scope,
+so it is a hard dependency of that script; `environment.yaml` pins it explicitly.

@@ -20,11 +20,6 @@ from app import MeshSamplingApp
 from enums import Stage
 
 
-def pytest_configure(config):
-    config.addinivalue_line(
-        "markers", "slow: slow tests (raycast / MuJoCo physics / sensor sim)")
-
-
 @pytest.fixture(scope="session")
 def make_box_mesh():
     """Factory: a watertight box o3d mesh with vertex normals. `extents` are in the mesh's

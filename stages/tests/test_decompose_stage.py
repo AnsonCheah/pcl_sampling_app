@@ -3,7 +3,7 @@
 Covers:
   * DecomposeStage.worker() populates app.convex_meshes synchronously.
   * A concave part is split into multiple genuinely-convex hulls (exercises the
-    CoACD backend, which the box fixture does not since a box is already convex).
+    VHACD backend, which the box fixture does not since a box is already convex).
   * The Stage enum / app stages dict include DECOMPOSE ordered between
     SAVE and SCENE/RENDER.
 
@@ -21,7 +21,7 @@ from enums import Stage
 
 def _concave_l_bracket_o3d():
     """L-shaped bracket (box with a corner notch removed) as an o3d mesh: the
-    simplest part that cannot be one convex hull, so CoACD must return >1 piece."""
+    simplest part that cannot be one convex hull, so VHACD must return >1 piece."""
     big = trimesh.creation.box(extents=[0.10, 0.10, 0.02])
     notch = trimesh.creation.box(extents=[0.06, 0.06, 0.04])
     notch.apply_translation([0.02, 0.02, 0])
@@ -52,7 +52,7 @@ def test_decompose_concave_part_into_convex_hulls(headless_app):
 
     app.stages[Stage.DECOMPOSE].worker()
 
-    # CoACD must split the concavity into more than one piece...
+    # VHACD must split the concavity into more than one piece...
     assert len(app.convex_meshes) > 1
     # ...and every piece it returns must actually be convex.
     for m in app.convex_meshes:
