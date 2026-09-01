@@ -87,6 +87,112 @@ def trimesh_to_o3d(tri_mesh:trimesh.Trimesh):
     o3d_mesh.compute_vertex_normals()
     return o3d_mesh
 
+# --- Resolution-based mesh decimation ----------------------------------------------------
+# A dense STL (a scanned part, or CAD exported at high chord tolerance) costs time in the
+# Open3D viewport, in VHACD, and in the raycast — with no downstream benefit, because every
+# consumer works at a coarser resolution than the mesh carries.
+#
+# The target is a RESOLUTION (an edge/voxel length), not a triangle budget: a fraction of the
+# part's OBB diagonal so it is scale-invariant, clamped by absolute metric bounds so a tiny
+# part is not decimated into a tetrahedron and a huge one is not left coarser than the render
+# voxel. 0.4% of a 0.15 m-diagonal part is 0.6 mm, which matches VHACD's own effective voxel
+# at resolution=1e6 and sits below the 1 mm render voxel — finer detail is not observable.
+DECIMATE_DIAG_FRAC      = 0.004    # target voxel = 0.4% of the part's OBB diagonal
+DECIMATE_MIN_VOXEL_M    = 1.0e-4   # 0.1 mm absolute floor (tiny parts)
+DECIMATE_MAX_VOXEL_M    = 2.0e-3   # 2 mm absolute ceiling (huge parts)
+DECIMATE_MIN_TRIANGLES  = 2000     # below this a mesh is already cheap everywhere
+DECIMATE_MAX_VOLUME_ERR = 0.02     # 2% hull-volume drift -> revert to the original mesh
+DECIMATE_EDGE_SAMPLES   = 5000     # edges sampled to estimate the mesh's current resolution
+
+
+def decimate_mesh_to_resolution(mesh,
+                                diag_frac: float = DECIMATE_DIAG_FRAC,
+                                min_voxel_m: float = DECIMATE_MIN_VOXEL_M,
+                                max_voxel_m: float = DECIMATE_MAX_VOXEL_M,
+                                min_triangles: int = DECIMATE_MIN_TRIANGLES,
+                                max_volume_err: float = DECIMATE_MAX_VOLUME_ERR):
+    """Decimate `mesh` to a target spatial resolution. Returns (mesh_out, stats).
+
+    stats: {voxel_size, tri_before, tri_after, volume_err, skipped, reason}
+
+    On skip or revert the ORIGINAL object is returned (identity, not a copy), so a caller can
+    test `out is mesh` to tell that nothing happened.
+
+    Uses vertex clustering rather than quadric decimation, deliberately: clustering is natively
+    resolution-based (`voxel_size` IS the target edge), whereas driving quadric decimation needs
+    an edge->face-count conversion that assumes near-uniform tessellation — and CAD-exported
+    STLs are the opposite, pairing huge planar triangles with dense fillet strips. Clustering is
+    also a single O(n) pass and cannot fail on the non-watertight, self-intersecting meshes that
+    arrive here, where quadric decimation can emit flipped triangles or throw. `Quadric`
+    contraction recovers most of the feature retention.
+
+    Input units must be metres — call AFTER any mm->m conversion, or the absolute clamps are
+    meaningless.
+    """
+    stats = {"voxel_size": 0.0, "tri_before": 0, "tri_after": 0,
+             "volume_err": 0.0, "skipped": True, "reason": ""}
+
+    tri_before = len(mesh.triangles)
+    stats["tri_before"] = stats["tri_after"] = tri_before
+
+    if mesh.is_empty() or tri_before < min_triangles:
+        stats["reason"] = "already coarse"
+        return mesh, stats
+
+    tri_in = o3d_to_trimesh(mesh)
+    try:
+        # `.primitive.extents` is the OBB's own side lengths; the inherited `.extents` is the
+        # axis-aligned bounds of the rotated box mesh, which inflates toward its diagonal and
+        # would silently coarsen the target voxel.
+        diag = float(np.linalg.norm(tri_in.bounding_box_oriented.primitive.extents))
+    except Exception:
+        diag = float(np.linalg.norm(mesh.get_axis_aligned_bounding_box().get_extent()))
+    voxel = float(np.clip(diag_frac * diag, min_voxel_m, max_voxel_m))
+    stats["voxel_size"] = voxel
+
+    # Second skip test: if the mesh is already at or below the target resolution, clustering
+    # would only add risk. Median edge length is a more honest measure than a raw face count.
+    edges = tri_in.vertices[tri_in.edges_unique]
+    lengths = np.linalg.norm(edges[:, 0] - edges[:, 1], axis=1)
+    if lengths.size > DECIMATE_EDGE_SAMPLES:
+        idx = np.random.default_rng(0).choice(lengths.size, DECIMATE_EDGE_SAMPLES, replace=False)
+        lengths = lengths[idx]
+    if float(np.median(lengths)) >= voxel:
+        stats["reason"] = "median edge >= voxel"
+        return mesh, stats
+
+    out = mesh.simplify_vertex_clustering(
+        voxel_size=voxel,
+        contraction=o3d.geometry.SimplificationContraction.Quadric)
+
+    # VHACD hygiene: decompose_stage's fillMode="flood" wants a clean watertight mesh, and
+    # clustering can leave duplicate/degenerate faces behind.
+    out.remove_degenerate_triangles()
+    out.remove_duplicated_triangles()
+    out.remove_duplicated_vertices()
+    out.remove_unreferenced_vertices()
+    out.remove_non_manifold_edges()
+    out.compute_vertex_normals()
+
+    # Never let decimation destroy a part: revert on any sign of collapse.
+    if out.is_empty() or len(out.triangles) < 4:
+        stats["reason"] = "degenerate result, reverted"
+        return mesh, stats
+    try:
+        vol_before = float(tri_in.convex_hull.volume)
+        vol_after = float(o3d_to_trimesh(out).convex_hull.volume)
+        volume_err = abs(vol_after - vol_before) / max(vol_before, 1e-12)
+    except Exception:
+        volume_err = 0.0
+    if volume_err > max_volume_err:
+        stats["reason"] = f"volume drift {volume_err:.3f} > {max_volume_err}, reverted"
+        return mesh, stats
+
+    stats.update(tri_after=len(out.triangles), volume_err=volume_err,
+                 skipped=False, reason="decimated")
+    return out, stats
+
+
 def pcd_geocenter(pcd):
     """
     Returns transformation matrix with consistent orientation.

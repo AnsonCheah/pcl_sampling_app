@@ -5,6 +5,7 @@ import numpy as np
 from tkinter import Tk, filedialog
 from pathlib import Path
 from stages.stage_base import BaseStage
+from geometry.geom_utils import decimate_mesh_to_resolution
 from enums import Stage
 
 class ImportMeshStage(BaseStage):
@@ -107,6 +108,18 @@ class ImportMeshStage(BaseStage):
         if 5.0 < extent_max < 5000.0:
             print(f"[INFO] Converting units mm → m: {self.file_path.name}")
             mesh.scale(0.001, center=(0, 0, 0))
+
+        # Decimate to a target resolution AFTER the unit conversion (the voxel clamps are in
+        # metres) and BEFORE compute_vertex_normals (the helper recomputes them, so normals on
+        # the dense mesh would be wasted work). A dense STL otherwise costs time in the Open3D
+        # viewport, in VHACD, and in the raycast with no downstream benefit.
+        mesh, dec = decimate_mesh_to_resolution(mesh)
+        if dec["skipped"]:
+            print(f"[INFO] Decimation skipped ({dec['reason']}): {dec['tri_before']:,} triangles")
+        else:
+            print(f"[INFO] Decimated {dec['tri_before']:,} → {dec['tri_after']:,} triangles "
+                  f"@ voxel {dec['voxel_size'] * 1000:.3f} mm "
+                  f"(volume drift {dec['volume_err'] * 100:.2f}%)")
 
         mesh.compute_vertex_normals()
         self.app.target_mesh = mesh

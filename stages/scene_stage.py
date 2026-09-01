@@ -8,7 +8,11 @@ from enums import Stage
 from stages.stage_base import BaseStage
 from geometry.geom_utils import o3d_to_trimesh, trimesh_to_o3d, O3DSceneObject
 from geometry.file_utils import list_scene_dirs
-from physics.mujoco_bin_scene import MujocoBinScene, MAX_BIN_DIM
+from physics.mujoco_bin_scene import (
+    MujocoBinScene, MAX_BIN_DIM, LAYERS_AT_FULL_FILL, MIN_USEFUL_LAYERS,
+    PACKING_FACTOR_BASE, PACKING_FACTOR_FLOOR, BIN_TOP_MARGIN_FRAC,
+    MIN_AUTO_PARTS, MAX_AUTO_PARTS, obb_packing_factor, solve_bin_dim,
+)
 import os
 import copy
 import colorsys
@@ -48,15 +52,10 @@ def _reconstruct_bin_mesh(bin_dim, bin_transform):
     return mesh
 
 SCENE_FILL_RATE     = 0.2    # default fill rate (fraction of safe capacity)
-# Shape-aware random-packing efficiency for part OBB volumes. A fixed factor is only valid for
-# cube-like parts; random packing fraction falls ~1/aspect_ratio for elongated/flat parts
-# (Philipse random-contact scaling; see _auto_part_count). We taper from a cube anchor by the
-# OBB edge ratio so big elongated parts no longer over-count.
-PACKING_FACTOR_BASE  = 0.62  # cube/blocky parts (sphere random-close-pack band)
-PACKING_FACTOR_FLOOR = 0.18  # keep very thin/long parts from collapsing toward 0
-BIN_TOP_MARGIN_FRAC = 0.20   # reserve top 20% of bin height as spill headroom
-MIN_AUTO_PARTS      = 2      # never fewer than this
-MAX_AUTO_PARTS      = 500    # safety cap (tune): tiny parts otherwise explode the sim
+# PACKING_FACTOR_BASE/FLOOR, BIN_TOP_MARGIN_FRAC and MIN/MAX_AUTO_PARTS now live in
+# physics/mujoco_bin_scene.py (imported above) so the packing math has a single home shared
+# with solve_bin_dim(); they are re-exported here because this module's public names are
+# referenced by tests and headless drivers.
 FILL_SLIDER_MIN, FILL_SLIDER_MAX   = 20, 100   # fill-rate slider range (percent)
 COUNT_SLIDER_MIN, COUNT_SLIDER_MAX = 2, 500    # override-count slider range (parts)
 PREVIEW_PARKED_Z = 1.0   # m — live-preview bodies above this z are still parked (PARKING_Z≈10);
@@ -81,6 +80,9 @@ class SceneStage(BaseStage):
         self.arrangement = "random"        # headless callers may set before _run_worker()
         self.generate_mode = "fill_rate"   # "fill_rate" (auto-size to part) or "count" (manual override)
         self.fill_rate = SCENE_FILL_RATE   # used when generate_mode == "fill_rate"
+        # Derive the bin from the part instead of the part count from a fixed bin. Random +
+        # fill-rate only; headless callers may set this False to restore the fixed max bin.
+        self.dynamic_bin = True
         # Structured-scene structure (Phase 2): "none" | "partition" | "tray"
         self.structure_type = "none"
         self.structure_height_pct = 75     # divider height / pocket depth as % of part height
@@ -112,6 +114,12 @@ class SceneStage(BaseStage):
         self.gen_slider = self.register_widget(gui.Slider(gui.Slider.INT),
                                                enabled_if=lambda: self._is_random())
         self._apply_slider_mode(0)                     # init in fill-rate mode
+        # Dynamic bin: size the bin to the part instead of the part count to a fixed bin.
+        # Only meaningful for random + fill-rate, so grey it out elsewhere.
+        self.dynamic_bin_check = self.register_widget(
+            gui.Checkbox("Dynamic Bin"),
+            enabled_if=lambda: self._is_random() and self.radio_mode.selected_index == 0)
+        self.dynamic_bin_check.checked = self.dynamic_bin
 
         # --- Structured-scene structure (partition / tray) ---
         self.structure_radio = self.register_widget(gui.RadioButton(gui.RadioButton.HORIZ),
@@ -152,6 +160,7 @@ class SceneStage(BaseStage):
         v.add_child(self.radio_mode)
         v.add_child(self.gen_label)
         v.add_child(self.gen_slider)
+        v.add_child(self.dynamic_bin_check)
         v.add_child(gui.Label("Structure"))
         v.add_child(self.structure_radio)
         v.add_child(self.structure_slider_label)
@@ -309,21 +318,51 @@ class SceneStage(BaseStage):
         consistent volumetric fill across all parts, reserving BIN_TOP_MARGIN_FRAC
         of the bin height as spill headroom. See module constants.
 
-        The packing factor is shape-aware: it tapers from PACKING_FACTOR_BASE by the OBB
-        aspect ratio (longest/shortest edge) so elongated/flat parts — which pack far less
-        densely — no longer over-count. We do NOT also multiply by solidity: the count divides
-        by OBB volume, so the correct multiplier is the box-packing fraction (folding solidity
-        in again would double-count). Anchors: AR 1->0.62, 2->0.44, 4->0.31, >=12->0.18 floor."""
+        The packing factor is shape-aware (see obb_packing_factor): it tapers from
+        PACKING_FACTOR_BASE by the OBB aspect ratio so elongated/flat parts — which pack far
+        less densely — no longer over-count. We do NOT also multiply by solidity: the count
+        divides by OBB volume, so the correct multiplier is the box-packing fraction (folding
+        solidity in again would double-count)."""
         bw, bl, bh, _ = MAX_BIN_DIM
         usable_h = bh * (1.0 - BIN_TOP_MARGIN_FRAC)   # reserve top headroom to prevent spilling
         bin_vol  = bw * bl * usable_h
         mobb_vol = max(float(part_mesh.bounding_box_oriented.volume), 1e-9)
-        ext = np.sort(part_mesh.bounding_box_oriented.extents)[::-1]   # e1 >= e2 >= e3
-        aspect_ratio   = float(ext[0] / max(ext[2], 1e-9))
-        packing_factor = max(PACKING_FACTOR_FLOOR, PACKING_FACTOR_BASE / np.sqrt(aspect_ratio))
+        packing_factor = obb_packing_factor(part_mesh)
         n = round(self.fill_rate * packing_factor * bin_vol / mobb_vol)
-        rp(f"[PACKING] OBB aspect ratio={aspect_ratio:.2f} -> packing_factor={packing_factor:.3f}")
+        rp(f"[PACKING] packing_factor={packing_factor:.3f}")
         return int(np.clip(n, MIN_AUTO_PARTS, MAX_AUTO_PARTS))
+
+    def _resolve_bin_and_count(self, part_mesh):
+        """Decide (bin_dim, n_parts) for this run — the stage owns this policy, physics owns
+        the math.
+
+        Dynamic sizing applies ONLY to a random arrangement in fill-rate mode with the Dynamic
+        Bin checkbox on. Everything else keeps MAX_BIN_DIM: structured grids derive their own
+        count from grid capacity (shrinking the bin would shrink the grid), and Override Count
+        is a manual escape hatch that must stay exact.
+
+        Sets self.num_targets as a side effect, since that is what worker() hands to
+        MujocoBinScene.
+        """
+        use_dynamic = (self.dynamic_bin
+                       and self.arrangement == "random"
+                       and self.generate_mode == "fill_rate")
+        if not use_dynamic:
+            if self.generate_mode == "fill_rate" and self.arrangement == "random":
+                self.num_targets = self._auto_part_count(part_mesh)   # legacy path, untouched
+            return MAX_BIN_DIM, int(self.num_targets)
+
+        bin_dim, n, layers = solve_bin_dim(part_mesh, self.fill_rate)
+        self.num_targets = n
+        rp(f"[BIN] {bin_dim[0]:.3f} x {bin_dim[1]:.3f} x {bin_dim[2]:.3f} m, "
+           f"wall {bin_dim[3] * 1000:.1f} mm, n_parts={n}, "
+           f"~{layers:.1f} layers @ fill {self.fill_rate:.0%}")
+        if layers < MIN_USEFUL_LAYERS:
+            # Stacking depth is fill x LAYERS_AT_FULL_FILL and does NOT depend on bin size, so
+            # this is equally true of the fixed max bin — the operator just could not see it.
+            rp(f"[BIN] near-monolayer ({layers:.1f} layers): raise fill rate to "
+               f"{MIN_USEFUL_LAYERS / LAYERS_AT_FULL_FILL:.0%}+ for part-on-part stacking")
+        return bin_dim, n
 
     def _display_convex_meshes(self):
         """GUI helper: show each convex hull in a distinct HSV colour."""
@@ -404,6 +443,7 @@ class SceneStage(BaseStage):
             self.structure_type = self._structure_type()
             self.structure_height_pct = int(self.structure_slider.int_value)
             self.clearance_mode = self._clearance_mode()
+            self.dynamic_bin = bool(self.dynamic_bin_check.checked)
 
         def _update_pb(message: str):
             if not self.app.headless:
@@ -427,13 +467,14 @@ class SceneStage(BaseStage):
                 physics_convex.append(c)
         else:
             physics_convex = self.app.convex_meshes
-        # Fill-rate mode auto-sizes count to the part; structured ignores n_parts (grid sets it).
-        if self.generate_mode == "fill_rate" and self.arrangement == "random":
-            self.num_targets = self._auto_part_count(part_mesh)
-            rp(f"[AUTO-COUNT] fill={self.fill_rate:.0%} "
-               f"part OBB vol={part_mesh.bounding_box_oriented.volume:.2e} m³ "
-               f"-> n_parts={self.num_targets}")
+        # Size the bin to the part (dynamic) or the count to the fixed bin (legacy); structured
+        # ignores n_parts either way (the grid sets it). See _resolve_bin_and_count.
+        bin_dim, _ = self._resolve_bin_and_count(part_mesh)
+        rp(f"[AUTO-COUNT] fill={self.fill_rate:.0%} "
+           f"part OBB vol={part_mesh.bounding_box_oriented.volume:.2e} m³ "
+           f"-> n_parts={self.num_targets}")
         self.mj_scene = MujocoBinScene(part_mesh, physics_convex, n_parts=self.num_targets,
+                                       bin_dim=bin_dim,
                                        render=self.rendering_flag, arrangement=self.arrangement,
                                        stable_pose_R=self.stable_pose_R,
                                        structure_type=self.structure_type,

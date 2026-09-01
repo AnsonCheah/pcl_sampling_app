@@ -4,6 +4,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import mujoco
 import mujoco.viewer
+import contextlib
 import time
 import numpy as np
 from dataclasses import dataclass
@@ -11,7 +12,8 @@ import open3d as o3d
 from rich import print as rp
 from scipy.spatial.transform import Rotation as R
 import copy
-from geometry.geom_utils import o3d_to_trimesh, trimesh_to_o3d, camera_view_matrix, o3d_display, init_open3d, O3DSceneObject
+from geometry.geom_utils import (o3d_to_trimesh, trimesh_to_o3d, camera_view_matrix, o3d_display,
+                                 init_open3d, O3DSceneObject, decimate_mesh_to_resolution)
 import trimesh
 from trimesh.collision import CollisionManager
 from pathlib import Path
@@ -35,8 +37,134 @@ _CLEARANCE_M = {"snug": 0.001, "medium": 0.0025, "loose": None}
 # Batched-release settling (random arrangement). Parts are released in waves just above the
 # growing pile so none free-falls from a great height (bounds impact velocity → no tunneling).
 PARKING_Z                = 10.0   # m — z of parked (not-yet-released) bodies (collisions off)
-BATCH_DROP_OFFSET        = 0.05   # m — gap between current pile top and a wave's spawn z
+BATCH_DROP_OFFSET        = 0.05   # m — gap between current pile top and a wave's spawn z (max bin)
 BATCH_RELEASE_INTERVAL_S = 0.5   # s — fixed cadence between releases (no per-batch full settle)
+MAX_RELEASE_BATCHES      = 8     # cap on release waves; a shrunken footprint fits fewer parts
+#                                  per wave, and each wave costs BATCH_RELEASE_INTERVAL_S of sim
+
+# --- Dynamic bin sizing (random arrangement) ---------------------------------------------
+# The bin is derived from the part, instead of the part count being derived from a fixed bin.
+# A part resting on the floor lands in a stable pose; a part resting on OTHER parts lands in
+# tilted poses only a pile produces — so the sizing criterion is stacked layers, and both the
+# layer count and the instance count are read off the solved bin (never the reverse).
+#
+# These constants live here rather than in stages/ so solve_bin_dim() is unit-testable without
+# importing the GUI layer; stages/scene_stage.py re-imports them.
+LAYERS_AT_FULL_FILL   = 6      # bin height holds this many EFFECTIVE layers at 100% fill.
+#                                Calibrated: the max bin's usable height (0.25*0.8 = 0.2 m) holds
+#                                ~6.2 effective layers of a 20 mm cube-like part, so parts of
+#                                ~20 mm and up keep today's height and only smaller parts shrink.
+MIN_USEFUL_LAYERS     = 2      # below this the scene is a near-monolayer; callers warn
+MIN_BIN_DIM           = (0.10, 0.077, 0.04, 0.003)  # absolute floor; w/l ratio held to ~1.30
+MIN_WALL_THICKNESS    = 0.003  # 3x o_margin and 4x per-step displacement (vel_cap*dt = 0.75 mm);
+#                                matches PARTITION_THICKNESS/TRAY_WALL, proven in this solver
+MIN_PARTS_PER_LAYER   = 25     # ~5x5 footprint span — lateral support, so interior parts rest
+#                                on neighbours rather than only on walls
+FOOTPRINT_SPAN_FACTOR = 1.5    # spawn band must be at least (r_bs + t) wide
+ESCAPE_TOL_FRAC       = 0.25   # verify_parts_in_bin x/y tolerance, bin-relative
+OVERSHOOT_TOL_LAYERS  = 1.0    # allowed pile crown above the rim, in h_eff units (spill test)
+
+# Packing / fill constants. Moved here from stages/scene_stage.py so the packing math has one
+# home; that module re-imports them and its public names are unchanged.
+PACKING_FACTOR_BASE  = 0.62  # cube/blocky parts (sphere random-close-pack band)
+PACKING_FACTOR_FLOOR = 0.18  # keep very thin/long parts from collapsing toward 0
+BIN_TOP_MARGIN_FRAC  = 0.20  # reserve top 20% of bin height as spill headroom
+MIN_AUTO_PARTS       = 2
+MAX_AUTO_PARTS       = 500   # formula sanity ceiling
+
+
+def obb_packing_factor(part_mesh) -> float:
+    """Shape-aware random-packing efficiency for a part's OBB volume.
+
+    A fixed factor is only valid for cube-like parts; random packing fraction falls ~1/AR for
+    elongated/flat parts (Philipse random-contact scaling), so taper from the cube anchor by the
+    OBB edge ratio. Anchors: AR 1->0.62, 2->0.44, 4->0.31, >=12->0.18 floor.
+    """
+    # `.primitive.extents`, NOT `.extents`: bounding_box_oriented returns a trimesh Box whose
+    # inherited `.extents` is the AXIS-ALIGNED bounds of the (rotated) box mesh, not the OBB's
+    # own side lengths — so it inflates toward the box diagonal for any non-axis-aligned OBB.
+    # Reading it made a rotated rod measure AR ~4.8 instead of 20, handing elongated parts too
+    # high a packing factor and over-counting them: precisely what this taper exists to prevent.
+    ext = np.sort(part_mesh.bounding_box_oriented.primitive.extents)[::-1]   # e1 >= e2 >= e3
+    aspect_ratio = float(ext[0] / max(ext[2], 1e-9))
+    return float(max(PACKING_FACTOR_FLOOR, PACKING_FACTOR_BASE / np.sqrt(aspect_ratio)))
+
+
+def hopper_inward_offset(bin_dim) -> float:
+    """Hopper wall inset, scaled to the bin's short half-extent.
+
+    HOPPER_INWARD_OFFSET is an absolute 20 mm, which is invisible on the 0.585 m max bin but
+    throttles a shrunken bin's opening below the part footprint — parts then jam above the rim
+    instead of entering. Returns exactly HOPPER_INWARD_OFFSET at the max bin.
+    """
+    hy = bin_dim[1] / 2.0
+    return float(np.clip(HOPPER_INWARD_OFFSET * hy / (MAX_BIN_DIM[1] / 2.0),
+                         0.0, HOPPER_INWARD_OFFSET))
+
+
+def stable_layer_heights(part_mesh) -> tuple:
+    """(layer_h, lz_min) in metres.
+
+    layer_h — z-extent under the MOST PROBABLE stable pose: the thickness one settled layer of
+              this part contributes to pile height.
+    lz_min  — the shallowest z-extent over all stable poses; a bin below lz_min/0.9 admits no
+              pose at all (see _compute_valid_stable_poses).
+    """
+    verts = np.asarray(part_mesh.vertices)
+    lzs = []
+    for R_stable, _prob in MujocoBinScene.get_stable_poses(part_mesh):   # sorted prob-descending
+        rot = (R_stable @ verts.T).T
+        lzs.append(float(rot[:, 2].max() - rot[:, 2].min()))
+    return lzs[0], min(lzs)
+
+
+def solve_bin_dim(part_mesh, fill_rate: float, packing_factor: float = None,
+                  max_bin_dim=MAX_BIN_DIM, min_bin_dim=MIN_BIN_DIM):
+    """Solve the smallest bin that models this part's stacking, and the count it holds.
+
+    Returns (bin_dim, n_parts, layers_at_fill).
+
+    The bin is solved FIRST and is authoritative — every lower bound is expressed as a bin
+    dimension, so the largest one simply wins, and the instance count is then read off the
+    final bin with the unchanged fill formula. Stacking depth is `fill_rate * LAYERS_AT_FULL_FILL`
+    (capped by the max bin), which is why shrinking the bin costs no realism: the parts removed
+    were widening the pile, not deepening it.
+    """
+    W0, L0, H0, T0 = max_bin_dim
+    packing = obb_packing_factor(part_mesh) if packing_factor is None else float(packing_factor)
+    obb_vol = max(float(part_mesh.bounding_box_oriented.volume), 1e-12)
+    layer_h, lz_min = stable_layer_heights(part_mesh)
+    r_bs = float(part_mesh.bounding_sphere.primitive.radius)
+
+    # Effective layer height: parts tilt and bridge in a random pile, so one part occupies more
+    # vertical extent than its flat stable-pose thickness. In-plane voids (below) and vertical
+    # bridging are different effects — only the vertical one divides by packing.
+    h_eff = layer_h / packing
+
+    # Height: LAYERS_AT_FULL_FILL effective layers at 100% fill, plus spill headroom.
+    # The lz_min/0.9 floor keeps at least one stable pose admissible.
+    h = float(np.clip(max(LAYERS_AT_FULL_FILL * h_eff / (1.0 - BIN_TOP_MARGIN_FRAC),
+                          lz_min / 0.9),
+                      min_bin_dim[2], H0))
+
+    # Footprint: enough floor for MIN_PARTS_PER_LAYER side by side (in-plane voids included via
+    # packing), then floored by the absolute minimum bin and by spawn-band feasibility.
+    a_parts = MIN_PARTS_PER_LAYER * obb_vol / (packing * layer_h)
+    s_raw = float(np.sqrt(a_parts / (W0 * L0)))
+    t = float(np.clip(s_raw * T0, MIN_WALL_THICKNESS, T0))
+    s_min = max(min_bin_dim[0] / W0,
+                min_bin_dim[1] / L0,
+                FOOTPRINT_SPAN_FACTOR * 2.0 * (r_bs + t) / L0)   # short side binds first
+    s_xy = float(np.clip(s_raw, s_min, 1.0))
+    w, l = s_xy * W0, s_xy * L0
+    t = float(np.clip(s_xy * T0, MIN_WALL_THICKNESS, T0))
+
+    # Count and depth follow the solved bin, with today's formula unchanged.
+    usable_h = h * (1.0 - BIN_TOP_MARGIN_FRAC)
+    n = int(np.clip(round(fill_rate * packing * w * l * usable_h / obb_vol),
+                    MIN_AUTO_PARTS, MAX_AUTO_PARTS))
+    layers_at_fill = fill_rate * usable_h / h_eff
+    return (w, l, h, t), n, float(layers_at_fill)
 
 
 @dataclass
@@ -44,9 +172,90 @@ class SceneObject:
     name: str
     body_name: str
 
+
+# --- Simulation profiling (opt-in) --------------------------------------------------------
+# Off by default and effectively free when off: every hook is one `is None` test plus a shared
+# nullcontext. Enable with MujocoBinScene(profile=True) or MUJOCO_BIN_PROFILE=1.
+_NULL_CTX = contextlib.nullcontext()
+PROFILE_SAMPLE_EVERY = 50    # steps between contact-count samples
+
+
+class _SimProfile:
+    """Phase timings, periodic contact samples, and a static model census.
+
+    MuJoCo's own per-step timers (mjTIMER_*) are only populated when a timer callback is
+    installed — WITHOUT set_mjcb_time() every mjData.timer entry reads zero, which would make a
+    profiling run silently report that everything is free. There is no mj_resetTimer; the
+    accumulators are zeroed in place so sim state is preserved (unlike mj_resetData).
+    """
+
+    _TIMERS = ("mjTIMER_STEP", "mjTIMER_POS_COLLISION", "mjTIMER_COL_BROAD",
+               "mjTIMER_COL_NARROW", "mjTIMER_CONSTRAINT")
+
+    def __init__(self):
+        self.phases = {}      # name -> seconds
+        self.series = []      # (sim_time, ncon, nefc, step, wall_per_step)
+        self.census = {}
+        self.steps = 0
+        mujoco.set_mjcb_time(lambda: time.perf_counter() * 1000.0)   # units are ours: ms
+
+    @contextlib.contextmanager
+    def phase(self, name):
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.phases[name] = self.phases.get(name, 0.0) + (time.perf_counter() - t0)
+
+    @staticmethod
+    def reset_timers(data):
+        for i in range(int(mujoco.mjtTimer.mjNTIMER)):
+            data.timer[i].duration = 0.0
+            data.timer[i].number = 0
+
+    def sample(self, data, step, wall_per_step):
+        self.series.append((float(data.time), int(data.ncon), int(data.nefc),
+                            int(step), float(wall_per_step)))
+
+    def take_census(self, model, bin_mesh=None):
+        hfield_geoms = int((np.asarray(model.geom_type) ==
+                            int(mujoco.mjtGeom.mjGEOM_HFIELD)).sum())
+        self.census = {
+            "ngeom": int(model.ngeom), "nbody": int(model.nbody),
+            "nmesh": int(model.nmesh), "nhfield": int(model.nhfield),
+            "hfield_geoms": hfield_geoms,
+            "hfield_cells": [int(model.hfield_nrow[i]) * int(model.hfield_ncol[i])
+                             for i in range(int(model.nhfield))],
+            "bin_tris": (len(bin_mesh.triangles) if bin_mesh is not None else 0),
+        }
+
+    def timer_ms(self, data):
+        """Mean ms per call for each MuJoCo timer (duration / number, per the docs)."""
+        out = {}
+        for name in self._TIMERS:
+            entry = data.timer[int(getattr(mujoco.mjtTimer, name))]
+            out[name] = float(entry.duration) / max(1, int(entry.number))
+        return out
+
+    def report(self, data=None):
+        arr = np.asarray(self.series, dtype=float) if self.series else np.zeros((0, 5))
+        rep = {
+            "phases_s": dict(self.phases),
+            "steps": self.steps,
+            "census": dict(self.census),
+            "mean_ncon": float(arr[:, 1].mean()) if len(arr) else 0.0,
+            "max_ncon": float(arr[:, 1].max()) if len(arr) else 0.0,
+            "mean_nefc": float(arr[:, 2].mean()) if len(arr) else 0.0,
+            "ms_per_step": float(arr[:, 4].mean() * 1000.0) if len(arr) else 0.0,
+        }
+        if data is not None:
+            rep["timers_ms"] = self.timer_ms(data)
+        return rep
+
 class MujocoBinScene:
     def __init__(self, part_mesh, part_convex_meshes, n_parts=1, bin_dim=MAX_BIN_DIM, settle_time=5.0, render=True, arrangement: str = "random", stable_pose_R: np.ndarray = None, timestep: float = 0.001,
-                 structure_type: str = "none", structure_height_frac: float = 0.75, clearance_mode: str = "medium"):
+                 structure_type: str = "none", structure_height_frac: float = 0.75, clearance_mode: str = "medium",
+                 enable_sleep: bool = False, profile: bool = False):
         # Timestep is the primary anti-tunneling lever: MuJoCo has no continuous collision
         # detection, so per-step displacement (~vel_cap*dt) must stay under ~o_margin. With
         # vel_cap=1.5 m/s and o_margin=1 mm the hard-safe bound is dt <= 6.7e-4; the stiff
@@ -95,6 +304,11 @@ class MujocoBinScene:
         self._h_layer = 0.0                   # cached worst-case tilted part height (m)
         self._valid_poses_for_rotation = None # cached stable poses for constrained sampling
 
+        # Opt-in profiler; see _SimProfile. Env override lets a live GUI run be profiled
+        # without editing code.
+        self.profile = _SimProfile() if (profile or os.environ.get("MUJOCO_BIN_PROFILE") == "1") \
+            else None
+
         self.spec = mujoco.MjSpec()
         self.spec.option.timestep = self.timestep
         self.spec.option.gravity = [0, 0, -9.81]
@@ -103,6 +317,17 @@ class MujocoBinScene:
         self.spec.option.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST  # stable for stiff multi-contact
         self.spec.option.cone = mujoco.mjtCone.mjCONE_ELLIPTIC                  # pile stability
         self.spec.option.enableflags |= mujoco.mjtEnableBit.mjENBL_MULTICCD     # multi-point mesh contacts
+        # Sleeping islands (mjENBL_SLEEP, MuJoCo >= 3.4). OFF by default: measured on a 48-part
+        # random scene it gave NO speedup (27.3 s vs 28.0 s) and left zero trees asleep, because
+        # the batched release keeps the pile moving and simulate() exits as soon as is_settled()
+        # trips — there is no long quiescent tail for sleeping to exploit. It did perturb settled
+        # positions by ~4.5 mm on a 20 mm part, so it costs pose fidelity for nothing here.
+        # Kept as an option because a scene that steps long after settling (e.g. structured
+        # partition/tray running the full settle_time) may still benefit; re-run
+        # physics/tests/test_sleep_equivalence.py as the gate before enabling it.
+        self.enable_sleep = enable_sleep
+        if enable_sleep:
+            self.spec.option.enableflags |= mujoco.mjtEnableBit.mjENBL_SLEEP
         self.spec.memory = 3000*1024*1024
         default = self.spec.default.geom
         default.condim = 6
@@ -115,12 +340,28 @@ class MujocoBinScene:
         self.world = self.spec.worldbody
 
         self.bin_dim = bin_dim
+        # Bin-relative spawn/drop geometry. Both reduce to their historical absolute constants
+        # at MAX_BIN_DIM, so an unshrunken bin behaves bit-identically; on a small bin the
+        # absolute values would choke the hopper throat and drop parts above the rim.
+        self.hopper_offset = hopper_inward_offset(bin_dim)
+        self.batch_drop_offset = float(np.clip(0.2 * bin_dim[2], 0.01, BATCH_DROP_OFFSET))
+        self._n_demoted = 0   # batch-0 placements that fell through to a later wave
         self.hx = self.bin_dim[0] / 2
         self.hy = self.bin_dim[1] / 2
         self.hh = self.bin_dim[2] / 2
-        self._load_convex_assets()
-        self.bin_mesh = self._build_bin()
+        with self._phase("assets"):
+            self._load_convex_assets()
+        with self._phase("build_bin"):
+            self.bin_mesh = self._build_bin()
         self.generate_scene()
+
+    def _phase(self, name):
+        """Profiling phase timer — a shared nullcontext when profiling is off."""
+        return self.profile.phase(name) if self.profile is not None else _NULL_CTX
+
+    def profile_report(self):
+        """Profiling results, or None when profiling was not enabled."""
+        return self.profile.report(self.data) if self.profile is not None else None
 
     def _load_convex_assets(self):
         self.convex_mesh_names = []
@@ -165,13 +406,17 @@ class MujocoBinScene:
         bin_body.pos = [0, 0, 0]
         self.bin_body = bin_body   # partition/tray fixtures attach geoms here (structured modes)
 
-        for half_sizes, pos in boxes:
+        # boxes[0] is the floor; naming it lets contact analysis tell a part resting on the bin
+        # floor from one resting on other parts (see bench/validate_bin_equivalence.py).
+        box_names = ["bin_floor", "bin_wall_px", "bin_wall_mx", "bin_wall_py", "bin_wall_my"]
+        for (half_sizes, pos), box_name in zip(boxes, box_names):
             # Transform geom center position into new frame
             bin_pos = np.eye(4)
             bin_pos[:3, 3] = pos
             transformed_pos = self.bin_transform @ np.array(bin_pos)
 
             geom = bin_body.add_geom()
+            geom.name  = box_name
             geom.type  = mujoco.mjtGeom.mjGEOM_BOX
             geom.size  = half_sizes
             geom.pos   = transformed_pos[:3, 3].tolist()
@@ -188,7 +433,7 @@ class MujocoBinScene:
         hopper_half_h = (hopper_top - wall_top) / 2
         hopper_center_z = wall_top + hopper_half_h
         t = self.bin_dim[3]                             # wall thickness alias
-        off = HOPPER_INWARD_OFFSET
+        off = self.hopper_offset
         hopper_defs = [
             ("hopper_px", [t, self.hy, hopper_half_h], [ self.hx - t - off,  0,             hopper_center_z]),
             ("hopper_mx", [t, self.hy, hopper_half_h], [-self.hx + t + off,  0,             hopper_center_z]),
@@ -525,11 +770,12 @@ class MujocoBinScene:
             ([t, self.hy, self.hh],        [-self.hx + t,   0,              self.hh - t]),
             ([self.hx, t, self.hh],        [ 0,             self.hy - t,    self.hh - t]),
             ([self.hx, t, self.hh],        [ 0,            -self.hy + t,    self.hh - t]),
-            # hopper extension walls (inset by HOPPER_INWARD_OFFSET to match MuJoCo geoms)
-            ([t, self.hy, hopper_half_h],  [ self.hx - t - HOPPER_INWARD_OFFSET,   0,              hopper_center_z]),
-            ([t, self.hy, hopper_half_h],  [-self.hx + t + HOPPER_INWARD_OFFSET,   0,              hopper_center_z]),
-            ([self.hx, t, hopper_half_h],  [ 0,             self.hy - t - HOPPER_INWARD_OFFSET,    hopper_center_z]),
-            ([self.hx, t, hopper_half_h],  [ 0,            -self.hy + t + HOPPER_INWARD_OFFSET,    hopper_center_z]),
+            # hopper extension walls (inset by self.hopper_offset to match the MuJoCo geoms —
+            # the two MUST agree or the spawn collision check disagrees with the simulation)
+            ([t, self.hy, hopper_half_h],  [ self.hx - t - self.hopper_offset,   0,              hopper_center_z]),
+            ([t, self.hy, hopper_half_h],  [-self.hx + t + self.hopper_offset,   0,              hopper_center_z]),
+            ([self.hx, t, hopper_half_h],  [ 0,             self.hy - t - self.hopper_offset,    hopper_center_z]),
+            ([self.hx, t, hopper_half_h],  [ 0,            -self.hy + t + self.hopper_offset,    hopper_center_z]),
         ]
         meshes = []
         for half_sizes, pos in box_defs:
@@ -556,8 +802,18 @@ class MujocoBinScene:
         # XY spawn inset: bounding-sphere radius (+ wall thickness) keeps the part inside the
         # walls in ANY orientation. The old 2*radius was double this, which forced big parts to
         # spawn at the bin centre and pile into a central tower.
-        margin = radius + self.bin_dim[3]
-        batch_size = max(1, min(10, int((2 * self.hx) // (2 * radius)) * int((2 * self.hy) // (2 * radius))))
+        # Above wall_top the opening is bounded by the HOPPER walls, which are inset a further
+        # hopper_offset. Sampling there against the bin-wall inset put candidates inside a
+        # hopper wall — the collision manager below includes those walls — so the 200-attempt
+        # loop exhausted and the part was demoted to a later wave. Use the matching inset for
+        # whichever wall actually bounds the sampled height.
+        margin_lo = radius + self.bin_dim[3]
+        margin_hi = margin_lo + self.hopper_offset
+        wall_top  = 2 * self.hh - self.bin_dim[3]
+        cells = int((2 * self.hx) // (2 * radius)) * int((2 * self.hy) // (2 * radius))
+        # A shrunken footprint fits fewer parts per wave; without a floor the wave count — and
+        # with it the fixed BATCH_RELEASE_INTERVAL_S paid per wave — grows without bound.
+        batch_size = max(1, int(np.ceil(self.n_parts / MAX_RELEASE_BATCHES)), min(10, cells))
         n_batches  = int(np.ceil(self.n_parts / batch_size))
 
         valid_poses_for_rotation = self._compute_valid_stable_poses()
@@ -567,16 +823,19 @@ class MujocoBinScene:
         valid_poses = np.zeros((self.n_parts, 7))
         self._batch_of_body = [i // batch_size for i in range(self.n_parts)]
 
-        active_z_lo = max(self._h_layer, 0.3)
+        # 0.3 m is above the rim of even the max bin; on a shrunken bin it is several
+        # bin-heights of free fall. Bound it to just above this bin's rim.
+        active_z_lo = max(self._h_layer, min(0.3, 1.2 * self.bin_dim[2]))
         active_z_hi = active_z_lo + self._h_layer * 1.0
         for i in range(self.n_parts):
             placed_active = False
             if self._batch_of_body[i] == 0:
                 candidate_trimesh = copy.deepcopy(self.part_mesh)
                 for _ in range(200):
+                    z = np.random.uniform(active_z_lo, active_z_hi)
+                    margin = margin_hi if z > wall_top else margin_lo
                     x = np.random.uniform(-self.hx + margin, self.hx - margin)
                     y = np.random.uniform(-self.hy + margin, self.hy - margin)
-                    z = np.random.uniform(active_z_lo, active_z_hi)
                     pos = np.asarray([x, y, z])
                     T = np.eye(4)
                     T[:3, 3] = pos
@@ -595,6 +854,7 @@ class MujocoBinScene:
                     # Could not fit in batch 0 — demote to the last batch; release_batch()
                     # will drop it onto the pile later.
                     self._batch_of_body[i] = max(1, n_batches - 1)
+                    self._n_demoted += 1
                     print(f"[WARNING] Could not place part {i} in batch 0; demoted to batch {self._batch_of_body[i]}")
 
             if not placed_active:
@@ -626,7 +886,8 @@ class MujocoBinScene:
         # (lowest point `clearance` above the cradle). partition/none seat just above the bin floor.
         tray_hf = None
         if self.structure_type == "tray":
-            tray_hf = self._build_tray_hfield(R_aligned, pitch_x, pitch_y, part_h)
+            with self._phase("hfield_build"):
+                tray_hf = self._build_tray_hfield(R_aligned, pitch_x, pitch_y, part_h)
             tray_seat_z = tray_hf["seat_dz"] + TRAY_SEAT_GAP
         else:
             verts = np.asarray(self.part_mesh.vertices)
@@ -652,9 +913,11 @@ class MujocoBinScene:
 
         # Build fixtures on the bin body (geoms + visual mesh) before compile().
         if self.structure_type == "partition":
-            self._build_partitions(xs, ys, part_h)
+            with self._phase("partitions"):
+                self._build_partitions(xs, ys, part_h)
         elif self.structure_type == "tray":
-            self._instance_tray_hfield(tray_hf, valid_poses[:, :3])
+            with self._phase("hfield_instance"):
+                self._instance_tray_hfield(tray_hf, valid_poses[:, :3])
 
         self._spawn_bodies(valid_poses, static=structured_static)
         if not structured_static:
@@ -807,25 +1070,34 @@ class MujocoBinScene:
         else:
             self._pile_top = max(self._pile_top, 2 * self.bin_dim[3])  # ~ bin floor + wall thickness
 
-        drop_z = self._pile_top + BATCH_DROP_OFFSET + self._h_layer * 0.5
+        drop_z = self._pile_top + self.batch_drop_offset + self._h_layer * 0.5
         radius = self.part_mesh.bounding_sphere.primitive.radius
         margin = radius + self.bin_dim[3]   # see _generate_random_scene
+        if drop_z > 2 * self.hh - self.bin_dim[3]:
+            margin += self.hopper_offset    # above the rim the hopper walls bound the opening
+
+        # A wave can hold more parts than the footprint fits side by side, since batch_size is
+        # floored by MAX_RELEASE_BATCHES on a shrunken bin. Spread the overflow across sub-layers
+        # one tilted-part-height apart, so the rejection loop below is not asked for the
+        # impossible and does not fall through to "accept the last candidate unchecked".
+        cells = max(1, int((2 * self.hx) // (2 * radius)) * int((2 * self.hy) // (2 * radius)))
 
         # Place batch members collision-free w.r.t. each other (like batch 0): parts in the same
         # batch share one drop band, so without this small parts — which pack up to 10 per batch —
         # spawn already interpenetrating. Rejection-sample each pose against the ones already
         # accepted this batch; fall back to the last candidate if a crowded batch leaves no gap.
         cm = CollisionManager()
-        for i in batch_indices:
+        for slot, i in enumerate(batch_indices):
             for gid in self._geom_ids_of_body[i]:
                 self.model.geom_contype[gid] = 1
                 self.model.geom_conaffinity[gid] = 1
             x = y = z = None
             R_mat = T = None
+            sub_z = drop_z + (slot // cells) * self._h_layer
             for _ in range(100):
                 cx = np.random.uniform(-self.hx + margin, self.hx - margin)
                 cy = np.random.uniform(-self.hy + margin, self.hy - margin)
-                cz = drop_z + np.random.uniform(0, self._h_layer * 0.3)
+                cz = sub_z + np.random.uniform(0, self._h_layer * 0.3)
                 R_cand = self._sample_constrained_rotation(self._valid_poses_for_rotation)
                 T = np.eye(4)
                 T[:3, :3] = R_cand
@@ -847,12 +1119,17 @@ class MujocoBinScene:
     def generate_scene(self):
         self.part_counter = 0
         if self.arrangement == "structured":
-            self._generate_structured_scene()
+            with self._phase("structured_layout"):
+                self._generate_structured_scene()
         else:
-            self._generate_random_scene()
+            with self._phase("random_layout"):
+                self._generate_random_scene()
 
-        self.model = self.spec.compile()
-        self.data = mujoco.MjData(self.model)
+        with self._phase("compile"):
+            self.model = self.spec.compile()
+            self.data = mujoco.MjData(self.model)
+        if self.profile is not None:
+            self.profile.take_census(self.model, self.bin_mesh)
 
         # Structured/none is purely kinematic (static bodies): pose them and stop.
         if self.arrangement == "structured" and self.structure_type == "none":
@@ -927,12 +1204,21 @@ class MujocoBinScene:
         max_steps = int(self.settle_time / self.model.opt.timestep)
         tick = max(1, int(1.0 / self.model.opt.timestep))
         self._stable_count = 0
+        if self.profile is not None:
+            self.profile.reset_timers(self.data)
+            prof_t0 = time.perf_counter()
         for i in range(max_steps):
             if i % tick == 0:
                 print(f"[t={self.data.time:.2f}s] structured-settle step={i}/{max_steps}")
             step_start = time.time()
             mujoco.mj_step(self.model, self.data)
             self._clamp_velocities()
+            if self.profile is not None:
+                self.profile.steps = i + 1
+                if i % PROFILE_SAMPLE_EVERY == 0:
+                    now = time.perf_counter()
+                    self.profile.sample(self.data, i, (now - prof_t0) / PROFILE_SAMPLE_EVERY)
+                    prof_t0 = now
             if on_step is not None and i % preview_tick == 0:
                 try:
                     on_step()
@@ -968,6 +1254,8 @@ class MujocoBinScene:
 
         preview_tick = max(1, int(preview_interval_s / self.model.opt.timestep))
         n_batches = (max(self._batch_of_body) + 1) if self._batch_of_body else 1
+        if self.profile is not None:
+            self.profile.reset_timers(self.data)
 
         # Snapshot parking qpos so parked (not-yet-released) bodies can be held in place each
         # step: contype=0 disables collisions, not gravity, so without this they free-fall.
@@ -987,12 +1275,19 @@ class MujocoBinScene:
         def run(max_steps, label, body_subset=None, parked_ids=(), check_settle=True):
             self._stable_count = 0
             tick = max(1, int(1.0 / self.model.opt.timestep))
+            prof_t0 = time.perf_counter()
             for i in range(max_steps):
                 if i % tick == 0:
                     print(f"[t={self.data.time:.2f}s] {label} step={i}/{max_steps}")
                 step_start = time.time()
                 mujoco.mj_step(self.model, self.data)
                 self._clamp_velocities()
+                if self.profile is not None:
+                    self.profile.steps += 1
+                    if i % PROFILE_SAMPLE_EVERY == 0:
+                        now = time.perf_counter()
+                        self.profile.sample(self.data, i, (now - prof_t0) / PROFILE_SAMPLE_EVERY)
+                        prof_t0 = now
                 if parked_ids:
                     freeze_parked(parked_ids)
                 if on_step is not None and i % preview_tick == 0:
@@ -1046,10 +1341,13 @@ class MujocoBinScene:
         """
         After simulation, report how many parts remain inside the bin footprint.
 
-        A part is considered escaped if its centre of mass is more than one
-        bounding-sphere radius beyond the bin x/y wall extent, or more than
-        one full bin-height below the bin opening (i.e. clearly in free space,
-        not just stacked above the rim).
+        A part is considered escaped if its centre of mass is beyond the bin x/y wall extent
+        by more than the x/y tolerance, or more than one full bin-height below the bin opening
+        (i.e. clearly in free space, not just stacked above the rim).
+
+        The x/y tolerance is one bounding-sphere radius, but capped at ESCAPE_TOL_FRAC of the
+        bin half-extent: on a shrunken bin a part radius can be a sizeable fraction of the bin
+        itself, and an uncapped tolerance would count a part half a bin-width outside as "in".
 
         Returns
         -------
@@ -1065,8 +1363,8 @@ class MujocoBinScene:
         bin_tz  = self.bin_transform[2, 3]
 
         # x/y: allow one part-radius beyond the physical wall before calling it escaped
-        x_limit = self.hx + r_part
-        y_limit = self.hy + r_part
+        x_limit = self.hx + min(r_part, ESCAPE_TOL_FRAC * self.hx)
+        y_limit = self.hy + min(r_part, ESCAPE_TOL_FRAC * self.hy)
         # z: bin floor at z=0, walls to z=2*hh=0.25 m; parts may stack above the rim.
         # Flag escape only when a part goes more than one bin-height BELOW the floor
         # (e.g. fell through due to tunneling) — bin_tz(0) - 2*hh(0.125) = -0.25.
@@ -1202,6 +1500,13 @@ def load_part(mesh_path=None, verbose: bool = True):
         if verbose:
             rp("  Converting mm -> m")
         mesh_o3d.scale(0.001, center=(0, 0, 0))
+
+    # Same resolution-based decimation the GUI import applies, so headless/CLI runs see the
+    # same geometry. Must follow the mm->m conversion: the voxel clamps are in metres.
+    mesh_o3d, dec = decimate_mesh_to_resolution(mesh_o3d)
+    if verbose and not dec["skipped"]:
+        rp(f"  Decimated {dec['tri_before']:,} -> {dec['tri_after']:,} triangles "
+           f"@ voxel {dec['voxel_size'] * 1000:.3f} mm")
 
     mesh_o3d.compute_vertex_normals()
     mesh_o3d.translate(-mesh_o3d.get_center())

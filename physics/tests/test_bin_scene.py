@@ -29,7 +29,8 @@ from rich import print as rp
 from scipy.spatial.transform import Rotation as R
 
 from geometry.geom_utils import o3d_to_trimesh, init_open3d
-from physics.mujoco_bin_scene import MujocoBinScene, load_part, _display_scene
+from physics.mujoco_bin_scene import (MujocoBinScene, load_part, _display_scene,
+                                      obb_packing_factor)
 
 
 # -- Synthetic mesh generator --------------------------------------------------
@@ -88,9 +89,7 @@ def realistic_part_count(part_mesh, requested: int, bin_dim=(0.76, 0.585, 0.25, 
     bw, bl, bh, _ = bin_dim
     bin_vol = bw * bl * bh * 0.8                                   # 20% top headroom
     obb_vol = max(float(part_mesh.bounding_box_oriented.volume), 1e-9)
-    ext     = np.sort(part_mesh.bounding_box_oriented.extents)[::-1]
-    ar      = float(ext[0] / max(ext[2], 1e-9))
-    packing = max(0.18, 0.62 / np.sqrt(ar))
+    packing = obb_packing_factor(part_mesh)   # single source of truth (was duplicated here)
     auto    = max(2, int(round(fill * packing * bin_vol / obb_vol)))
     return int(min(requested, auto))
 

@@ -30,6 +30,32 @@ def test_worker_keeps_metre_scale(headless_app, make_box_mesh):
     assert np.isclose(extent, 0.05, atol=1e-6)  # unchanged
 
 
+def test_worker_decimates_after_unit_conversion(headless_app):
+    """Decimation must run AFTER the mm->m conversion. Its absolute voxel clamps are in metres,
+    so on a still-in-mm mesh the target would clamp to the 2 mm ceiling and destroy the part
+    (a 150-unit diagonal x 0.4% = 0.6 "mm-units", i.e. 0.6 m once converted).
+
+    Feeds a dense 50 mm sphere: the final mesh must be BOTH converted to metres and decimated.
+    """
+    import trimesh
+    tri = trimesh.creation.icosphere(subdivisions=7, radius=25.0)   # 50 mm diameter, in mm
+    dense = o3d.geometry.TriangleMesh(
+        vertices=o3d.utility.Vector3dVector(tri.vertices),
+        triangles=o3d.utility.Vector3iVector(tri.faces))
+    dense.compute_vertex_normals()
+    n_before = len(dense.triangles)
+
+    stage = headless_app.stages[Stage.IMPORT_MESH]
+    stage.file_path = Path("dense_part_mm.stl")
+    stage.worker(mesh=dense)
+
+    extent = headless_app.target_mesh.get_axis_aligned_bounding_box().get_extent().max()
+    # 0.05 m, not 50: the conversion ran. Tolerance is one voxel, since vertex clustering pulls
+    # extreme vertices inward by up to ~voxel/2 (bounded tightly by test_preserves_extents).
+    assert np.isclose(extent, 0.05, atol=1e-3), "unit conversion lost"
+    assert len(headless_app.target_mesh.triangles) < n_before, "mesh was not decimated"
+
+
 def test_worker_empty_mesh_no_crash(headless_app):
     stage = headless_app.stages[Stage.IMPORT_MESH]
     stage.file_path = Path("empty.stl")
