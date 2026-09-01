@@ -31,6 +31,7 @@ mesh_raw/
 *.obj
 *.png
 *.npz
+*.gif
 
 *.code-workspace
 .claude/

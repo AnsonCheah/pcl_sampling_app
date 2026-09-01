@@ -26,8 +26,6 @@ class DownsampleStage(BaseStage):
         self.coarse_factor = 2.0
         self.curvature_k_neighbors = 5
         self.cloud_radio_idx = 0  # 0=surface, 1=edge
-        # Ambiguity analysis costs ~10-60s depending on cloud size, so it is switchable;
-        # with it off the model frame falls back to the historical PCA-canonical one.
         self.run_ambiguity = True
         self.show_ambiguity = False
         self.preview_max_axes = 6
