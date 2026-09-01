@@ -52,10 +52,41 @@ class EvalCache:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _scene_signature(path: str) -> str:
+        """Content-sensitive signature for one scene path.
+
+        A scene path is a scene_NNNNN *directory*; its identity is the set of ``sample_*.ply``
+        files it holds. We fold each file's ``(name, size, mtime_ns)`` into the signature so that
+        **regenerating scenes into the same directory changes the cache key** — otherwise a
+        path-only key returns a stale result computed on the previous scene data (this masked a
+        real world-Z matching offset behind a high cached coverage). Falls back to the bare path
+        when it doesn't exist (keeps unit tests with synthetic paths deterministic) or when it is a
+        plain file (uses that file's own size+mtime).
+        """
+        try:
+            if os.path.isdir(path):
+                sigs = []
+                for name in sorted(os.listdir(path)):
+                    if name.startswith("sample_") and name.endswith(".ply"):
+                        st = os.stat(os.path.join(path, name))
+                        sigs.append(f"{name}:{st.st_size}:{st.st_mtime_ns}")
+                return path + "[" + ",".join(sigs) + "]"
+            if os.path.isfile(path):
+                st = os.stat(path)
+                return f"{path}:{st.st_size}:{st.st_mtime_ns}"
+        except OSError:
+            pass
+        return path
+
+    @staticmethod
     def make_key(config: dict, scene_paths: List[str]) -> str:
-        """Stable 16-char hex key from config + scene paths."""
+        """Stable 16-char hex key from config + a content-sensitive signature of each scene path.
+
+        Order-independent (paths are sorted). See ``_scene_signature`` for why the key incorporates
+        the scene directory's ``sample_*.ply`` file stats rather than just the path string.
+        """
         config_str = json.dumps(config, sort_keys=True, default=str)
-        scenes_str = ",".join(sorted(scene_paths))
+        scenes_str = ",".join(sorted(EvalCache._scene_signature(p) for p in scene_paths))
         raw = config_str + "::" + scenes_str
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 

@@ -3,11 +3,15 @@ channels:
   - defaults
 dependencies:
   - python=3.12.13
+  - pip=26.0.1
   - pip:
+      - pytest==9.1.1
       - numpy==2.4.1
       - open3d==0.19.0
       - scipy==1.16.3
-      - optuna=4.8.0
+      - optuna==4.8.0
+      - --extra-index-url https://download.pytorch.org/whl/cpu #PyTorch (CPU build) — backend for Optuna's GPSampler,
+      - torch==2.13.0+cpu
       - scikit-learn==1.8.0
       - matplotlib==3.10.8
       - trimesh==4.11.0
@@ -17,5 +21,55 @@ dependencies:
       - vhacdx==0.0.10
       - networkx==3.6.1
       - manifold3d==3.4.1
+      - shapely==2.1.2
+      - mapbox-earcut==2.0.0
+      - rtree==1.4.1
       - grpcio==1.80.0
       - rich==14.3.3
+      # Imported at module scope by bench/fetch_dataset.py. It arrives transitively anyway,
+      # but a direct import belongs in the manifest -- a transitive dependency can be dropped
+      # by an unrelated version bump, and the failure would surface as the dataset fetch
+      # breaking rather than as the package that actually changed.
+      - requests==2.34.2
+      #  — standalone private package (was vendored under mm_adapter/).
+      - mm-adapter @ git+https://github.com/AnsonCheah/mm-adapter.git@v0.1.0 # MechMind Vision Hub gRPC client
+      # ---------------------------------------------------------------------------------
+      # OPTIONAL: GPU acceleration. Every consumer falls back to SciPy/NumPy on its own when
+      # cupy is missing or the GPU is unusable, so removing this line costs speed, never
+      # function. Nothing imports cupy at module scope -- a test in registration/tests
+      # enforces that for registration/ppf, so the package still imports on a CUDA-free box.
+      #
+      # Consumers:
+      #   sensor/segment_instances.py        cupyx.scipy.ndimage (28x CPU / 48x GPU)
+      #   registration/ppf/_backend.py       PPF vote stage; also ppf_saliency/_backend.py
+      #
+      # cupy-cuda12x needs a CUDA 12.x driver (12.8+ for Blackwell / sm_120). The `[ctk]`
+      # extra pulls the CUDA libraries as wheels, which is what makes it work on Blackwell
+      # without a system CUDA install.
+      #
+      # If `import cupy` raises "cannot import name 'core' from partially initialized module
+      # cupy._core", that is NOT a circular import -- it is cupy's way of reporting a broken
+      # install. Check for missing compiled files and repair with:
+      #     pip install --force-reinstall --no-deps cupy-cuda12x==14.1.1
+      # (Hit in this repo: four .pyd files were absent from an interrupted install.)
+      #
+      # Verify with:  python -c "from registration.ppf import cupy_available; print(cupy_available())"
+      - cupy-cuda12x[ctk]>=13.4.0
+      # ---------------------------------------------------------------------------------
+      # OPTIONAL: BOP pose-error metrics (MSSD / ADI / ADD), used by
+      # registration/ppf_saliency/bench/metrics.py.
+      #
+      # registration/ppf/bench/metrics.py deliberately does NOT use it -- that package's
+      # contract is numpy/scipy/open3d only, so it implements MSSD/ADD/ADI directly and a
+      # test cross-checks them against bop_toolkit element-by-element wherever it is present.
+      #
+      # MUST be installed with --no-deps:
+      #     pip install --no-deps git+https://github.com/thodan/bop_toolkit.git
+      #
+      # Its pyproject pins `numpy<2.0.0`, so a normal install downgrades numpy from 2.4.1
+      # and takes open3d and scipy down with it. It also pulls vispy / PyOpenGL /
+      # opencv-python for a renderer this repo does not need -- sensor/scene_render.py is
+      # already the renderer. Only `bop_toolkit_lib.pose_error` and `.misc` are imported,
+      # both pure numpy/scipy, and both verified working against numpy 2.4.1.
+      # - --no-deps
+      # - bop_toolkit_lib @ git+https://github.com/thodan/bop_toolkit.git

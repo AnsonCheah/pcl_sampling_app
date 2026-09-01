@@ -1,0 +1,134 @@
+import colorsys
+import numpy as np
+import open3d as o3d
+import open3d.visualization.gui as gui
+import open3d.visualization.rendering as rendering
+from concurrent.futures import ProcessPoolExecutor
+from enums import Stage
+from stages.stage_base import BaseStage
+from geometry.geom_utils import o3d_to_trimesh
+from geometry.convex_decomp import vhacd_decompose
+import time
+
+# VHACD parameters forwarded to vhacdx.compute_vhacd (via geometry.convex_decomp.vhacd_decompose).
+# Exposed here so the decomposition can be tuned without editing worker(); the values below are
+# vhacdx's own library defaults, so behaviour is identical to the previous bare vhacd_decompose(
+# verts, faces) call until you change them. Not wired to the GUI yet.
+#   maxConvexHulls    -- max number of output convex pieces. vhacdx default: 64.
+#   resolution        -- voxel budget for the ACD voxelization; higher = finer surface, slower.
+#                        vhacdx default: 400000.
+#   minimumVolumePercentErrorAllowed -- stop splitting a region once its voxels are within this
+#                        %% of its convex hull's volume; lower = more accurate, more hulls. default: 1.0.
+#   maxRecursionDepth -- max depth of the recursive split tree. vhacdx default: 10.
+#   shrinkWrap        -- shrink-wrap voxel hulls back onto the source surface for a tighter fit.
+#                        vhacdx default: True.
+#   fillMode          -- interior fill: 'flood' (needs a watertight mesh), 'raycast', or 'surface'.
+#                        vhacdx default: 'flood'.
+#   maxNumVerticesPerCH -- vertex budget per output convex hull. vhacdx default: 64.
+#   asyncACD          -- multi-threaded solver (affects speed only, not accuracy). vhacdx default: True.
+#   minEdgeLength     -- stop recursing once a voxel patch's edges are all shorter than this (voxels).
+#                        vhacdx default: 2.
+#   findBestPlane     -- exhaustive best-split-plane search (experimental, slower, more accurate).
+#                        vhacdx default: False.
+VHACD_PRESET = dict(
+    maxConvexHulls=32,
+    resolution=1000000,
+    minimumVolumePercentErrorAllowed=1.0,
+    maxRecursionDepth=50,
+    shrinkWrap=True,
+    fillMode="flood",
+    maxNumVerticesPerCH=1024,
+    asyncACD=True,
+    minEdgeLength=2,
+    findBestPlane=True,
+)
+
+
+class DecomposeStage(BaseStage):
+    """Convex-decompose the imported mesh into a set of convex hulls (VHACD).
+
+    Runs synchronously in its own worker (no daemon thread): on completion
+    ``app.convex_meshes`` is guaranteed populated before SYNTHETIC consumes it.
+    """
+
+    downstream = {
+        "convex_meshes": lambda: [],
+    }
+
+    def __init__(self, app):
+        self.name = Stage.DECOMPOSE.name
+        super().__init__(app)
+
+    def build_panel(self):
+        if self.app.headless:
+            return
+        v = gui.Vert(4)
+
+        self.btn_decompose = self.register_widget(gui.Button("Decompose Mesh"),
+                                                  enabled_if=lambda: self.app.target_mesh is not None)
+        self.btn_decompose.set_on_clicked(self.start)
+
+        self.btn_reset = self.register_widget(gui.Button("Clear Decomposition"),
+                                              enabled_if=lambda: len(self.app.convex_meshes) > 0)
+        self.btn_reset.set_on_clicked(self.reset)
+
+        self.btn_restart = self.register_widget(gui.Button("Restart"))
+        self.btn_restart.set_on_clicked(lambda: self.app._restart())
+
+        v.add_child(gui.Label("Convex Decomposition"))
+        v.add_child(gui.Label(""))
+        v.add_child(self.btn_decompose)
+        v.add_child(self.btn_reset)
+        v.add_child(gui.Label(""))
+        v.add_child(self.btn_restart)
+
+        print("loaded decompose panel")
+        return v
+
+    # Only advance once decomposition has produced convex hulls.
+    def next_enabled(self) -> bool:
+        return len(self.app.convex_meshes) > 0
+
+    def _refresh_ui(self):
+        if self.app.headless:
+            return
+        self.app.main_thread(lambda: self.app._clear_scene())
+        if len(self.app.convex_meshes) > 0:
+            # After decomposition: show the convex hulls.
+            self.app.main_thread(
+                lambda: self.add_meshes_in_distinct_colors(self.app.convex_meshes, "convex"))
+        elif self.app.target_mesh is not None:
+            # On stage entry, before decomposition: show the original mesh.
+            self.app.main_thread(lambda: self.app.scene.scene.add_geometry(
+                "mesh", self.app.target_mesh, self.app.default_material))
+        self.app.main_thread(self.app._reframe)   # content swap -> reframe (posts a redraw too)
+        self.enable_widgets()
+
+    def worker(self):
+        if self.app.target_mesh is None:
+            print("[WARN] No mesh to decompose")
+            return
+        start = time.time()
+        self.app.clear_state_from(self.stage_key)
+        self.app.update_progress(0.1, "Preparing mesh for decomposition...")
+        part_mesh = o3d_to_trimesh(self.app.target_mesh)
+        verts = np.asarray(part_mesh.vertices)
+        faces = np.asarray(part_mesh.faces)
+        # vhacdx.compute_vhacd holds the GIL for its full runtime, which would starve the
+        # Open3D GUI thread and freeze the progress bar. Run it in a child process and block
+        # on the result here; the wait releases the GIL so queued progress callbacks render.
+        self.app.update_progress(0.3, "Running convex decomposition...")
+        with ProcessPoolExecutor(max_workers=1) as ex:
+            decomposed_convex_list = ex.submit(vhacd_decompose, verts, faces, **VHACD_PRESET).result()
+
+        n = len(decomposed_convex_list)
+        for i, (v, f) in enumerate(decomposed_convex_list):
+            mesh = o3d.geometry.TriangleMesh(
+                vertices=o3d.utility.Vector3dVector(v),
+                triangles=o3d.utility.Vector3iVector(f))
+            self.app.convex_meshes.append(mesh)
+            self.app.update_progress(0.6 + 0.4 * (i + 1) / max(n, 1),
+                                     f"Building convex hulls ({i + 1}/{n})...")
+        print(f"[DECOMPOSE] decomposed mesh into {len(self.app.convex_meshes)} convex hulls, time taken={time.time() - start}")
+
+        self.app.redraw()

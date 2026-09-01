@@ -6,9 +6,11 @@ class Stage(Enum):
     CROP = 2
     DOWNSAMPLE = 3
     SAVE = 4
-    SYNTHETIC = 5
+    DECOMPOSE = 5
+    SCENE = 6
+    RENDER = 7
+    TUNING = 8
 
 class ToolMode(Enum):
     NONE = 0
     BOX_SELECT = 1
-    POLY_SELECT = 2

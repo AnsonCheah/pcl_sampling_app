@@ -112,3 +112,39 @@ def make_two_plane_render_dict(seed: int = 0):
     )
     keep = compute_dropout_mask(render, roughness=0.4, seed=seed)
     return render, keep
+
+
+def make_multi_instance_render_dict(layout: str = "grid", W: int = _W, H: int = _H,
+                                    seed: int = 0):
+    """
+    Several small planes with distinct geom_ids — for confusion bbox-pruning and
+    scaling tests.
+
+    layout : "grid" — 2×2 block of planes whose silhouettes sit close together so
+                       neighbouring pairs share a boundary zone (pruning keeps them).
+             "far"  — the same planes pushed apart so most pairs' padded bounding
+                       boxes do NOT overlap (pruning skips them). Pruned and
+                       un-pruned confusion must give identical masks either way.
+    W, H   : render resolution. Pixel separation between instances scales with
+             resolution while the px crop margin is fixed by the noise params, so a
+             higher resolution is needed for the "far" layout to actually exercise
+             the bbox-prune path (see the segmentation pruning test).
+
+    Returns
+    -------
+    render : dict from scene_render() — geom_ids 0..3
+    keep   : (N,) bool mask from compute_dropout_mask()
+    """
+    spread = 0.06 if layout == "grid" else 0.16
+    w = 0.07
+    centres = [(-spread, -spread), (spread, -spread),
+               (-spread,  spread), (spread,  spread)]
+    T_cam  = camera_view_matrix(_CAM_POS, _LOOK_AT)
+    meshes = {
+        f"plane_{i}": O3DSceneObject(geom=_plane_mesh(cx=cx, cy=cy, w=w, h=w), T_gt=np.eye(4))
+        for i, (cx, cy) in enumerate(centres)
+    }
+    render = scene_render(meshes, T_cam, _LOOK_AT, _FOV, W, H, normal_radius=0.020)
+    assert render is not None, "Multi-instance fixture not visible — check geometry."
+    keep = compute_dropout_mask(render, roughness=0.4, seed=seed)
+    return render, keep

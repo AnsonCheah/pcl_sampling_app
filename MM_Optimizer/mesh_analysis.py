@@ -2,7 +2,7 @@
 mesh_analysis.py  —  Phase 0: Geometry-derived warm start
 ----------------------------------------------------------
 Derives heuristic starting parameters from the reference point cloud.
-Wraps registration/ppf_helpers.py and adds regime + symmetry detection.
+Wraps geometry/geom_utils.py and adds regime + symmetry detection.
 
 Returns a WarmStart dataclass consumed by optimizer.py Phase 0.
 No MechVision calls — pure geometry.
@@ -18,7 +18,7 @@ _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from registration.ppf_helpers import compute_model_diameter, estimate_surface_area
+from geometry.geom_utils import estimate_surface_area, model_diameter
 import MM_Optimizer.search_config as SC
 
 from dataclasses import dataclass
@@ -97,8 +97,13 @@ def analyze_mesh(ref_pcd: o3d.geometry.PointCloud,
     # ------------------------------------------------------------------ #
     #  Basic geometry                                                      #
     # ------------------------------------------------------------------ #
-    D  = compute_model_diameter(ref_pcd)
-    SA = estimate_surface_area(ref_pcd, D)
+    # NOTE: `model_diameter` is the exact max pairwise distance (convex hull), replacing
+    # the old longest-minimal-OBB-extent measure. It reads larger — 109.7 mm vs 94.4 mm on
+    # the Stanford bunny, ~16% — so the voxel bounds below shift with it. These are warm
+    # starts for the optimiser rather than hard limits, but a re-tune baseline taken before
+    # this change is not directly comparable to one taken after.
+    D  = model_diameter(ref_pcd)
+    SA = estimate_surface_area(ref_pcd)
 
     ws.diameter_m      = D
     ws.surface_area_m2 = SA
@@ -499,7 +504,12 @@ def get_feature_vector(ws: WarmStart) -> list:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_reference_pcd(model_path: str) -> o3d.geometry.PointCloud:
-    """Load a PLY point cloud and estimate normals if missing."""
+    """Load a PLY point cloud, estimating normals if the file carries none."""
+    # Open3D returns an EMPTY cloud for a missing path, which then fails several frames
+    # later inside orient_normals_consistent_tangent_plane with "No normals in the
+    # PointCloud" — naming the real problem here saves that hunt.
+    if not os.path.isfile(model_path):
+        raise FileNotFoundError(f"reference cloud not found: {model_path}")
     pcd = o3d.io.read_point_cloud(model_path)
     if not pcd.has_normals():
         pcd.estimate_normals(
