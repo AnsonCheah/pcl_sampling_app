@@ -2,6 +2,7 @@
 from tkinter import Tk, filedialog
 from pathlib import Path
 import os
+import re
 import numpy as np
 import struct
 
@@ -17,17 +18,17 @@ def list_scene_dirs(part_dir):
         name for name in os.listdir(part_dir)
         if name.startswith("scene_") and os.path.isdir(os.path.join(part_dir, name)))
 
-def save_ply_dialog(default_name=None):
-    Tk().withdraw()
-    default_name = f"{'output' if not default_name else default_name}.ply"
-    path = filedialog.asksaveasfilename(
-        defaultextension=".ply",
-        initialdir=Path.cwd(), 
-        initialfile=default_name,
-        filetypes=[("PLY files", "*.ply")]
-    )
+def list_sample_plys(scene_dir):
+    """Full paths of a scene's `sample_<i>.ply` files, ordered by instance index.
 
-    return Path(path) if path else None
+    Numeric order, not lexicographic: sample_10 must not sort before sample_2.
+    """
+    scene_dir = str(scene_dir)
+    return sorted(
+        (os.path.join(scene_dir, f) for f in os.listdir(scene_dir)
+         if f.startswith("sample_") and f.endswith(".ply")),
+        key=lambda p: int(re.search(r"\d+", os.path.basename(p)).group()))
+
 
 def open_source_folder_dialog():
     Tk().withdraw()

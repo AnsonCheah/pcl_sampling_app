@@ -320,3 +320,59 @@ def test_nav_enabled_locks_while_worker_runs(tuning):
     assert tuning.nav_enabled() is False           # worker running → nav locked
     tuning.worker_thread = _FakeThread(alive=False)
     assert tuning.nav_enabled() is True            # worker finished → nav free
+
+
+# ── model-frame staleness guard ──────────────────────────────────────────────
+
+def _ref_cloud(n=600, seed=0, shift=(0.0, 0.0, 0.0)):
+    rng = np.random.default_rng(seed)
+    pts = rng.uniform(-0.05, 0.05, (n, 3)) + np.asarray(shift, dtype=float)
+    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
+    pcd.normals = o3d.utility.Vector3dVector(np.tile([0.0, 0.0, 1.0], (n, 1)))
+    return pcd
+
+
+def _bundle_and_scenes(tmp_path, monkeypatch, scene_shifts):
+    """A model PLY plus one scene per entry in `scene_shifts` (0.0 == same frame)."""
+    monkeypatch.setattr(ts, "_SYNTH_ROOT", str(tmp_path / "synth"))
+    model = _ref_cloud()
+    model_path = tmp_path / "PART_surface.ply"
+    o3d.io.write_point_cloud(str(model_path), model)
+    for i, dx in enumerate(scene_shifts):
+        d = tmp_path / "synth" / "PART" / f"scene_{i:05d}"
+        d.mkdir(parents=True)
+        o3d.io.write_point_cloud(str(d / "reference_cloud.ply"), _ref_cloud(shift=(dx, 0.0, 0.0)))
+    return str(model_path)
+
+
+def test_frames_agree_passes_when_every_scene_matches(tuning, tmp_path, monkeypatch):
+    model_path = _bundle_and_scenes(tmp_path, monkeypatch, [0.0, 0.0, 0.0])
+    assert tuning._frames_agree("PART", model_path) is True
+
+
+def test_frames_agree_blocks_a_scene_from_another_frame(tuning, tmp_path, monkeypatch, capsys):
+    """A tuning run is hours of MechVision calls scored against each scene's `T_gt`, which is
+    only meaningful against the frame that scene was generated in. `bench/generate_scenes.py`
+    is resumable, so one part really can accumulate scenes from two frames."""
+    model_path = _bundle_and_scenes(tmp_path, monkeypatch, [0.0, 0.02, 0.0])
+    assert tuning._frames_agree("PART", model_path) is False
+    out = capsys.readouterr().out
+    assert "ABORTING" in out and "scene_00001" in out
+    assert "scene_00000" not in out, "only the offending scene should be named"
+
+
+def test_frames_agree_can_be_overridden(tuning, tmp_path, monkeypatch, capsys):
+    model_path = _bundle_and_scenes(tmp_path, monkeypatch, [0.02])
+    tuning.skip_frame_check = True
+    assert tuning._frames_agree("PART", model_path) is True
+    assert "skipped by request" in capsys.readouterr().out
+
+
+def test_frames_agree_checks_the_live_app_cloud(tuning, tmp_path, monkeypatch):
+    """Catches a bundle that has drifted from the cloud currently loaded in the session."""
+    model_path = _bundle_and_scenes(tmp_path, monkeypatch, [0.0])
+    tuning.app.down_pcd_surface = _ref_cloud()
+    assert tuning._frames_agree("PART", model_path) is True
+
+    tuning.app.down_pcd_surface = _ref_cloud(shift=(0.02, 0.0, 0.0))
+    assert tuning._frames_agree("PART", model_path) is False

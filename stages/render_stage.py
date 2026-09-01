@@ -99,6 +99,7 @@ class RenderStage(BaseStage):
             self.app.main_thread(lambda: self.app._clear_scene())
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry(
                 "scene_mesh", self.app.scene_mesh, self.app.default_material))
+            self.app.main_thread(self.app._reframe)   # content swap -> reframe
         else:
             self.app.main_thread(lambda: self.app._clear_scene())
         self.enable_widgets()
@@ -111,7 +112,7 @@ class RenderStage(BaseStage):
         self.worker_step = 0
 
     def _has_disk_scenes(self) -> bool:
-        part = getattr(self.app, "mesh_basename", None)
+        part = self.app.mesh_basename
         if not part:
             return False
         return bool(list_scene_dirs(Path.cwd() / "output" / "synthetic_target" / part))
@@ -133,12 +134,13 @@ class RenderStage(BaseStage):
         self.app.clear_state_from(self.stage_key)
 
         if not self.app.o3d_scene or self.app.mj_scene is None:
-            print("[WARN] No scene available — run SCENE before RENDER.")
+            print("[WARN] No scene available -- run SCENE before RENDER.")
             return
 
         if not self.app.headless:
             self.app.show_progress("Rendering synthetic scene...")
             self.app.main_thread(lambda: self.app._clear_scene())
+        self._framed = False   # frame once, on the first cloud (see add_to_render_scene)
 
         def add_to_render_scene(name: str, geom):
             self.app.synthetic_scenes[name] = O3DSceneObject(geom)
@@ -153,6 +155,14 @@ class RenderStage(BaseStage):
                 material = self.app.default_material
             self.app.synthetic_scenes[name].material = material
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry(name, geom, material))
+            # Frame the first cloud only. Later noise steps add outliers that would otherwise
+            # keep widening the bounds and walk the camera backwards on every step. The later
+            # steps still need an explicit repaint — they run with no input events to piggyback on.
+            if not self._framed:
+                self._framed = True
+                self.app.main_thread(self.app._reframe)
+            else:
+                self.app.main_thread(self.app.redraw)
 
         def _update_pb(message: str):
             if not self.app.headless:
@@ -164,8 +174,6 @@ class RenderStage(BaseStage):
         look_at = np.asarray([0.0, 0.0, 0.0])                                # bin floor centre
         T_cam = camera_view_matrix(cam_pos, look_at, up=np.array([0.0, 1.0, 0.0]))
         self.T_cam = T_cam   # kept for scene-state export in save_synthetic_targets
-
-        self.app._reframe()
 
         render = scene_render(self.app.o3d_scene, T_cam, look_at, self.fov_deg, self.res_width, self.res_height, verbose=self.verbose)
         pts = render["points"]
@@ -232,17 +240,16 @@ class RenderStage(BaseStage):
 
         voxel_size =  0.001
         ref_xyz = np.asarray(self.app.down_pcd.points)
-        min_overlap = 0.1
         bin_pcd = None
 
         # 2D candidate filter (mirrors real Mask2Former post-filter): per-part aspect-ratio
         # and area-ratio ranges auto-derived in RaycastStage. area_ratio scales as 1/d^2, so
         # rescale the scene measurement to the reference camera distance before comparing.
-        aspect_range = getattr(self.app, "aspect_ratio_range", None)
-        area_range   = getattr(self.app, "area_ratio_range", None)
-        ref_cam_d    = getattr(self.app, "ref_cam_distance", None)
+        aspect_range = self.app.aspect_ratio_range
+        area_range   = self.app.area_ratio_range
+        ref_cam_d    = self.app.ref_cam_distance
         if (aspect_range is None or area_range is None or ref_cam_d is None):
-            print("[WARN] 2D filter ranges unavailable (run RAYCAST) — skipping aspect/area gate.")
+            print("[WARN] 2D filter ranges unavailable (run RAYCAST) -- skipping aspect/area gate.")
             area_scale = 1.0
         else:
             area_scale = (self.app.mj_scene.camera_distance / ref_cam_d) ** 2
@@ -255,7 +262,6 @@ class RenderStage(BaseStage):
 
             if inst_id == bin_geom_id:
                 bin_pcd = copy.deepcopy(inst_pcd_downsampled)
-                self.app.synthetic_scenes["bin_pcd"] = bin_pcd
                 continue
 
             xyz_inst = np.asarray(inst_pcd_downsampled.points)
@@ -268,14 +274,6 @@ class RenderStage(BaseStage):
                 print(f"[WARN] Failed to compute overlap for instance {inst_id} with {len(xyz_inst)} points: {e}")
                 overlap = 0.0
             precheck_pass = True
-
-            # --- Legacy 3D gates (point count + overlap) — kept for reference, disabled. ---
-            # if not (min(self.app.point_count_range)<=len(xyz_inst)<=max(self.app.point_count_range)):
-            #     print(f"[skip] Instance {inst_id} point count out of threshold {self.app.point_count_range}: {len(xyz_inst)}")
-            #     precheck_pass = False
-            # if overlap < min_overlap:
-            #     print(f"[skip] Instance {inst_id}: overlap={overlap:.2f} < {min_overlap}")
-            #     precheck_pass = False
 
             # --- 2D candidate filter (aspect-ratio + area-ratio), as the real network does. ---
             m = seg_metrics.get(inst_id)
@@ -342,7 +340,7 @@ class RenderStage(BaseStage):
                 pointcloud_to_ply(scene_obj.geom, out_dir / "scene.ply")
 
             # Final scene state: per-part GT poses + bin geometry (from the sim) + camera matrix.
-            if getattr(self.app, "mj_scene", None) is not None:
+            if self.app.mj_scene is not None:
                 state = self.app.mj_scene.export_scene_state()
                 state.update(
                     T_cam      = np.asarray(self.T_cam, dtype=np.float64),  # world -> camera view matrix
@@ -382,7 +380,7 @@ class RenderStage(BaseStage):
             selected_text,
             self.app.synthetic_targets[selected_text].geom,
             self.app.synthetic_targets[selected_text].material))
-        self.app.scene.force_redraw()
+        self.app.main_thread(self.app._reframe)   # content swap -> reframe
 
     def preview_synthetic_scenes(self, selected_text: str, selected_index: int) -> None:
         if self.app.headless: return
@@ -393,7 +391,7 @@ class RenderStage(BaseStage):
                 selected_text,
                 self.app.synthetic_scenes[selected_text].geom,
                 self.app.synthetic_scenes[selected_text].material))
-        self.app.scene.force_redraw()
+            self.app.main_thread(self.app._reframe)   # content swap -> reframe
 
     def show_segmented_scene(self):
         if self.app.headless: return
@@ -411,3 +409,4 @@ class RenderStage(BaseStage):
                 self.app.synthetic_scenes["bin_pcd"].material
             )
         self.app.main_thread(add_geoms)
+        self.app.main_thread(self.app._reframe)   # content swap -> reframe

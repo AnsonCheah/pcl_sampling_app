@@ -13,7 +13,8 @@ from rich import print as rp
 from scipy.spatial.transform import Rotation as R
 import copy
 from geometry.geom_utils import (o3d_to_trimesh, trimesh_to_o3d, camera_view_matrix, o3d_display,
-                                 init_open3d, O3DSceneObject, decimate_mesh_to_resolution)
+                                 init_open3d, O3DSceneObject, decimate_mesh_to_resolution,
+                                 mat_to_wxyz, pose_to_matrix, make_transform)
 import trimesh
 from trimesh.collision import CollisionManager
 from pathlib import Path
@@ -255,6 +256,7 @@ class _SimProfile:
 class MujocoBinScene:
     def __init__(self, part_mesh, part_convex_meshes, n_parts=1, bin_dim=MAX_BIN_DIM, settle_time=5.0, render=True, arrangement: str = "random", stable_pose_R: np.ndarray = None, timestep: float = 0.001,
                  structure_type: str = "none", structure_height_frac: float = 0.75, clearance_mode: str = "medium",
+                 body_offset=None, bin_transform=None,
                  enable_sleep: bool = False, profile: bool = False):
         # Timestep is the primary anti-tunneling lever: MuJoCo has no continuous collision
         # detection, so per-step displacement (~vel_cap*dt) must stay under ~o_margin. With
@@ -267,16 +269,28 @@ class MujocoBinScene:
         self._stable_count = 0
         self.vel_cap = 1.5            # m/s — per-step linear-velocity clamp (safeguard);
         #                               at this cap v*dt = 0.75 mm < o_margin (1 mm).
-        # self.rendering_flag = True
         self.verbose = True
         self.stable_steps = int(self.stable_duration / self.timestep)
         self.camera_distance = 1.5
-        # Bin floor at world origin, camera hovering above at z=camera_distance.
-        # Gravity -Z (natural). No coordinate flip needed.
-        self.bin_transform = np.eye(4)
+        # Bin placement in world. Identity puts the bin floor at the origin with gravity
+        # along -Z, which is what every caller wants today; it is a parameter rather than a
+        # constant so a world frame anchored elsewhere (e.g. camera_frame == world_frame)
+        # needs no change here. Written into scene_state.npz and applied to the bin geometry,
+        # the partition/tray fixtures and every spawned pose.
+        self.bin_transform = np.eye(4) if bin_transform is None else \
+            np.asarray(bin_transform, dtype=float)
 
         self.part_mesh = part_mesh
         self.part_convex_meshes = part_convex_meshes
+        # Translation the CALLER subtracted from its mesh to put the part on the body origin:
+        # `p_body = p_model - body_offset`. Every rotation, spawn height, stable pose and tray
+        # pocket here is computed about (0,0,0), so callers must hand over a centred mesh -- but
+        # the poses this class reports then describe the CENTRED body, not the caller's model
+        # frame. Recording the offset lets `export_scene_state` hand back poses in the frame the
+        # caller actually asked about; see its docstring. Zero (the default) means the caller
+        # centred nothing and the two frames coincide.
+        self.body_offset = (np.zeros(3) if body_offset is None
+                            else np.asarray(body_offset, dtype=np.float64).reshape(3))
         self.n_parts = n_parts
         self.settle_time = settle_time
         self.scene_objects = []
@@ -383,7 +397,7 @@ class MujocoBinScene:
         ]
 
         # Precompute the quaternion for the bin rotation (MuJoCo: [w, x, y, z])
-        geom_quat = np.array(R.from_matrix(self.bin_transform[:3, :3]).as_quat(scalar_first=True))        # scipy: [x, y, z, w]
+        geom_quat = mat_to_wxyz(self.bin_transform)
 
         # Build Open3D mesh with transform applied
         combined = o3d.geometry.TriangleMesh()
@@ -650,18 +664,16 @@ class MujocoBinScene:
         the last row/column cannot clip the bin walls. For partition/tray the pitch is widened
         so each cell clears its fixture (divider thickness, or tray wall + clearance).
         """
-        verts = np.asarray(self.part_mesh.vertices)
-        sv = (R_stable @ verts.T).T
+        # Size the grid from the CONVEX collision footprint (what MuJoCo actually collides) so
+        # truly-snug cells are never bulged into by the hull. Falls back to the mesh if no hulls.
+        # Boxes have convex == mesh, so this is a no-op for the simple test parts.
+        fp_verts = (np.vstack([np.asarray(m.vertices) for m in self.part_convex_meshes])
+                    if self.part_convex_meshes else np.asarray(self.part_mesh.vertices))
+        sv = (R_stable @ fp_verts.T).T
         mins, maxs = sv.min(axis=0), sv.max(axis=0)
         fp_x = maxs[0] - mins[0]
         fp_y = maxs[1] - mins[1]
-
-        # Worst-case vertex displacement from compound "xyz" Euler jitter of ±5° per axis.
-        # Effective rotation angle ≈ √3·5° = 8.66° (RMS of three independent axes).
-        # Using 10° adds a small safety buffer above that bound.
         r_max = float(np.sqrt((sv ** 2).sum(axis=1)).max())
-        jitter_margin = r_max * np.sin(np.radians(max(JITTER_DEG)))
-        raw_pos_z = float(-mins[2] + 0.01 + jitter_margin)
 
         # Inner usable extent: subtract wall thickness from both sides.
         t = self.bin_dim[3]
@@ -671,8 +683,9 @@ class MujocoBinScene:
         # Per-pose part height (z-extent) drives divider height, pocket depth, and tray seat z.
         part_h = float(maxs[2] - mins[2])
 
-        # Resolve running clearance, then widen the cell pitch so each cell clears its fixture:
-        # cardboard divider thickness (partition) or tray wall + pocket clearance (tray). "none" adds 0.
+        # Running clearance from the mode (snug 1mm / medium 2.5mm / loose 5%·diag). The cell pitch
+        # is exactly footprint + fixture + 2·clearance, so the actual part-to-wall gap equals the
+        # setting — no arbitrary looseness. "none" has no fixture, so the clearance is pure spacing.
         clearance = self._resolve_clearance(float(np.hypot(fp_x, fp_y)))
         self._clearance_m = clearance
         if self.structure_type == "partition":
@@ -680,12 +693,20 @@ class MujocoBinScene:
         elif self.structure_type == "tray":
             extra = 2 * TRAY_WALL + 2 * clearance
         else:
-            extra = 0.0
+            extra = 2 * clearance
 
-        # For each orientation the maximum valid part-centre coordinate is:
-        #   inner_h? - half_footprint - jitter_margin
-        # (the jitter can push the part edge outward by ~jitter_margin in X/Y)
-        gap = max(fp_x, fp_y) * 0.1 + extra
+        # Spawn tilt is scaled to — and bounded by — the clearance: a part leans until it just
+        # reaches the cell wall, so snug barely tilts, loose tilts more, and the tilted part never
+        # exceeds its cell. Bound: the chord of the farthest vertex about the body-origin tilt axis
+        # (2·r_max·sin(θ/2)) must stay within the clearance, so NO vertex crosses its cell wall. This
+        # naturally lets tall-narrow parts lean more than wide-flat ones. Tray holds the exact pose.
+        theta_max = 0.0 if self.structure_type == "tray" else float(
+            2.0 * np.arcsin(np.clip(clearance / (2.0 * max(r_max, 1e-9)), 0.0, 1.0)))
+        self._structured_theta_max = theta_max
+        jitter_margin = r_max * np.sin(theta_max)
+        raw_pos_z = float(-mins[2] + 0.01 + jitter_margin)
+
+        gap = extra
 
         def _slot_count(fx, fy):
             px = fx + gap
@@ -717,11 +738,16 @@ class MujocoBinScene:
         pitch_x = fp_x + gap
         pitch_y = fp_y + gap
 
-        x_max_center = max(0.0, inner_hx - fp_x / 2 - jitter_margin)
-        y_max_center = max(0.0, inner_hy - fp_y / 2 - jitter_margin)
-
-        nx = int(2 * x_max_center / pitch_x) + 1
-        ny = int(2 * y_max_center / pitch_y) + 1
+        if self.structure_type == "partition":
+            # Reserve room for the outer perimeter divider: n*pitch/2 + half_divider <= inner_h.
+            half_div = PARTITION_THICKNESS / 2.0
+            nx = max(1, int((inner_hx - half_div) * 2.0 / pitch_x))
+            ny = max(1, int((inner_hy - half_div) * 2.0 / pitch_y))
+        else:
+            x_max_center = max(0.0, inner_hx - fp_x / 2 - jitter_margin)
+            y_max_center = max(0.0, inner_hy - fp_y / 2 - jitter_margin)
+            nx = int(2 * x_max_center / pitch_x) + 1
+            ny = int(2 * y_max_center / pitch_y) + 1
 
         xs = np.linspace(-(nx - 1) * pitch_x / 2, (nx - 1) * pitch_x / 2, nx)
         ys = np.linspace(-(ny - 1) * pitch_y / 2, (ny - 1) * pitch_y / 2, ny)
@@ -729,11 +755,16 @@ class MujocoBinScene:
         # For asymmetric meshes the AABB centre (where load_part anchors the mesh)
         # does not coincide with the footprint centroid after R_aligned is applied.
         # Shift every body position so the footprint midpoint lands on the grid point.
-        sv_aligned = (R_aligned @ verts.T).T
+        sv_aligned = (R_aligned @ fp_verts.T).T
         cx = float((sv_aligned[:, 0].min() + sv_aligned[:, 0].max()) / 2)
         cy = float((sv_aligned[:, 1].min() + sv_aligned[:, 1].max()) / 2)
         xs = xs - cx
         ys = ys - cy
+        # Body origins now sit at xs/ys but each part's FOOTPRINT centre sits at xs+cx / ys+cy.
+        # _build_partitions needs this offset to place dividers midway between footprints (not
+        # between body origins); otherwise asymmetric footprints (cx/cy != 0, common for a
+        # user-picked face-up) put the part hard against — or into — a divider.
+        self._grid_fp_offset = (cx, cy)
 
         rp(f"[STRUCTURED] footprint {fp_x:.3f}x{fp_y:.3f} m  pitch {pitch_x:.3f}x{pitch_y:.3f} m  grid {nx}x{ny}"
            f"  part_h {part_h:.3f} m  structure={self.structure_type}{'  (yaw-rotated)' if apply_yaw90 else ''}")
@@ -841,11 +872,11 @@ class MujocoBinScene:
                     T[:3, 3] = pos
                     T[:3, :3] = self._sample_constrained_rotation(valid_poses_for_rotation)
                     T = self.bin_transform @ T
-                    quat = R.from_matrix(T[:3, :3]).as_quat(scalar_first=True)
+                    quat = mat_to_wxyz(T)
                     is_collision, _, _ = collision_manager.in_collision_single(candidate_trimesh, transform=T, return_names=True, return_data=True)
                     if is_collision:
                         continue
-                    valid_poses[i, :3] = pos
+                    valid_poses[i, :3] = T[:3, 3]
                     valid_poses[i, 3:] = quat
                     collision_manager.add_object(f"part_{i}", candidate_trimesh, transform=T)
                     placed_active = True
@@ -862,10 +893,12 @@ class MujocoBinScene:
                 x = np.random.uniform(-self.hx + margin, self.hx - margin)
                 y = np.random.uniform(-self.hy + margin, self.hy - margin)
                 z = PARKING_Z + self._batch_of_body[i] * 0.2
-                R_mat = self._sample_constrained_rotation(valid_poses_for_rotation)
-                quat = R.from_matrix(R_mat).as_quat(scalar_first=True)
-                valid_poses[i, :3] = [x, y, z]
-                valid_poses[i, 3:] = quat
+                T = np.eye(4)
+                T[:3, 3]  = [x, y, z]
+                T[:3, :3] = self._sample_constrained_rotation(valid_poses_for_rotation)
+                T = self.bin_transform @ T
+                valid_poses[i, :3] = T[:3, 3]
+                valid_poses[i, 3:] = mat_to_wxyz(T)
         print(f"[INFO] {self.n_parts} parts in {max(self._batch_of_body) + 1} batches (batch_size={batch_size})")
         self._spawn_bodies(valid_poses)
 
@@ -900,21 +933,24 @@ class MujocoBinScene:
                 R_local = R_aligned
                 pos_z = tray_seat_z
             else:
-                R_jitter = R.from_euler("xyz", np.random.uniform(*JITTER_DEG), degrees=True).as_matrix()
-                R_local = R_aligned @ R_jitter
+                # Clearance-scaled lean (partition + none): random azimuth, tilt in [0, theta_max]
+                # so the part leans within its cell but never past the wall. theta_max is 0 for tray.
+                phi = np.random.uniform(0.0, 2 * np.pi)
+                theta = np.random.uniform(0.0, self._structured_theta_max)
+                R_tilt = R.from_rotvec(np.array([np.cos(phi), np.sin(phi), 0.0]) * theta).as_matrix()
+                R_local = R_aligned @ R_tilt
                 pos_z = raw_pos_z
             T_local = np.eye(4)
             T_local[:3, :3] = R_local
             T_local[:3, 3] = [x, y, pos_z]
             T = self.bin_transform @ T_local
-            quat = R.from_matrix(T[:3, :3]).as_quat(scalar_first=True)
-            valid_poses[i, :3] = [x, y, pos_z]
-            valid_poses[i, 3:] = quat
+            valid_poses[i, :3] = T[:3, 3]
+            valid_poses[i, 3:] = mat_to_wxyz(T)
 
         # Build fixtures on the bin body (geoms + visual mesh) before compile().
         if self.structure_type == "partition":
             with self._phase("partitions"):
-                self._build_partitions(xs, ys, part_h)
+                self._build_partitions(xs, ys, part_h, pitch_x, pitch_y)
         elif self.structure_type == "tray":
             with self._phase("hfield_instance"):
                 self._instance_tray_hfield(tray_hf, valid_poses[:, :3])
@@ -924,17 +960,31 @@ class MujocoBinScene:
             # Reuse the random-arrangement settle path: all parts in one batch (no parking waves).
             self._batch_of_body = [0] * self.n_parts
 
-    def _build_partitions(self, xs, ys, part_h):
-        """Egg-crate cardboard dividers on the interior grid lines: thin static boxes on the bin body
-        (one part per cell). Also merged into self.bin_mesh so they share the bin geom id and are
-        treated as background by segmentation. Height = structure_height_frac x part_h."""
+    def _build_partitions(self, xs, ys, part_h, pitch_x, pitch_y):
+        """Egg-crate cardboard dividers: thin static boxes on the bin body forming one cell per part,
+        including a full perimeter ring so edge cells are boxed like interior ones. Also merged into
+        self.bin_mesh so they share the bin geom id and read as background to segmentation. Height =
+        structure_height_frac x part_h."""
         t = self.bin_dim[3]
         inner_hx, inner_hy = self.hx - t, self.hy - t
         h = max(1e-3, self.structure_height_frac * part_h)
         half = PARTITION_THICKNESS / 2.0
-        x_lines = [(xs[i] + xs[i + 1]) / 2.0 for i in range(len(xs) - 1)]   # planes between columns
-        y_lines = [(ys[i] + ys[i + 1]) / 2.0 for i in range(len(ys) - 1)]   # planes between rows
-        geom_quat = np.array(R.from_matrix(self.bin_transform[:3, :3]).as_quat(scalar_first=True))
+        # Divider planes at EVERY cell boundary (footprint centres ± half-pitch), incl. the outer
+        # ring. xs/ys are body-origin positions; the footprint centres sit at xs+off_x / ys+off_y
+        # (_grid_fp_offset), so add the offset back — else a plane lands off-centre and clips an
+        # asymmetric part. Planes that would poke through the bin wall are dropped (wall bounds it).
+        off_x, off_y = getattr(self, "_grid_fp_offset", (0.0, 0.0))
+
+        def _cell_boundaries(centres, pitch, inner_h):
+            c = np.asarray(centres, dtype=float)
+            lines = [c[0] - pitch / 2.0,
+                     *[(c[i] + c[i + 1]) / 2.0 for i in range(len(c) - 1)],
+                     c[-1] + pitch / 2.0]
+            return [float(l) for l in lines if abs(l) + half <= inner_h + 1e-9]
+
+        x_lines = _cell_boundaries(np.asarray(xs) + off_x, pitch_x, inner_hx)   # column boundaries
+        y_lines = _cell_boundaries(np.asarray(ys) + off_y, pitch_y, inner_hy)   # row boundaries
+        geom_quat = mat_to_wxyz(self.bin_transform)
         combined = o3d.geometry.TriangleMesh()
 
         def add_divider(half_sizes, pos):
@@ -992,7 +1042,7 @@ class MujocoBinScene:
         matching pocket surface into self.bin_mesh (shared bin geom id -> background)."""
         cx, cy = hf["center_xy"]
         z_offset = float(hf.get("z_offset", 0.0))
-        geom_quat = np.array(R.from_matrix(self.bin_transform[:3, :3]).as_quat(scalar_first=True)).tolist()
+        geom_quat = mat_to_wxyz(self.bin_transform).tolist()
         bxy = np.asarray(body_positions)[:, :2]
         tiles = []
         for (bx, by) in bxy:
@@ -1109,7 +1159,7 @@ class MujocoBinScene:
             if R_mat is None:           # crowded — accept the last candidate unchecked (rare)
                 x, y, z, R_mat = cx, cy, cz, R_cand
             cm.add_object(f"b{k}_{i}", self.part_mesh, transform=T)
-            quat = R.from_matrix(R_mat).as_quat(scalar_first=True)
+            quat = mat_to_wxyz(R_mat)
             qadr, vadr = self._adr_of_body[i]
             self.data.qpos[qadr:qadr+3]   = [x, y, z]
             self.data.qpos[qadr+3:qadr+7] = quat        # [w, x, y, z]
@@ -1388,7 +1438,7 @@ class MujocoBinScene:
         n_out = len(out_of_bin)
         rp(f"[BIN CHECK] {n_in}/{n_in + n_out} parts inside bin, {n_out} escaped")
         if n_out > 0:
-            rp(f"  Escaped: {out_of_bin[:10]}{'  …' if n_out > 10 else ''}")
+            rp(f"  Escaped: {out_of_bin[:10]}{'  ...' if n_out > 10 else ''}")
         return {"in_bin": in_bin, "out_of_bin": out_of_bin, "n_in": n_in, "n_out": n_out}
 
     def extract_scene_state(self):
@@ -1410,6 +1460,21 @@ class MujocoBinScene:
         the bin geometry (dims + placement). Camera extrinsics/intrinsics are owned by the
         rendering stage, not the sim, so they are added there.
 
+        **Poses are reported in the CALLER's model frame, not the centred body frame.**
+        ``extract_scene_state`` reports raw MuJoCo body poses, which describe the mesh this
+        class was handed -- and that mesh had to be centred on its own origin (see
+        ``body_offset``). Composing the offset back in here is what makes ``T_gt`` mean
+        "model frame -> world", matching ``sample_<i>.ply``'s ``gt_*`` header, so an exported
+        scene can be compared against ``reference_cloud.ply`` without the reader knowing how
+        the physics body was built.
+
+        ``body_offset`` is permanent provenance, not a flag: it is the only record of where
+        the body origin sat relative to the model frame, so it is what lets a reader recover
+        the raw body poses from the npz alone.
+
+        ``quaternions_wxyz`` is unaffected -- the offset is a pure translation -- so it is
+        valid in either frame. ``positions`` follows ``T_gt``.
+
         Returns a flat dict of numpy arrays ready to splat into np.savez.
         """
         state = self.extract_scene_state()
@@ -1422,11 +1487,18 @@ class MujocoBinScene:
             T_gt[i, :3, :3] = R.from_quat(quaternions[i], scalar_first=True).as_matrix()
             T_gt[i, :3, 3]  = positions[i]
 
+        # p_world = T_body @ (p_model - body_offset) = (T_body @ T_shift) @ p_model
+        T_shift = make_transform(translation=-self.body_offset)
+        T_gt = T_gt @ T_shift
+        positions = T_gt[:, :3, 3].copy()
+
         return {
             "body_names":       np.array(body_names),
-            "positions":        positions,                                   # (n,3) world xyz
+            "positions":        positions,                                   # (n,3) world xyz of the model origin
             "quaternions_wxyz": quaternions,                                 # (n,4) world wxyz
-            "T_gt":             T_gt,                                        # (n,4,4) part_frame -> world
+            "T_gt":             T_gt,                                        # (n,4,4) model_frame -> world
+            "body_offset":      np.asarray(self.body_offset, dtype=np.float64),  # model origin -> body origin; provenance, keep
+
             "bin_dim":          np.asarray(self.bin_dim, dtype=np.float64),  # (width, length, height, wall_thickness) m
             "bin_transform":    np.asarray(self.bin_transform, dtype=np.float64),
             "camera_distance":  np.float64(self.camera_distance),
@@ -1452,9 +1524,7 @@ class MujocoBinScene:
         for key, body_data in scene_dict.items():
             pos = body_data["position"]
             quat = body_data["quaternion"]
-            T = np.eye(4)
-            T[:3, :3] = R.from_quat(quat, scalar_first=True).as_matrix()
-            T[:3, 3] = pos
+            T = pose_to_matrix([*pos, *quat])
 
             mesh = trimesh_to_o3d(self.part_mesh)
             if not mesh.has_vertices():
@@ -1465,20 +1535,6 @@ class MujocoBinScene:
         o3d_mesh_dict["bin"] = O3DSceneObject(geom=self.bin_mesh, T_gt=np.eye(4))
         return o3d_mesh_dict
     
-    def _get_camera_lookat(self, y_multiple=1.5, z_multiple=5.0):
-        """
-        Compute (center, eye, up) for Open3D look_at.
-        Camera is above the bin looking down at a diagonal.
-        Bin floor at world origin; +Z is up.
-        """
-        center = np.array([0.0, 0.0, self.hh * 0.5])  # centre of bin interior
-        eye = np.array([
-            0.0,
-            self.hy * y_multiple,       # step out in +y
-            self.hh * z_multiple,       # step up in +z (above bin)
-        ])
-        up = np.array([0.0, 0.0, 1.0])  # world Z is up
-        return center, eye, up
 
 # -- Mesh loading --------------------------------------------------------------
 
@@ -1628,209 +1684,3 @@ if __name__ == "__main__":
             if args.display:
                 rp("  Opening viewer...")
                 _display_scene(scene, scene_state)
-
-    # passed = []
-    # failed = []
-
-    # def run(name, fn, *a, **kw):
-    #     try:
-    #         fn(*a, **kw)
-    #         passed.append(name)
-    #     except Exception as e:
-    #         print(f"  FAIL - {name}: {e}")
-    #         failed.append(name)
-
-    # if args.arrangement in ("random", "both"):
-    #     run("random", test_random, part_mesh, convex_meshes, args.n_parts, args.display)
-
-    # if args.arrangement in ("structured", "both"):
-    #     for i, (R_stable, prob) in enumerate(stable_poses):
-    #         run(f"structured_pose_{i}", test_structured,
-    #             part_mesh, convex_meshes, R_stable, i, prob, args.display)
-
-    # rp(f"\n{'-'*40}")
-    # rp(f"Results: {len(passed)} passed, {len(failed)} failed")
-    # if failed:
-    #     rp(f"[red]Failed: {failed}[/red]")
-    #     sys.exit(1)
-    # else:
-    #     rp("[green bold]All tests passed.[/green bold]")
-
-
-    # from app_v2 import MeshSamplingApp
-    # from sensor.scene_render import (
-    #     scene_render,
-    #     compute_dropout_mask,
-    #     add_projector_nonuniformity,
-    #     add_specular_patch_missing,
-    #     add_edge_artifacts,
-    #     add_multipath_outliers, add_pepper_noise, subset_render,
-    #     add_sensor_noise,
-    #     add_surface_noise,
-    #     add_image_space_effects,
-    #     add_scan_line_banding
-    # )
-    # from sensor.segment_instances import segment_point_cloud
-    # from geometry.geom_utils import o3d_to_trimesh, trimesh_to_o3d, camera_view_matrix, compute_overlap, O3DSceneObject
-    # from enums import Stage
-    # import copy
-    # import open3d.visualization.rendering as rendering
-
-    # app = MeshSamplingApp(headless=True)
-
-    # app.stages[Stage.IMPORT_MESH]._run_worker()
-    # app._express_sampling_worker()
-    # part_mesh = o3d_to_trimesh(app.target_mesh)
-
-
-    # init_open3d()
-    # scene = MujocoBinScene(part_mesh, app.convex_meshes, n_parts=10, render=True)
-    # scene.simulate(realtime=scene.rendering_flag)
-    # scene_state = scene.extract_scene_state()
-
-    # collision_manager = CollisionManager()
-    # for part_name, status in scene_state.items():
-    #     T = np.eye(4)
-    #     T[:3, :3] = R.from_quat(status["quaternion"], scalar_first=True).as_matrix()
-    #     T[:3, 3] = status["position"]
-    #     collision_manager.add_object(part_name, part_mesh, transform=T)
-    # is_collision = collision_manager.in_collision_internal()
-    # print("Collision detected by trimesh!!") if is_collision else None
-    # o3d_scene = scene.mujoco_scene_to_o3d(scene_state)
-    # geom_list = []
-    # for obj in o3d_scene.values():
-    #     mesh = copy.deepcopy(obj.geom)
-    #     geom_list.append(mesh.transform(obj.T_gt))
-    # vis = o3d_display(geom_list)
-    # vis.run()
-    # vis.destroy_window()
-    # cam_pos = np.asarray([0.0, 0.0, scene.camera_distance])  # above bin
-    # look_at = np.asarray([0.0, 0.0, 0.0])                   # bin floor centre
-    # T_cam = camera_view_matrix(cam_pos, look_at, up=np.array([0.0, 1.0, 0.0]))
-
-    # fov = 41.11
-    # W, H = 1920, 1200
-
-    # render = scene_render(o3d_scene, T_cam, look_at, fov, W, H, verbose=scene.verbose)
-    # pts = render["points"]
-    # nrm = render["normals"]
-    # geom_ids = render["geom_ids"]
-    # pix_all   = render["pixel_idx"]
-    # bin_pts = pts[geom_ids==0]
-    # bin_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(bin_pts))
-    # bin_pcd = bin_pcd.voxel_down_sample(0.001)
-
-    # keep   = compute_dropout_mask(render, roughness=0.4,
-    #                              albedo_per_geom_id={2: 0.04},  # black rubber part
-    #                              density_cos_ref=0.7,           # oblique density thinning
-    #                              verbose=scene.verbose)
-    # render = add_projector_nonuniformity(render, verbose=scene.verbose)
-    # keep   = add_specular_patch_missing(render, keep, verbose=scene.verbose)
-    # render = add_image_space_effects(render, keep,
-    #                                  smooth_sigma_px=0.5,
-    #                                  sigma_fringe_corr=0.0001, 
-    #                                  verbose=scene.verbose)
-    # pts, nrm = add_edge_artifacts(render, keep, verbose=scene.verbose)
-    # r = subset_render(render, keep, verbose=scene.verbose)
-    # mp, mn = add_multipath_outliers(r, verbose=scene.verbose)
-    # pp, pn = add_pepper_noise(r, verbose=scene.verbose)
-    # pts = np.vstack([pts, mp, pp])
-    # nrm = np.vstack([nrm, mn, pn])
-
-    # # Build per-point metadata for the full combined cloud.
-    # n_kept    = keep.sum()
-    # n_outlier = len(pts) - n_kept
-    # pix_all   = np.concatenate([render["pixel_idx"][keep], np.full(n_outlier, -1, np.int64)])
-    # cproj_all = np.concatenate([render["cos_proj"][keep], np.ones(n_outlier)])
-
-    # pts = add_scan_line_banding(pts, nrm, pix_all, render["res"], render["sensor_origin"], verbose=scene.verbose)
-    # pts = add_sensor_noise(pts, nrm, render["sensor_origin"], pixel_idx=pix_all, res=render["res"], cos_proj=cproj_all, verbose=scene.verbose)
-    # pts = add_surface_noise(pts, nrm, verbose=scene.verbose)
-    # scene_noisy = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts)).voxel_down_sample(0.001)
-    # # vis = o3d_display([scene_noisy])
-    # # vis.run()
-    # # vis.destroy_window()
-
-    # # ── Instance segmentation ──────────────────────────────────────────────────
-    # # render still holds the full canonical geom_id image (built from the
-    # # shadow-visible set before dropout), which is the correct substrate for
-    # # mask generation.  pix_all maps every point — canonical and injected —
-    # # to its image pixel (-1 for injected points, which receive label -1).
-    # label_masks = segment_point_cloud(  # {geom_id: (N,) bool} — one mask per instance, may overlap
-    #     render, pts, pix_all,
-    #     erosion_px=5.0,
-    #     dilation_px=5.0,
-    #     confusion_depth_sigma=0.015,   # ~15 mm — tune to your part height spread
-    #     confusion_boundary_px=4,
-    #     occlusion_loss_px=2,
-    #     boundary_noise_px=10.0,
-    #     seed=0,
-    #     verbose=scene.verbose
-    # )
-    # print("segmented scene point virtually")
-
-    # unique_id_list = list(label_masks.keys())
-    # rp(f"length of unique id list: {len(unique_id_list)} \n {unique_id_list}")
-    # valid_count = 0
-    # tf_by_id = {value.id: value.T_gt for value in o3d_scene.values()}
-    # bin_geom_id = o3d_scene["bin"].id  # set by scene_render; robust to any part count
-
-    # voxel_size =  0.001
-    # ref_xyz = np.asarray(app.down_pcd.points)
-    # min_overlap = 0.1
-    # bin_pcd = None
-    # for _, inst_id in enumerate(unique_id_list):
-    #     inst_pts = pts[label_masks[inst_id]]
-    #     inst_nrm = nrm[label_masks[inst_id]]
-    #     inst_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(inst_pts))
-    #     inst_pcd.normals = o3d.utility.Vector3dVector(inst_nrm)
-    #     inst_pcd_downsampled = inst_pcd.voxel_down_sample(voxel_size)
-
-    #     if inst_id == bin_geom_id:
-    #         bin_pcd = copy.deepcopy(inst_pcd_downsampled)
-    #         app.synthetic_scenes["bin_pcd"] = bin_pcd
-    #         continue
-        
-    #     xyz_inst = np.asarray(inst_pcd_downsampled.points)
-    #     # if not (min(app.point_count_range)<=len(xyz_inst)<=max(app.point_count_range)):
-    #     #     print(f"Instance {inst_id} point count out of threshold {app.point_count_range}: {len(xyz_inst)}")
-    #     #     continue
-        
-    #     inst_rmat = tf_by_id[inst_id][:3, :3]
-    #     inst_trans = tf_by_id[inst_id][:3, 3]
-    #     xyz_ref_in_scene = (inst_rmat @ ref_xyz.T + inst_trans[:, None]).T
-    #     overlap = compute_overlap(xyz_ref_in_scene, xyz_inst, threshold=voxel_size * 2.5)
-    #     # print(f"Instance {inst_id} overlap is {overlap}")
-    #     # if overlap < min_overlap:
-    #     #     print(f"  [skip] Instance {inst_id}: overlap={overlap:.2f} < {min_overlap}")
-    #     #     continue
-
-    #     # print(f"Instance {inst_id} point count within threshold {app.point_count_range}: {len(xyz_inst)}")
-    #     valid_count += 1
-    #     inst_name = f"synthetic_sample_{valid_count}"
-    #     app.synthetic_targets[inst_name] = O3DSceneObject(
-    #         geom=inst_pcd_downsampled, 
-    #         ref_geom=o3d.geometry.PointCloud(o3d.utility.Vector3dVector(xyz_ref_in_scene)),
-    #         id=int(inst_id), 
-    #         T_gt=tf_by_id[inst_id],
-    #         xyz0=xyz_ref_in_scene,
-    #         xyz1=xyz_inst,
-    #         overlap=overlap
-    #     )
-
-    
-    # default_point_material = rendering.MaterialRecord()
-    # default_point_material.point_size = 1.5
-    # default_point_material.base_color = [1.0, 1.0, 1.0, 1.0]
-    # bin_pcd.paint_uniform_color([0.6, 0.6, 0.6])
-
-    # pcds = []
-    # for key in app.synthetic_targets:
-    #     geom = app.synthetic_targets[key].geom
-    #     geom.transform(scene.bin_transform)
-    #     pcds.append(geom)
-    # vis = o3d_display(pcds, dynamic_color=True)
-    # bin_pcd.transform(scene.bin_transform)
-    # vis.add_geometry(bin_pcd)
-    # vis.run()
-    # vis.destroy_window()

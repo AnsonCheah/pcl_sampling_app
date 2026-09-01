@@ -11,14 +11,16 @@ __pycache__/
 *.so
 
 # Custom directories
-MM_Optimizer/Auto_CADMATCH_Tuner/
-MM_Optimizer/CAD_MATCH_OPTIMISATION/
-MM_Optimizer/Auto_CADMATCH_Tuner/
 MM_Optimizer/CAD_Match/resource/
 MM_Optimizer/results/
 MM_Optimizer/backup_task_records.json
+mesh_raw/
+
+# MechVision projects: scratch ones stay out, the live CAD_Match project is versioned.
 */.msoln
 *.vis
+!MM_Optimizer/.msoln
+!MM_Optimizer/CAD_Match/CAD_Match.vis
 
 # input output formats
 *.stl
@@ -29,6 +31,7 @@ MM_Optimizer/backup_task_records.json
 *.obj
 *.png
 *.npz
+*.gif
 
 *.code-workspace
 .claude/

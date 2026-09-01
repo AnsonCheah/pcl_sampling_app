@@ -8,7 +8,7 @@ Stages run in sequence. All share `app` as their only communication channel.
 
 | Stage enum | Class | Heavy work |
 |------------|-------|------------|
-| `IMPORT_MESH` | `ImportMeshStage` | STL loading + convex decomposition (daemon thread) |
+| `IMPORT_MESH` | `ImportMeshStage` | STL loading, unit normalisation, mesh repair |
 | `RAYCAST` | `RaycastStage` | Fibonacci-sphere multi-view raycasting |
 | `CROP` | `CropStage` | Box-select UI, mask-based point removal |
 | `DOWNSAMPLE` | `DownsampleStage` | Uniform or adaptive voxel downsampling |
@@ -56,19 +56,50 @@ each stage's `on_clear()`.
 
 ## `app` state attributes
 
-Key attributes written and read between stages:
+The complete set, generated from the stages' `downstream` class dicts — which are the source
+of truth, not this table. A stage's `downstream` entry declares both the reset default and
+ownership for clearing; `MeshSamplingApp.__init__` replays those factories to seed every
+attribute *before* any stage is constructed, because `build_panel()` reads them.
 
-| Attribute | Written by | Read by |
-|-----------|------------|---------|
-| `app.target_mesh` | `ImportMeshStage` | `RaycastStage`, `SceneStage` |
-| `app.convex_meshes` | `DecomposeStage` | `SceneStage` |
-| `app.raw_pcd` | `RaycastStage` | `CropStage` |
-| `app.down_pcd` | `DownsampleStage` | `SaveStage`, `RenderStage` |
-| `app.o3d_scene` | `SceneStage` | `RenderStage` |
-| `app.mj_scene` | `SceneStage` | `RenderStage`, `app._reframe` |
-| `app.synthetic_scenes` | `RenderStage` | `SaveStage` |
+| Owner (clears it) | Attribute | Reset default | Notes |
+|---|---|---|---|
+| `IMPORT_MESH` | `target_mesh` | `None` | the loaded, unit-normalised mesh |
+| `IMPORT_MESH` | `mesh_basename` | `None` | part name; keys every output directory |
+| `IMPORT_MESH` | `geocenter` | identity 4×4 | **written by DOWNSAMPLE** — see below |
+| `RAYCAST` | `raw_pcd` | `None` | multi-view canonical cloud |
+| `RAYCAST` | `cropped_pcd` | `None` | survives `CropStage.reset()`, restored from `raw_pcd` |
+| `RAYCAST` | `point_count_mean` | `None` | per-view stats, read by the headless summary |
+| `RAYCAST` | `point_count_range` | `None` | |
+| `RAYCAST` | `aspect_ratio_range` | `None` | 2D candidate filter bounds, read by `RENDER` |
+| `RAYCAST` | `area_ratio_range` | `None` | |
+| `RAYCAST` | `ref_cam_distance` | `None` | area_ratio scales as 1/d², so `RENDER` rescales by this |
+| `DOWNSAMPLE` | `down_pcd` | `None` | the active downsampled cloud |
+| `DOWNSAMPLE` | `down_pcd_surface` | `None` | surface regime cloud |
+| `DOWNSAMPLE` | `down_pcd_edge` | `None` | edge regime cloud |
+| `DOWNSAMPLE` | `feature_pcd` | `None` | adaptive mode only |
+| `DOWNSAMPLE` | `pcd_flat` | `None` | adaptive mode only |
+| `DOWNSAMPLE` | `ambiguity_profile` | `None` | drives the ambiguity frame and the heat-map preview |
+| `SAVE` | `output_pcd_path` | `None` | provenance of the last export |
+| `DECOMPOSE` | `convex_meshes` | `[]` | VHACD hulls for physics collision |
+| `SCENE` | `o3d_scene` | `{}` | `SCENE` → `RENDER`: meshes + GT poses |
+| `SCENE` | `mj_scene` | `None` | `SCENE` → `RENDER`: the `MujocoBinScene` |
+| `SCENE` | `scene_mesh` | `None` | GUI preview of the settled scene |
+| `RENDER` | `synthetic_targets` | `{}` | per-instance segmented clouds |
+| `RENDER` | `synthetic_scenes` | `{}` | whole-scene cloud incl. `bin_pcd` |
 
-Stages never call each other's methods directly. All handoffs go through `app`.
+Stages never call each other's methods directly; all handoffs go through `app`.
+
+## Why `geocenter` is owned by IMPORT_MESH
+
+`DownsampleStage.recenter_mesh_pcd` is what *writes* `app.geocenter`, but `IMPORT_MESH`
+declares it in its `downstream` dict, so it is cleared only when a new mesh is loaded.
+
+The recentre transforms `target_mesh`, `raw_pcd` and `cropped_pcd` in place, and
+`clear_state_from(DOWNSAMPLE)` cannot undo that. If DOWNSAMPLE owned the record, re-running
+Downsample after a recentre would reset `geocenter` to identity while the geometry stayed
+moved — and the `geocenter_*` PLY comments, which are the exported provenance of the model
+frame, would silently be wrong. Loading a new mesh resets geometry and record together,
+which is the only point at which they are consistent.
 
 ## Headless mode
 
@@ -90,7 +121,7 @@ For a structured scene with fixtures, set on `SceneStage` before the worker: `ar
 ## Threading rules
 
 - **Never touch Open3D GUI from `worker()`**: O3D GUI is not thread-safe. Route all GUI mutations through `self.app.main_thread(lambda: ...)`.
-- **`SceneStage` must join `decompose_thread`** before constructing `MujocoBinScene`. The convex decomposition from `DecomposeStage`/`ImportMeshStage` runs in a daemon thread and may still be running when `SceneStage` starts.
+- **`DecomposeStage` is synchronous.** It runs VHACD in a `ProcessPoolExecutor` and blocks on the result, so `app.convex_meshes` is populated before `SceneStage` starts. The child process exists because `vhacdx.compute_vhacd` holds the GIL for its whole runtime and would otherwise freeze the GUI.
 
 ## Constraints
 

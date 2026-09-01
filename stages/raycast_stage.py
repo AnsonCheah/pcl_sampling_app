@@ -78,7 +78,7 @@ class RaycastStage(BaseStage):
         elif self.app.target_mesh is not None:
             print(f"[Raycast] adding mesh")
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry("mesh", self.app.target_mesh, self.app.default_material))
-        self.app.main_thread(lambda: self.app.scene.force_redraw())
+        self.app.main_thread(self.app._reframe)   # content swap -> reframe (posts a redraw too)
         self.app.main_thread(self.enable_widgets)
 
     # ---------- Worker ----------

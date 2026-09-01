@@ -1,193 +1,116 @@
 # MM_Optimizer
 
-Black-box optimizer for MechVision pose estimation parameters. Iterates: set parameters → trigger vision run → compare poses to synthetic ground truth → score → repeat.
+Auto-tunes MechVision's 3D coarse + fine matching parameters for a part, scoring candidate
+configurations against the synthetic ground truth this repo generates. Optuna is the only
+tuner; the hand-written coordinate-descent optimizer it replaced has been removed.
 
-The optimizer has no visibility into MechVision internals. It only observes pose outputs and timing.
+Constraints an agent must not break are in [CLAUDE.md](CLAUDE.md).
 
 ## Files
 
-| File | Description |
-|------|-------------|
-| `optimizer.py` | 6-phase hierarchical coordinate descent optimizer |
-| `optuna_optimizer.py` | Alternative: fully joint NSGA-II multi-objective optimizer |
-| `search_config.py` | All phase tables, thresholds, and search bounds (pure data) |
-| `mesh_analysis.py` | Phase 0: geometry analysis → warm-start parameters |
-| `eval_cache.py` | Transposition table (SHA-256 keyed, disk-persistent) |
-| `optimizer_utils.py` | PLY loading, scene composition, GT pose extraction |
-| `tests/` | Unit and integration tests |
+| File | Role |
+|---|---|
+| `tuner.py` | `Tuner` — multi-objective Optuna study over all coarse + fine params, plus the CLI |
+| `mv_evaluator.py` | `MVEvaluator` — the evaluation harness `Tuner` extends: scene sampling, param-dict construction, MechVision execution, GT matching, scoring, export |
+| `search_config.py` | Pure data: search space, thresholds, scoring constants, sampler list |
+| `mesh_analysis.py` | Geometry analysis → `WarmStart` seed parameters and symmetry classification |
+| `model_sync.py` | Deploys a part's reference bundle into the MechVision model library |
+| `eval_cache.py` | SHA-256 transposition table over (config, scenes, thresholds) |
+| `optimizer_utils.py` | Scene listing, PLY GT parsing, **and the Python callbacks MechVision loads by absolute path** |
+| `visualize_match.py` | Standalone diagnostic: re-runs a tuned config and overlays matched vs GT poses |
 
 ## Data flow
 
 ```
-Reference PLY
-    ↓ mesh_analysis.py → WarmStart (diameter, distQ, angleQ, symmetry class)
-    
-Synthetic scenes (output/synthetic_target/<part>/scene_NNNNN/sample_*.ply)
-    ↓ optimizer_utils.py → scene_groups, merged scene.ply, GT poses
-
-optimizer.py (6 phases)
-    ↓ coarse_params + fine_params
-    → mm_adapter: set_params() + run_vision()  [gRPC to 127.0.0.1:5307]
-    ← fine_poses, fine_confidences, timing
-    ↓ match_poses_to_gt()
-    → EvalResult: score, coverage, mean_time
-    ↓ eval_cache
-    
-Final: best_config_<part>.json
+output/reference_pcd/<part>/        output/synthetic_target/<part>/scene_*/
+        |                                          |
+        | model_sync.sync_regime_model             | list_synthetic_scenes
+        v                                          v
+CAD_Match/resource/3d_matching/<part>/<part>.ply   scene dirs + GT from PLY headers
+        |                                          |
+        +---------------> MVEvaluator <------------+
+                               ^
+                               | extends
+                            Tuner  ->  Optuna study  ->  results/<PART>_<SAMPLER>.db
+                                                          results/<SAMPLER>_best_config_<part>.json
 ```
 
-## Hierarchical optimizer (`optimizer.py`)
+## How a run proceeds
 
-Six phases of progressive refinement, each building on the previous result.
+1. **Warm start** — `mesh_analysis.analyze_mesh` derives seed parameters from part geometry.
+2. **Regime gate** — `phase1_regime_gate` evaluates the surface and edge regimes sequentially,
+   installing each cloud through `model_sync`, and keeps those above
+   `REGIME_COVERAGE_GATE`. The winner is locked for the study.
+3. **Joint study** — one multi-objective Optuna study over all 16–18 coarse and fine
+   parameters. Objectives are `(coverage, mean_time)`; the winner is taken from the Pareto
+   front, max coverage first and min time as tiebreaker.
+4. **Symmetry sweep** — `phase4_symmetry`, run only if coverage clears
+   `SYMMETRY_COVERAGE_GATE`.
 
-### Phase sequence
+Rounds extend the same study, so the sampler keeps its model across them.
 
-| Phase | What it searches | Strategy |
-|-------|-----------------|----------|
-| 0 | Geometry analysis | Derive `WarmStart` from reference PLY |
-| 1 | Registration regime | Grid over 4 mode combinations (Surface/Edge × coarse/fine) |
-| 2a | Coarse sampling | Joint grid: `refStep` × `distQuantification` |
-| 2b | Remaining coarse params | Coordinate descent, 8 params in pipeline order |
-| 3 | Fine matching params | Coordinate descent, 6 params, position-only scoring |
-| 4 | Symmetry confirmation | Test N-fold axes if angular errors show periodicity |
-| 5 | Joint coarse refinement | 3×3×3 grid with fine locked, top-K tiebreaking |
-| 6 | Interval narrowing | Dense continuous sweep around Phase 5 winner |
+## Samplers
 
-### Scoring
+`--sampler nsgaii | tpe | gp`, default **`gp`** (one definition, in `search_config.py`). All
+three are multi-objective. They differ in the trial budget they need and in how they handle
+this study's conditional and shifting search space — `Tuner._create_study` documents the
+trade-off against Optuna's published guidance, and it is why `gp` is the default at this
+project's ~150–250 trial budget.
+
+## Scoring
 
 ```
-raw_score  = (mean_time / 5.0) + (1 − coverage)
-quality    = 1 − raw_score / 2.0   ∈ [0, 1]
+raw_score     = mean_time / SCORE_TIME_NORM + (1 - coverage) * SCORE_COV_NORM
+score_quality = 1 - raw_score / SCORE_WORST_CASE          in [0, 1]
 ```
 
-Lower `raw_score` is better. Phase 5 uses soft tiebreaking on mean position error of passing instances.
+Lower `raw_score` is better. The regime gate scores position-only (`ang_thresh = 360°`)
+because a rotationally symmetric part returns a valid but flipped pose; everything after it
+uses the tight 5° gate.
 
-Angular error threshold progresses through phases:
-- Phases 1–3: position-only (angular gate = 360°)
-- Phases 4–6: tight (angular gate = 5°)
+## Pruning
 
-### Two-pass multi-fidelity (Strategy 2)
+Deliberately minimal, and never competitive:
 
-Expensive candidates are pre-screened cheaply:
+- a coverage floor (`COV_PRUNE_FLOOR`) after 3+ scenes, and
+- a **fixed** absolute per-trial time cap (`TIME_ABS_CAP`), a safety valve for pathological
+  configs only.
 
-1. **Pass 1**: evaluate all candidates on `M_SMALL=5` scenes
-2. **Pass 2**: full `M_FULL=30` evaluation on top `K_SURVIVORS=3`; early-exit at `TARGET_COVERAGE=0.90`
+There is no `best_mean_time × ratio` guard: it ratchets down after one fast low-quality trial
+and then prunes most of the search, biasing away from the slow-but-accurate region that
+matters here.
 
-Disable with `--no_two_pass`.
-
-### Phase gates (Strategy 3)
-
-| Gate | Threshold | Action |
-|------|-----------|--------|
-| After Phase 1 | coverage < 0.50 | Stop — parameters cannot be tuned |
-| After Phase 2a | coverage < 0.30 | Skip Phase 2b |
-| After Phase 2 | coverage < 0.65 | Skip Phase 4 (symmetry correction) |
-| After Phase 3 | coverage < 0.75 | Skip Phase 6 (interval narrowing) |
-
-### CLI
+## CLI
 
 ```bash
-python optimizer.py --part 25333MB000 \
-    [--dry_run]           \  # mock MechVision calls for testing
-    [--scenes_dir PATH]   \  # override synthetic scenes directory
-    [--m_full N]          \  # override full-pass scene count
-    [--no_cache]          \  # bypass transposition table
-    [--no_two_pass]       \  # skip cheap pre-screening
-    [--seed 42]           \
-    [--export_best]          # write best_config_<part>.json
+python MM_Optimizer/tuner.py --part 25333MB000 \
+    [--sampler gp] [--n_trials 150] [--n_rounds 2] \
+    [--scenes_dir PATH] [--m_full N] [--no_cache] [--seed 42] \
+    [--storage results/] [--dry_run]
 ```
 
-## Optuna optimizer (`optuna_optimizer.py`)
+`--dry_run` builds the parameter dicts and runs the study without calling MechVision.
 
-Alternative to hierarchical CD: a single joint Optuna study over all 16–18 coarse + fine parameters simultaneously.
-
-- **Multi-objective**: maximise coverage, minimise mean_time (Pareto front)
-- **Sampler**: NSGA-II (default) or TPE — set with `--sampler`
-- **Phases 0, 1, 4** are delegated to a wrapped `Optimizer` instance; the joint study replaces Phases 2–3–5–6
-- **Crash-resume**: study state persisted to SQLite (`--storage`)
-
-### Constraints enforced during search
-
-- `referredStep ≤ refStep` — hard feasibility; violations return sentinel (cov=0, time=5s)
-- Time guard: prune trial if running time exceeds 3× current best
-- Coverage floor: prune after 3 scenes if coverage < 0.10
-
-### CLI
-
-```bash
-python optuna_optimizer.py --part 25333MB000 \
-    [--n_trials_joint 150]       \
-    [--n_rounds 2]               \
-    [--sampler nsgaii | tpe]     \
-    [--storage PATH]             \  # SQLite base path for crash-resume
-    [--no_adaptive_thresh]       \
-    [--pos_thresh_k 0.01]           # adaptive threshold scale factor
-```
+The GUI wraps the same `Tuner` in `stages/tuning_stage.py`, which adds a live 3D overlay and
+an Optuna-dashboard subprocess.
 
 ## `mesh_analysis.py` — WarmStart
 
-Reads the reference PLY and derives geometry-based starting parameters before any MechVision calls.
-
-```python
-from MM_Optimizer.mesh_analysis import analyze_mesh
-
-warm_start = analyze_mesh(ref_pcd, n_instances=1)
-```
-
-Key fields:
-
-| Field | Derived from | Used for |
-|-------|-------------|---------|
-| `diameter_m` | Max spatial extent | Scales all geometry-relative params |
-| `distQuantification` | — | Optimal PPF bin width (default 1.0) |
-| `angleQuantification` | — | Hough accumulator resolution (default 60) |
-| `minVoxelLength_mm` | 0.5% of diameter | Pose verification voxel grid |
-| `maxVoxelLength_mm` | 2.0% of diameter | Pose verification voxel grid |
-| `prefer_edge` | Normal concentration + flatness | Regime hint (edge vs surface) |
-| `symmetry_class` | Eigenvalue + Chamfer analysis | One of: `ASYMMETRIC`, `C2`, `C3`, `C4`, `C6`, `SO2`, `SO3` |
-
-Symmetry classification pipeline: PCA eigenvalue ratios → SO3/SO2 candidate detection → N-fold test via Chamfer distance at 180° rotations. Chamfer threshold = max(2% of diameter, 3 mm).
+Derives seed values (`refStep`, `distQuantification`, `angleQuantification`,
+`maxNumOfPointPairsPerFeature`, voxel bounds) plus a symmetry classification from the
+reference cloud, so the study starts from a plausible region rather than the middle of the
+space. `load_reference_pcd` reads the app's own bundle — not the deployed MechVision library,
+which holds only whichever regime was synced last.
 
 ## `eval_cache.py` — Transposition table
 
-Avoids re-evaluating parameter configurations that were already scored in a prior phase.
-
-```python
-key = EvalCache.make_key(config_dict, scene_paths)  # 16-char SHA-256 prefix
-result = cache.get(key)   # None on miss
-cache.put(key, result)
-cache.save()              # persist to JSON (crash-safe)
-```
-
-Cache is only valid for live runs. Phase-specific angular thresholds must be included in the config dict so that Phase 2 (loose) and Phase 5 (tight) results are keyed separately.
-
-## `optimizer_utils.py`
-
-| Function | Purpose |
-|----------|---------|
-| `list_synthetic_scenes(part_dir)` | Returns `List[List[str]]` — one group per `scene_NNNNN/` directory |
-| `compose_scene(ply_list, work_dir)` | Merges N sample PLYs into one `scene.ply`; extracts GT poses from PLY headers |
-| `read_synthetic(path)` | Called by MechVision `Pre_Segmentation` step; returns `[x,y,z,nx,ny,nz,0]` arrays |
-| `read_gt_pose_from_ply(ply_path)` | Parses `gt_x/y/z/qw/qx/qy/qz` from PLY comment lines |
+JSON-backed, keyed on a SHA-256 of (coarse params, fine params, scene signature, thresholds).
+The scene signature folds each `sample_*.ply`'s `(name, size, mtime_ns)`, so regenerating
+scenes into the same directory invalidates the entry rather than serving a stale score.
+Disable with `ENABLE_CACHE = False` in `mv_evaluator.py`.
 
 ## `search_config.py`
 
-Central configuration — edit here to adjust search space without touching optimizer logic.
-
-Key knobs:
-
-| Constant | Default | Effect |
-|----------|---------|--------|
-| `POS_THRESH_TIGHT` | 2 mm | Position error gate for a detection to count as correct |
-| `ANG_THRESH_TIGHT` | 5° | Angular error gate (Phases 4–6) |
-| `M_SMALL` / `M_FULL` | 5 / 30 | Two-pass scene counts |
-| `K_SURVIVORS` | 3 | Pass-1 → pass-2 survivors |
-| `SCORE_TIME_NORM` | 5.0 s | Time normalisation denominator in scoring formula |
-| `OPTUNA_N_TRIALS_JOINT` | 150 | Joint Optuna study trial budget |
-
-## Constraints
-
-- MechVision Hub must be running at `127.0.0.1:5307` before any evaluation.
-- Ground truth comes exclusively from PLY comment headers written by `stages/SaveStage` — do not rename those keys.
-- Phase gate thresholds (`0.50`, `0.65`, `0.75`) are empirically tuned; changing them requires re-validation against held-out scenes.
-- The scoring formula (`time/5.0 + (1−coverage)`) is used consistently across all phases and both optimizers — changing it mid-run invalidates cached results.
+Pure data, no imports from the adapter or the tuner: search-space bounds and choices, scoring
+constants, the regime table, symmetry-classification thresholds and the sampler list. Edit
+here to change what the study explores.

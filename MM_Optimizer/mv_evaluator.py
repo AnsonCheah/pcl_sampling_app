@@ -1,22 +1,16 @@
 """
-mv_evaluator.py — Shared MechVision evaluation harness
-------------------------------------------------------
-Sampler-agnostic core extracted from optimizer.py. Owns the evaluation contract
-that every optimizer builds on:
+mv_evaluator.py — MechVision evaluation harness
+-----------------------------------------------
+Sampler-agnostic base of `tuner.Tuner`. Owns the evaluation contract:
 
   - scene sampling (`_sample_scenes`, `_prepare_scene`)
   - MechVision param-dict construction (`_make_params_dict`)
   - single-scene execution + GT matching (`_run_one_scene`)
-  - cached config evaluation (`evaluate_config`) and two-pass screening
-    (`evaluate_phase_sweep`)
-  - the Phase-1 regime gate (`phase1_regime_gate`)
-  - the Phase-4 symmetry sweep (`phase4_symmetry`)
+  - cached config evaluation (`evaluate_config`, `evaluate_phase_sweep`)
+  - the regime gate (`phase1_regime_gate`) and symmetry sweep (`phase4_symmetry`)
   - result export / logging / cleanup
 
-Both the (deprecated) coordinate-descent `optimizer.Optimizer` and the active
-`optuna_optimizer.OptunaOptimizer` reuse `MVEvaluator`, so scene handling, the
-scoring formula, and the cache key live in exactly one place. This module has no
-sampler logic and no CLI.
+No sampler logic and no CLI: those live in `tuner.py`.
 """
 
 import copy
@@ -45,6 +39,7 @@ from mm_adapter.mm_dataclasses import (CoarseMatchingV2, FineMatchingLite,
 from MM_Optimizer.eval_cache      import EvalCache
 from MM_Optimizer.mesh_analysis   import WarmStart
 from MM_Optimizer.optimizer_utils import read_gt_pose_from_ply
+import MM_Optimizer.model_sync as model_sync
 import MM_Optimizer.search_config as SC
 
 log = logging.getLogger(__name__)
@@ -58,6 +53,56 @@ PROJ_NAME            = "CAD_Match"
 MM_MODEL_ROOT        = os.path.join(_DIR, "CAD_Match", "resource", "3d_matching")
 RESULTS_DIR          = os.path.join(_DIR, "results")
 OPTIMIZER_UTILS_PATH = os.path.join(_DIR, "optimizer_utils.py")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MechVision parameter typing
+# ─────────────────────────────────────────────────────────────────────────────
+# name -> (mm_adapter type, unit). Only these reach MechVision.
+_COARSE_TYPES = {
+    "registrationMode":             ("double", ""),
+    "refStep":                      ("double", ""),
+    "distQuantification":           ("double", ""),
+    "angleQuantification":          ("double", ""),
+    "maxNumOfPointPairsPerFeature": ("double", ""),
+    "maxVoteRatio":                 ("double", ""),
+    "referredStep":                 ("double", ""),
+    "useDistanceNMS":               ("bool",   ""),
+    "filterCandidatePoseByAxis":    ("bool",   ""),
+    "angleThreshold":               ("double", ""),
+    "outputNum":                    ("double", ""),
+    "minVoxelLength":               ("double", "m"),
+    "maxVoxelLength":               ("double", "m"),
+}
+
+_FINE_TYPES = {
+    "registrationMode":                  ("double", ""),
+    "operationApproach":                 ("double", ""),
+    "deviationCorrectionCapacity":       ("double", ""),
+    "onlyConsiderVisibleSurfaceOfModel": ("bool",   ""),
+    "considerErrorofNormalAngles":       ("bool",   ""),
+    "scoreLevel":                        ("double", ""),
+    "confidenceThreshold":               ("double", ""),
+    "rotationStrategy":                  ("double", ""),
+    "angleStep":                         ("double", ""),
+    "minAngle":                          ("double", ""),
+    "maxAngle":                          ("double", ""),
+    "candidateTopNum":                   ("double", ""),
+}
+
+# Search-space bookkeeping carried alongside the MechVision keys (the Optuna trial
+# parameter names). Listed so an unrecognised key is a typo, not a silent no-op.
+_NON_MV_KEYS = frozenset({"minVoxelLength_mm", "maxVoxelLength_mm", "voxel_width_mm"})
+
+
+def _apply_params(step, params: dict, types: dict) -> None:
+    """Set `params` onto an mm_adapter step object as (value, type, unit) triples."""
+    for k, v in params.items():
+        spec = types.get(k)
+        if spec is not None:
+            setattr(step, k, (str(v), *spec))
+        elif k not in _NON_MV_KEYS:
+            log.warning(f"unknown MechVision parameter {k!r} ignored")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -146,7 +191,6 @@ class MVEvaluator:
                    bin capture (N instances per scene).
     warm_start   : WarmStart from mesh_analysis.
     cache        : EvalCache instance (or None to disable).
-    use_two_pass : Enable two-pass multi-fidelity screening (Strategy 2).
     dry_run      : Build param dicts but do not call MechVision.
     """
 
@@ -157,7 +201,6 @@ class MVEvaluator:
                  scene_groups: List[List[str]],
                  warm_start:   WarmStart,
                  cache:        Optional[EvalCache] = None,
-                 use_two_pass: bool = True,
                  dry_run:      bool = False):
 
         self.part_name    = part_name
@@ -166,7 +209,6 @@ class MVEvaluator:
         self.scene_groups = scene_groups   # List[List[str]] — one group per M-scene
         self.ws           = warm_start
         self.cache        = cache
-        self.use_two_pass = use_two_pass
         self.dry_run      = dry_run
 
         # Optional live-eval hook. When set, called after every real MechVision
@@ -176,8 +218,7 @@ class MVEvaluator:
         self.on_scene_eval = None
 
         self._model_root   = MM_MODEL_ROOT
-        self._n_evals      = 0   # total MechVision calls
-        self._n_gate_stops = 0   # phase gate activations
+        self._n_evals = 0   # total MechVision calls
 
         # Best state (updated throughout)
         self._best_coarse: dict = {}
@@ -240,21 +281,14 @@ class MVEvaluator:
                     read_synthetic loads all N PLYs from it and returns N
                     individual point clouds — one per instance in the bin.
         """
-        coarse_mode = coarse_params.get("registrationMode", 0.0)
-        fine_mode   = fine_params.get("registrationMode",   0.0)
-        coarse_type = "edge" if coarse_mode == 1.0 else "surface"
-        fine_type   = "edge" if fine_mode   == 1.0 else "surface"
-
-        def model_path(mtype):
-            return os.path.join(self._model_root,
-                                f"{self.part_name}_{mtype}")
-
-        def geo_path(mtype):
-            return os.path.join(model_path(mtype), "geo_center.json")
-
-        def ply_path(mtype):
-            return os.path.join(model_path(mtype),
-                                f"{self.part_name}_{mtype}.ply")
+        # One library entry per part holding one cloud, so coarse and fine necessarily
+        # share it — which is why the mixed regimes were dropped (see SC.REGIMES).
+        # `registrationMode` still tells MechVision how to interpret that cloud; which
+        # cloud it is was decided by `model_sync.sync_regime_model`.
+        model_root_dir = model_sync.model_dir(self.part_name)
+        model_name     = self.part_name
+        ply_file       = model_sync.model_ply(self.part_name)
+        geo_file       = model_sync.geo_center(self.part_name)
 
         scene = EasyCreateStringList(
             name="Scene_Path",
@@ -273,68 +307,19 @@ class MVEvaluator:
 
         coarse = CoarseMatchingV2(
             name="Coarse_Match_Synthetics",
-            modelSelection=(f"{self.part_name}_{coarse_type}", "string", ""),
-            modelFileName=(ply_path(coarse_type), "string", ""),
-            geoCenterFileName=(geo_path(coarse_type), "string", ""),
+            modelSelection=(model_name, "string", ""),
+            modelFileName=(ply_file, "string", ""),
+            geoCenterFileName=(geo_file, "string", ""),
         )
-        # Apply all coarse_params overrides
-        for k, v in coarse_params.items():
-            if k == "registrationMode":
-                coarse.registrationMode = (str(v), "double", "")
-            elif k == "refStep":
-                coarse.refStep = (str(v), "double", "")
-            elif k == "distQuantification":
-                coarse.distQuantification = (str(v), "double", "")
-            elif k == "angleQuantification":
-                coarse.angleQuantification = (str(v), "double", "")
-            elif k == "maxNumOfPointPairsPerFeature":
-                coarse.maxNumOfPointPairsPerFeature = (str(v), "double", "")
-            elif k == "maxVoteRatio":
-                coarse.maxVoteRatio = (str(v), "double", "")
-            elif k == "referredStep":
-                coarse.referredStep = (str(v), "double", "")
-            elif k == "useDistanceNMS":
-                coarse.useDistanceNMS = (str(v), "bool", "")
-            elif k == "filterCandidatePoseByAxis":
-                coarse.filterCandidatePoseByAxis = (str(v), "bool", "")
-            elif k == "angleThreshold":
-                coarse.angleThreshold = (str(v), "double", "")
-            elif k == "outputNum":
-                coarse.outputNum = (str(v), "double", "")
-            elif k == "minVoxelLength":
-                coarse.minVoxelLength = (str(v), "double", "m")
-            elif k == "maxVoxelLength":
-                coarse.maxVoxelLength = (str(v), "double", "m")
+        _apply_params(coarse, coarse_params, _COARSE_TYPES)
 
         fine = FineMatchingLite(
             name="Fine_Match_Synthetics",
-            modelSelection=(f"{self.part_name}_{fine_type}", "string", ""),
-            modelFileName=(ply_path(fine_type), "string", ""),
-            geoCenterFileName=(geo_path(fine_type), "string", ""),
+            modelSelection=(model_name, "string", ""),
+            modelFileName=(ply_file, "string", ""),
+            geoCenterFileName=(geo_file, "string", ""),
         )
-        for k, v in fine_params.items():
-            if k == "registrationMode":
-                fine.registrationMode = (str(v), "double", "")
-            elif k == "operationApproach":
-                fine.operationApproach = (str(v), "double", "")
-            elif k == "deviationCorrectionCapacity":
-                fine.deviationCorrectionCapacity = (str(v), "double", "")
-            elif k == "onlyConsiderVisibleSurfaceOfModel":
-                fine.onlyConsiderVisibleSurfaceOfModel = (str(v), "bool", "")
-            elif k == "considerErrorofNormalAngles":
-                fine.considerErrorofNormalAngles = (str(v), "bool", "")
-            elif k == "scoreLevel":
-                fine.scoreLevel = (str(v), "double", "")
-            elif k == "confidenceThreshold":
-                fine.confidenceThreshold = (str(v), "double", "")
-            elif k == "rotationStrategy":
-                fine.rotationStrategy = (str(v), "double", "")
-            elif k == "angleStep":
-                fine.angleStep = (str(v), "double", "")
-            elif k == "minAngle":
-                fine.minAngle = (str(v), "double", "")
-            elif k == "maxAngle":
-                fine.maxAngle = (str(v), "double", "")
+        _apply_params(fine, fine_params, _FINE_TYPES)
 
         return {
             scene.name:      scene.to_step_params(),
@@ -481,84 +466,20 @@ class MVEvaluator:
                              pos_thresh: float = SC.POS_THRESH_TIGHT,
                              ang_thresh: float = SC.ANG_THRESH_TIGHT,
                              label: str = "") -> EvalResult:
-        """Evaluate all (coarse, fine) variant pairs with optional two-pass.
+        """Evaluate parallel (coarse, fine) variant lists on M_FULL scenes.
 
-        coarse_variants and fine_variants are parallel lists of equal length —
-        each index represents one candidate config to evaluate.
-
-        Strategy 2: if ENABLE_TWO_PASS and len(candidates) > TWO_PASS_MIN_CANDIDATES:
-          Pass 1: evaluate all candidates on M_SMALL scenes
-          Pass 2: full M_FULL evaluation on top-K survivors from Pass 1
-        Otherwise: evaluate all candidates at M_FULL directly.
-
-        Returns the best EvalResult from Pass 2 (or direct eval).
+        coarse_variants and fine_variants are equal-length; index i is one candidate config.
+        Returns the best-scoring EvalResult.
         """
-        n_candidates = len(coarse_variants)
-        assert len(fine_variants) == n_candidates
-
-        use_tp = (self.use_two_pass and
-                  n_candidates > SC.TWO_PASS_MIN_CANDIDATES)
-
-        # ---- Pass 1 (cheap screening) ----
-        if use_tp:
-            scenes_small = self._sample_scenes(SC.M_SMALL)
-            pass1_results = []
-            for i, (cp, fp) in enumerate(zip(coarse_variants, fine_variants)):
-                r = self.evaluate_config(cp, fp, scenes_small,
-                                         pos_thresh, ang_thresh)
-                log.debug(f"  [{label}] P1 cand {i:2d}: "
-                          f"cov={r.coverage:.2f} score={r.score:.1f}")
-                pass1_results.append((r, i))
-
-            # Top-K survivors by score; early-exit if top-1 already meets target
-            pass1_results.sort(key=lambda x: x[0].score)
-            if pass1_results[0][0].coverage >= SC.TARGET_COVERAGE:
-                survivors = pass1_results[:1]
-                log.info(f"[{label}] early-exit: top-1 cov="
-                         f"{pass1_results[0][0].coverage:.2f} >= TARGET"
-                         f" — skipping costlier candidates")
-            else:
-                survivors = pass1_results[:SC.K_SURVIVORS]
-            log.info(f"[{label}] two-pass: {n_candidates} → {len(survivors)} survivors")
-            coarse_variants_p2 = [coarse_variants[i] for _, i in survivors]
-            fine_variants_p2   = [fine_variants[i]   for _, i in survivors]
-        else:
-            coarse_variants_p2 = coarse_variants
-            fine_variants_p2   = fine_variants
-
-        # ---- Pass 2 (full evaluation) ----
-        scenes_full = self._sample_scenes(SC.M_FULL)
-        pass2_results = []
-        for i, (cp, fp) in enumerate(zip(coarse_variants_p2, fine_variants_p2)):
-            r = self.evaluate_config(cp, fp, scenes_full,
-                                     pos_thresh, ang_thresh)
-            log.info(f"  [{label}] P2 cand {i:2d}: "
-                     f"cov={r.coverage:.2f}  time={r.mean_time:.3f}s  "
-                     f"score={r.score:.1f}")
-            pass2_results.append(r)
-
-        pass2_results.sort(key=lambda r: r.score)
-        return pass2_results[0]
-
-    # ─────────────────────────────────────────────────────────────────────
-    # Phase gate  (Strategy 3)
-    # ─────────────────────────────────────────────────────────────────────
-
-    def _gate(self, gate_key: str, coverage: float) -> bool:
-        """Return True if optimization should continue past this gate.
-
-        Logs warnings and increments stop counter if gate fires.
-        """
-        cfg = SC.PHASE_GATES.get(gate_key)
-        if cfg is None:
-            return True
-        threshold, action = cfg
-        if coverage < threshold:
-            self._n_gate_stops += 1
-            log.warning(f"GATE [{gate_key}]: coverage={coverage:.2f} < {threshold} "
-                        f"→ {action}")
-            return False
-        return True
+        assert len(fine_variants) == len(coarse_variants)
+        scenes = self._sample_scenes(SC.M_FULL)
+        results = []
+        for i, (cp, fp) in enumerate(zip(coarse_variants, fine_variants)):
+            r = self.evaluate_config(cp, fp, scenes, pos_thresh, ang_thresh)
+            log.info(f"  [{label}] cand {i:2d}: cov={r.coverage:.2f}  "
+                     f"time={r.mean_time:.3f}s  score={r.score:.1f}")
+            results.append(r)
+        return min(results, key=lambda r: r.score)
 
     # ─────────────────────────────────────────────────────────────────────
     # Phase 0 — Already done: warm start is passed in via __init__
@@ -596,23 +517,38 @@ class MVEvaluator:
     # ─────────────────────────────────────────────────────────────────────
 
     def phase1_regime_gate(self) -> List[dict]:
-        """Test A/B/C/D regime combos. Return passing regimes sorted by coverage."""
+        """Test the surface/edge regimes. Return passing regimes sorted by coverage.
+
+        Each regime installs its cloud as the part's MechVision model before evaluating,
+        which is what removes the manual copy into the model library. The install replaces
+        the folder, so this loop must stay **sequential** — two regimes syncing at once
+        would leave the library holding one regime's cloud while the other is scored
+        against it.
+        """
         log.info("=" * 60)
         log.info("PHASE 1 — Regime Gate")
 
-        has_edge = os.path.isdir(os.path.join(self._model_root,
-                                              f"{self.part_name}_edge"))
+        # Asked of the exported bundle, not the model library: the library holds only
+        # whichever regime was synced last, so it reports history rather than options.
+        available = model_sync.available_types(self.part_name)
+        log.info(f"  cloud types exported for {self.part_name}: {available or 'none'}")
 
         # Order based on geometry hint
-        regimes = sorted(SC.PHASE1_REGIMES,
+        regimes = sorted(SC.REGIMES,
                          key=lambda r: (r["needs_edge"] and not self.ws.prefer_edge,
                                         r["id"]))
 
         passing = []
         for regime in regimes:
-            if regime["needs_edge"] and not has_edge:
-                log.info(f"  Regime {regime['id']}: skip (no edge model)")
+            cloud_type = "edge" if regime["coarse_mode"] == 1.0 else "surface"
+            if cloud_type not in available:
+                log.info(f"  Regime {regime['id']}: skip (no {cloud_type} cloud exported)")
                 continue
+
+            if not self.dry_run:
+                model_sync.sync_regime_model(self.part_name, cloud_type)
+                log.info(f"  Regime {regime['id']}: synced {cloud_type} cloud into the "
+                         f"model library as {self.part_name}.ply")
 
             cp = self._default_coarse()
             fp = self._default_fine()
@@ -629,9 +565,9 @@ class MVEvaluator:
             log.info(f"  Regime {regime['id']}: cov={r.coverage:.2f}  "
                      f"time={r.mean_time:.3f}s")
 
-            if r.coverage >= SC.PHASE1_COVERAGE_GATE:
-                passing.append({**regime, "coverage": r.coverage,
-                                 "coarse": cp, "fine": fp})
+            if r.coverage >= SC.REGIME_COVERAGE_GATE:
+                passing.append({**regime, "cloud_type": cloud_type,
+                                "coverage": r.coverage, "coarse": cp, "fine": fp})
 
         if not passing:
             log.error("PHASE 1: No regime passes. Part may be un-tunable.")
@@ -641,9 +577,26 @@ class MVEvaluator:
         log.info(f"PHASE 1 done: {len(passing)} passing regimes — "
                  f"best = {passing[0]['id']} (cov={passing[0]['coverage']:.2f})")
 
-        if not self._gate("after_phase1", passing[0]["coverage"]):
-            return []
+        # The loop leaves whichever regime ran last installed, which is not necessarily the
+        # winner. Re-install the best one so the library is consistent with what the caller
+        # is about to tune; a caller choosing a different regime must call lock_regime.
+        self.lock_regime(passing[0])
+
         return passing
+
+    def lock_regime(self, regime: dict) -> None:
+        """Install ``regime``'s cloud as the part's active MechVision model.
+
+        Call before tuning with a regime other than the gate's winner. Every subsequent
+        MechVision run matches against whatever this last installed — the regime is carried
+        by the model library, not by the parameter dict.
+        """
+        cloud_type = regime.get("cloud_type") or (
+            "edge" if regime.get("coarse_mode") == 1.0 else "surface")
+        if self.dry_run:
+            return
+        model_sync.sync_regime_model(self.part_name, cloud_type)
+        log.info(f"  locked regime {regime.get('id', '?')} ({cloud_type}) into the model library")
 
     # ─────────────────────────────────────────────────────────────────────────
     # Phase 4 — Symmetry confirmation (conditional)
@@ -665,10 +618,10 @@ class MVEvaluator:
             return phase3_result
 
         log.info(f"  Confirmed {sym_order}-fold symmetry")
-        angle_steps = SC.phase4_angle_steps(sym_order)
+        angle_steps = SC.angle_steps(sym_order)
 
         coarse_v, fine_v = [], []
-        for axis in SC.PHASE4_ROTATION_STRATEGIES:
+        for axis in SC.ROTATION_STRATEGIES:
             for step in angle_steps:
                 fp = copy.deepcopy(fine)
                 # Symmetry search requires at least Standard accuracy (1.0).

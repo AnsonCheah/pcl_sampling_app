@@ -1,4 +1,7 @@
 from abc import ABC, abstractmethod
+import colorsys
+import open3d as o3d
+import open3d.visualization.rendering as rendering
 from stages.widget_base import WidgetBinding
 import threading
 
@@ -105,6 +108,20 @@ class BaseStage(ABC):
     # -------------------------
     # Widget control
     # -------------------------
+
+    def add_meshes_in_distinct_colors(self, meshes, prefix):
+        """Add `meshes` to the 3D scene as `<prefix>_<i>`, each a distinct HSV hue.
+
+        Main-thread only, like every other scene mutation.
+        """
+        n = max(len(meshes), 1)
+        for i, mesh in enumerate(meshes):
+            material = rendering.MaterialRecord()
+            material.shader = "defaultLit"
+            material.base_color = list(colorsys.hsv_to_rgb(i / n, 0.6, 0.9)) + [1.0]
+            geom = o3d.geometry.TriangleMesh(mesh)
+            geom.compute_vertex_normals()
+            self.app.scene.scene.add_geometry(f"{prefix}_{i}", geom, material)
 
     def register_widget(self, widget, enabled_if=lambda: True):
         """

@@ -14,4 +14,3 @@ class Stage(Enum):
 class ToolMode(Enum):
     NONE = 0
     BOX_SELECT = 1
-    POLY_SELECT = 2

@@ -45,9 +45,10 @@ if _ROOT not in sys.path:
 
 from mm_adapter.mm_adapter     import MechVisionClient
 from mm_adapter.mm_dataclasses import CoarseMatchingV2, FineMatchingLite, EasyCreateStringList
-from MM_Optimizer.optimizer        import PROJ_NAME, MM_MODEL_ROOT, OPTIMIZER_UTILS_PATH
+from MM_Optimizer.mv_evaluator     import PROJ_NAME, OPTIMIZER_UTILS_PATH
 from MM_Optimizer.optimizer_utils  import list_synthetic_scenes, read_gt_pose_from_ply
 from MM_Optimizer.mesh_analysis    import analyze_mesh, load_reference_pcd
+from MM_Optimizer              import model_sync
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -80,15 +81,15 @@ def _make_subscene_dir(source_plys, n, work_dir, label):
 
 def _build_params(scene_dir, H, use_nms=True):
     """Build params_dict for one vision run (candidateTopNum=1 fixed)."""
-    model_type = "surface"
-    model_dir  = os.path.join(MM_MODEL_ROOT, f"{PART}_{model_type}")
-    ply_path   = os.path.join(model_dir, f"{PART}_{model_type}.ply")
-    geo_path   = os.path.join(model_dir, "geo_center.json")
+    # Same resolution as mv_evaluator._make_params_dict: one library entry per part,
+    # holding whichever regime's cloud model_sync last installed.
+    ply_path = model_sync.model_ply(PART)
+    geo_path = model_sync.geo_center(PART)
 
     scene  = EasyCreateStringList(name="Scene_Path", strings=(scene_dir, "string", ""))
     coarse = CoarseMatchingV2(
         name              = "Coarse_Match_Synthetics",
-        modelSelection    = (f"{PART}_{model_type}", "string", ""),
+        modelSelection    = (PART, "string", ""),
         modelFileName     = (ply_path, "string", ""),
         geoCenterFileName = (geo_path, "string", ""),
     )
@@ -99,7 +100,7 @@ def _build_params(scene_dir, H, use_nms=True):
 
     fine = FineMatchingLite(
         name              = "Fine_Match_Synthetics",
-        modelSelection    = (f"{PART}_{model_type}", "string", ""),
+        modelSelection    = (PART, "string", ""),
         modelFileName     = (ply_path, "string", ""),
         geoCenterFileName = (geo_path, "string", ""),
     )
@@ -227,8 +228,8 @@ def test_nms_impact():
     source_plys = _source_plys()
     N_full = len(source_plys)
 
-    model_path = os.path.join(MM_MODEL_ROOT, f"{PART}_surface",
-                              f"{PART}_surface.ply")
+    model_path = os.path.join(_ROOT, "output", "reference_pcd", PART,
+                              f"{PART}_surface", f"{PART}_surface.ply")
     pcd = load_reference_pcd(model_path)
     ws  = analyze_mesh(pcd)
     nms_thresh = 0.1 * ws.diameter_m

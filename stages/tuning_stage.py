@@ -7,7 +7,7 @@ The last stage of the pipeline. For the part currently loaded in the wizard
 2. launch the joint Optuna study against a live MechVision instance, with a live 3D
    overlay of the matched reference cloud that follows whichever scene the optimizer
    is evaluating (via ``MVEvaluator.on_scene_eval``) and a trial-level progress bar
-   (via ``OptunaOptimizer.on_trial_complete``),
+   (via ``Tuner.on_trial_complete``),
 3. browse the resulting Pareto configs and run any one live against the selected
    scene (coverage + time), and
 4. open the Optuna dashboard (a subprocess pointed at the study's SQLite DB).
@@ -38,6 +38,8 @@ import open3d.visualization.rendering as rendering
 
 from enums import Stage
 from stages.stage_base import BaseStage
+from geometry.file_utils import list_scene_dirs, list_sample_plys
+from geometry.geom_utils import pose_to_matrix, golden_hue_color
 
 # ── repo-root paths (kept off the import chain so the pure helpers stay testable) ──
 _STAGES_DIR  = os.path.dirname(os.path.abspath(__file__))
@@ -55,8 +57,8 @@ DASH_HOST = "127.0.0.1"
 DASH_PORT = 8080
 DASH_URL  = f"http://{DASH_HOST}:{DASH_PORT}/"
 
-SAMPLER_DEFAULT = "gp"
-SAMPLER_CHOICES = ("nsgaii", "tpe", "gp")
+SAMPLER_DEFAULT = SC.SAMPLER_DEFAULT
+SAMPLER_CHOICES = SC.SAMPLER_CHOICES
 
 _SCENE_VOXEL = 0.002   # m — downsample the ~34 MB scene cloud for a light preview
 _REF_VOXEL   = 0.004   # m — downsample the reference cloud placed at each match
@@ -150,25 +152,14 @@ def _close_handle(handle):
         pass
 
 
-def pose_to_T(pose):
-    """[x, y, z, qw, qx, qy, qz] (scalar-first) -> 4x4. Mirror of visualize_match.pose_to_T."""
-    x, y, z, qw, qx, qy, qz = pose
-    rot = o3d.geometry.get_rotation_matrix_from_quaternion(
-        np.array([qw, qx, qy, qz], dtype=float))
-    T = np.eye(4)
-    T[:3, :3] = rot
-    T[:3, 3]  = (x, y, z)
-    return T
-
-
 def instance_color(i):
     """One colour per instance — golden-ratio hue walk at RenderStage's HSV tone
     (saturation 0.4, value 0.9) so the overlay matches the segmented-scene look."""
-    return colorsys.hsv_to_rgb((i * 0.618033988749895) % 1.0, 0.4, 0.9)
+    return golden_hue_color(i, 0.4, 0.9)
 
 
 class TuningStage(BaseStage):
-    """Wrap MM_Optimizer/optuna_optimizer.py into the GUI (see module docstring)."""
+    """Wrap MM_Optimizer/tuner.py into the GUI (see module docstring)."""
 
     downstream = {}   # last stage; owns no cross-stage app.* state
 
@@ -178,6 +169,9 @@ class TuningStage(BaseStage):
         self.sampler  = SAMPLER_DEFAULT
         self.n_trials = None    # None → SC default; the Run button fills these from the sliders
         self.n_rounds = None
+        # Deliberate override for the model-frame guard (see _frames_agree). Off by default:
+        # the check costs seconds and the run it protects costs hours.
+        self.skip_frame_check = False
         # Runtime scratch (torn down in on_clear()).
         self._client       = None
         self._optimizer    = None
@@ -199,7 +193,7 @@ class TuningStage(BaseStage):
     # ─────────────────────────────────────────────────────────────────────
 
     def _part(self):
-        return getattr(self.app, "mesh_basename", None)
+        return self.app.mesh_basename
 
     def _part_dir(self):
         part = self._part()
@@ -219,17 +213,7 @@ class TuningStage(BaseStage):
     def _scan_scenes(self):
         """Sorted scene_NNNNN directory names for the current part ([] if none)."""
         d = self._part_dir()
-        if not d or not os.path.isdir(d):
-            return []
-        return sorted(
-            name for name in os.listdir(d)
-            if name.startswith("scene_") and os.path.isdir(os.path.join(d, name)))
-
-    def _scene_sample_plys(self, scene_dir):
-        return sorted(
-            (os.path.join(scene_dir, f) for f in os.listdir(scene_dir)
-             if f.startswith("sample_") and f.endswith(".ply")),
-            key=lambda p: int(re.search(r"\d+", os.path.basename(p)).group()))
+        return list_scene_dirs(d) if d else []
 
     def _delete_scene(self, scene_dir):
         """rmtree one scene directory (the Delete Scene button's real work)."""
@@ -288,7 +272,7 @@ class TuningStage(BaseStage):
         geoms = [("tuning_scene", o3d.geometry.PointCloud(scene_pcd), (0.55, 0.55, 0.55))]
         for i, pose in enumerate(fine_poses):
             inst = o3d.geometry.PointCloud(ref_pcd)
-            inst.transform(pose_to_T(pose))
+            inst.transform(pose_to_matrix(pose))
             geoms.append((f"tuning_match_{i}", inst, instance_color(i)))
         return geoms
 
@@ -374,16 +358,21 @@ class TuningStage(BaseStage):
         self.slider_trials = self.register_widget(
             gui.Slider(gui.Slider.INT), lambda: not self._running)
         self.slider_trials.set_limits(5, 300)
-        self.slider_trials.int_value = int(SC.OPTUNA_N_TRIALS_JOINT)
+        self.slider_trials.int_value = int(SC.N_TRIALS)
         self.slider_rounds = self.register_widget(
             gui.Slider(gui.Slider.INT), lambda: not self._running)
         self.slider_rounds.set_limits(1, 5)
-        self.slider_rounds.int_value = int(SC.OPTUNA_N_ROUNDS)
+        self.slider_rounds.int_value = int(SC.N_ROUNDS)
         self.combo_sampler = self.register_widget(
             gui.Combobox(), lambda: not self._running)
         for s in SAMPLER_CHOICES:
             self.combo_sampler.add_item(s)
         self.combo_sampler.selected_text = SAMPLER_DEFAULT
+        self.chk_skip_frame_check = self.register_widget(
+            gui.Checkbox("Skip model-frame check"), lambda: not self._running)
+        self.chk_skip_frame_check.checked = self.skip_frame_check
+        self.chk_skip_frame_check.set_on_checked(
+            lambda c: setattr(self, "skip_frame_check", bool(c)))
 
         # Run/Stop toggle: "Run Tuning" when idle, "Stop" while a study is active.
         self.btn_run = self.register_widget(
@@ -426,6 +415,7 @@ class TuningStage(BaseStage):
         v.add_child(self.slider_rounds)
         v.add_child(gui.Label("Sampler"))
         v.add_child(self.combo_sampler)
+        v.add_child(self.chk_skip_frame_check)
         v.add_child(self.btn_run)
         v.add_child(self.btn_dashboard)
         v.add_child(gui.Label(""))
@@ -519,10 +509,7 @@ class TuningStage(BaseStage):
             self.app._clear_scene()
             geom = o3d.geometry.PointCloud(scene_pcd)
             self.app.scene.scene.add_geometry("tuning_scene", geom, mat)
-            bbox = geom.get_axis_aligned_bounding_box()
-            if not bbox.is_empty():
-                self.app.scene.setup_camera(60.0, bbox, bbox.get_center())
-            self.app.scene.force_redraw()
+            self.app._reframe()
         self.app.main_thread(apply)
         self.enable_widgets()
 
@@ -571,7 +558,7 @@ class TuningStage(BaseStage):
         # If a study with prior trials exists, ask whether to add to it or start fresh.
         n_prior = self._count_prior_trials()
         if n_prior > 0 and not self.app.headless:
-            slider = self.n_trials if self.n_trials is not None else SC.OPTUNA_N_TRIALS_JOINT
+            slider = self.n_trials if self.n_trials is not None else SC.N_TRIALS
             self.app.choice_dialog(
                 f"A study for this part already has {n_prior} trials.",
                 [(f"Extend +{slider}", lambda: self._launch_tuning("extend")),
@@ -612,13 +599,60 @@ class TuningStage(BaseStage):
         self._stop_requested = False   # clear so the Run/Stop toggle returns to "Run Tuning"
         super()._on_worker_done()
 
+    def _frames_agree(self, part, model_path) -> bool:
+        """Refuse to tune when the scenes and the model are in different model frames.
+
+        A tuning run is hours of MechVision calls scored against each scene's `T_gt`, and
+        `T_gt` is only meaningful against the model frame the scene was generated in. If the
+        bundle has since been re-exported into a different frame, every pose is scored
+        against the wrong reference and the study optimises toward a fiction — with no error,
+        because a stale scene still loads and still has a pose.
+
+        The model frame is only reproducible while both the mesh and the sampling settings
+        are unchanged: a different voxel size or view count can change which ambiguity axis
+        wins, which moved the frame by 60.6 degrees and 28.3 mm on 25333MB000. And
+        `bench/generate_scenes.py` is resumable, so one part can accumulate scenes from two
+        sessions in two frames. Checking is a few seconds against a run measured in hours.
+
+        Also compares the in-app cloud when the session has one, so a bundle that has drifted
+        from what is currently loaded is caught as well.
+        """
+        import open3d as o3d
+
+        from MM_Optimizer import model_sync
+        from geometry.geom_utils import reference_frames_agree
+
+        if self.skip_frame_check:
+            print("[TUNING] Model-frame check skipped by request.")
+            return True
+
+        problems = model_sync.check_scene_frames(part, model_path, _SYNTH_ROOT)
+        live = self.app.down_pcd_surface
+        if live is not None:
+            why = reference_frames_agree(live, o3d.io.read_point_cloud(model_path))
+            if why:
+                problems.append(f"{model_path} (exported bundle) vs the cloud loaded in the app"
+                                f"\n        {why}")
+        if not problems:
+            return True
+
+        print("[TUNING] " + "=" * 62)
+        print(f"[TUNING] ABORTING: {len(problems)} model-frame disagreement(s) for '{part}'.")
+        print("[TUNING] Every pose would be scored against the wrong reference frame.")
+        for p in problems:
+            print(f"[TUNING]   {p}")
+        print(f"[TUNING] Fix: python bench/generate_scenes.py --only {part} --force")
+        print("[TUNING] Or tick 'Skip model-frame check' to run anyway.")
+        print("[TUNING] " + "=" * 62)
+        return False
+
     def worker(self):
         # Local heavy imports (see module docstring).
         from MM_Optimizer.mv_evaluator    import PROJ_NAME, RESULTS_DIR, ENABLE_CACHE
         from MM_Optimizer.optimizer_utils import list_synthetic_scenes
         from MM_Optimizer.mesh_analysis   import analyze_mesh, load_reference_pcd
         from MM_Optimizer.eval_cache      import EvalCache
-        from MM_Optimizer.optuna_optimizer import OptunaOptimizer
+        from MM_Optimizer.tuner import Tuner
         from mm_adapter.mm_adapter        import MechVisionClient
         import optuna
 
@@ -639,12 +673,14 @@ class TuningStage(BaseStage):
                   f"— run the sampling pipeline first.")
             return
 
+        if not self._frames_agree(part, model_path):
+            return
+
         # Per-run scene budget (SC globals are mutated the same way the CLI does).
         SC.M_FULL  = len(scene_groups)
-        SC.M_SMALL = max(1, len(scene_groups) // 2)
 
-        slider   = self.n_trials if self.n_trials is not None else SC.OPTUNA_N_TRIALS_JOINT
-        n_rounds = self.n_rounds if self.n_rounds is not None else SC.OPTUNA_N_ROUNDS
+        slider   = self.n_trials if self.n_trials is not None else SC.N_TRIALS
+        n_rounds = self.n_rounds if self.n_rounds is not None else SC.N_ROUNDS
 
         os.makedirs(RESULTS_DIR, exist_ok=True)
         if self._resume_mode == "restart":
@@ -668,7 +704,7 @@ class TuningStage(BaseStage):
         # `done` in _trial_progress counts ALL trials, so the progress total must use this budget.
         budget = self._resolve_trial_budget(self._resume_mode, n_prior, slider)
         self._total_trials = max(
-            1, budget + (n_rounds - 1) * SC.OPTUNA_N_TRIALS_JOINT_REFINE)
+            1, budget + (n_rounds - 1) * SC.N_TRIALS_REFINE)
 
         # Connect to MechVision (handled failure, not a crash).
         try:
@@ -691,7 +727,7 @@ class TuningStage(BaseStage):
         ws  = analyze_mesh(pcd)
         cache = EvalCache(self._cache_path(), enabled=ENABLE_CACHE)
 
-        self._optimizer = OptunaOptimizer(
+        self._optimizer = Tuner(
             part_name      = part,
             client         = client,
             project_id     = project_id,
@@ -699,12 +735,12 @@ class TuningStage(BaseStage):
             warm_start     = ws,
             cache          = cache,
             dry_run        = False,
-            n_trials_joint = budget,
+            n_trials = budget,
             n_rounds       = n_rounds,
             storage_path   = os.path.join(RESULTS_DIR, ""),
             sampler        = self.sampler,
         )
-        self._optimizer.opt.on_scene_eval = self._on_scene_eval
+        self._optimizer.on_scene_eval = self._on_scene_eval
         self._optimizer.on_trial_complete = self._on_trial_complete
 
         self._launch_dashboard()
@@ -721,7 +757,7 @@ class TuningStage(BaseStage):
         if result is not None:
             try:
                 out = self._optimizer.export_best(result, prefix=f"{self.sampler.upper()}_")
-                print(f"[TUNING] Best config exported → {out}")
+                print(f"[TUNING] Best config exported -> {out}")
             except Exception as e:
                 print(f"[TUNING] export_best failed: {e}")
 
@@ -760,7 +796,7 @@ class TuningStage(BaseStage):
             self.app._clear_scene()
             for name, geom, rgb in geoms:
                 self.app.scene.scene.add_geometry(name, geom, self._point_material(rgb))
-            self.app.scene.force_redraw()
+            self.app.redraw()
             self._update_pending = False
         self.app.main_thread(apply)
 
@@ -812,12 +848,12 @@ class TuningStage(BaseStage):
             return
         _, coarse, fine = self._pareto[idx]
         scene_dir = os.path.join(self._part_dir(), scene_name)
-        plys = self._scene_sample_plys(scene_dir)
+        plys = list_sample_plys(scene_dir)
         if not plys:
             print(f"[TUNING] No sample_*.ply in {scene_dir}.")
             return
 
-        ev = self._optimizer.opt
+        ev = self._optimizer
         _, gt_poses = ev._prepare_scene(plys)   # (scene_dir, gt_poses), cached
         res = ev._run_one_scene(coarse, fine, scene_dir, gt_poses,
                                 SC.POS_THRESH_TIGHT, SC.ANG_THRESH_TIGHT)  # fires _on_scene_eval
@@ -852,7 +888,7 @@ class TuningStage(BaseStage):
         db = self._db_path()
         exe = self._dashboard_exe()
         if not db or exe is None:
-            print("[TUNING] optuna-dashboard executable not found — skipping dashboard.")
+            print("[TUNING] optuna-dashboard executable not found -- skipping dashboard.")
             return
         try:
             self._dash_proc = subprocess.Popen(
@@ -865,7 +901,7 @@ class TuningStage(BaseStage):
             if not self._atexit_hooked:
                 atexit.register(self._teardown_runtime)
                 self._atexit_hooked = True
-            print(f"[TUNING] optuna-dashboard → {DASH_URL}  (db={db})")
+            print(f"[TUNING] optuna-dashboard -> {DASH_URL}  (db={db})")
         except Exception as e:
             print(f"[TUNING] failed to launch dashboard: {e}")
             self._dash_proc = None

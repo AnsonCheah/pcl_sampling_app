@@ -165,13 +165,13 @@ def main():
 
     d_floor = rows["solved_bin"]["floor_frac"] - rows["max_bin"]["floor_frac"]
     if d_floor > 0.15:
-        rp("[yellow]Solved bin has materially MORE floor-resting parts — stacking depth was "
+        rp("[yellow]Solved bin has materially MORE floor-resting parts - stacking depth was "
            "lost. Raise the fill rate, or LAYERS_AT_FULL_FILL.[/yellow]")
     elif rows["solved_bin"]["wall_frac"] - rows["max_bin"]["wall_frac"] > 0.20:
-        rp("[yellow]Solved bin has materially MORE wall-contacting parts — the footprint is "
+        rp("[yellow]Solved bin has materially MORE wall-contacting parts - the footprint is "
            "cramped. Raise MIN_PARTS_PER_LAYER.[/yellow]")
     else:
-        rp("[green]Distributions comparable — the smaller bin is a valid substitute.[/green]")
+        rp("[green]Distributions comparable - the smaller bin is a valid substitute.[/green]")
 
     if args.save:
         with open(args.save, "w") as f:

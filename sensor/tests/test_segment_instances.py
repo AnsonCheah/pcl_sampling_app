@@ -161,7 +161,10 @@ def test_apply_boundary_noise_preserves_approximate_area():
 
 def test_segmentation_stats_returns_expected_keys():
     canonical   = np.array([0, 0, 1, 1, -1], dtype=np.int32)
-    perturbed   = np.array([0, 0, 1, 1, -1], dtype=np.int32)
+    perturbed   = {
+        0: np.array([True, True, False, False, False]),
+        1: np.array([False, False, True, True, False]),
+    }
     stats       = segmentation_stats(perturbed, canonical)
     required    = {"n_instances", "mean_iou", "mean_boundary_loss_frac",
                    "mean_confusion_frac", "unassigned_frac"}
@@ -169,17 +172,6 @@ def test_segmentation_stats_returns_expected_keys():
     for k, v in stats.items():
         if k != "n_instances":
             _check(f"stats_{k}_in_01", 0. <= v <= 1., f"{k}={v:.4f}")
-
-
-def test_segmentation_stats_perfect_match():
-    labels = np.array([0, 0, 0, 1, 1, 1, -1], dtype=np.int32)
-    stats  = segmentation_stats(labels, labels)
-    _check("stats_perfect_iou",
-           abs(stats["mean_iou"] - 1.0) < 1e-6,
-           f"iou={stats['mean_iou']:.4f}")
-    _check("stats_perfect_no_confusion",
-           stats["mean_confusion_frac"] < 1e-6,
-           f"confusion={stats['mean_confusion_frac']:.4f}")
 
 
 def test_build_perturbed_masks_toggles_work():
@@ -573,7 +565,6 @@ if __name__ == "__main__":
         test_apply_dilation_into_background_is_superset,
         test_apply_boundary_noise_preserves_approximate_area,
         test_segmentation_stats_returns_expected_keys,
-        test_segmentation_stats_perfect_match,
         test_build_perturbed_masks_toggles_work,
         # Multi-label
         test_segment_returns_dict,

@@ -284,17 +284,6 @@ def _boundary_map(mask, ndi, xp, width: int = 1):
     return mask & ~ndi.binary_erosion(mask, structure=struct)
 
 
-def _dist_to_boundary(mask: np.ndarray) -> np.ndarray:
-    """
-    (H, W) float32 — Euclidean distance (pixels) from each True pixel in `mask`
-    to the nearest boundary pixel of that mask. Pixels outside the mask return 0.
-    (Retained for callers/tests; uses NumPy/SciPy.)
-    """
-    interior = _scipy_ndi.binary_erosion(mask, np.ones((3, 3)))
-    dist = _scipy_ndi.distance_transform_edt(interior).astype(np.float32)
-    return np.where(mask, dist, 0.0)
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 #  SECTION 3 — Five error models (operate on a single instance's crop array)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -699,9 +688,8 @@ def build_perturbed_masks(
     from scene_render, producing masks that replicate the boundary behaviour
     of a real 2D instance segmentation network.
 
-    Internally each instance is processed on its padded bounding-box crop (and on
-    the GPU when available); the returned masks are re-expanded to full (H, W)
-    NumPy arrays for backward compatibility.
+    Each instance is processed on its padded bounding-box crop (on the GPU when
+    available); the returned masks are full (H, W) NumPy arrays.
 
     Parameters
     ----------
@@ -839,7 +827,7 @@ def segment_point_cloud(
 
 
 def segmentation_stats(
-    labels_perturbed: "dict[int, np.ndarray] | np.ndarray",
+    labels_perturbed: "dict[int, np.ndarray]",
     labels_canonical: np.ndarray,
 ) -> dict:
     """
@@ -850,10 +838,9 @@ def segmentation_stats(
 
     Parameters
     ----------
-    labels_perturbed : dict[int, (N,) bool] or (N,) int32
-        Perturbed segmentation.  Dict format ``{geom_id: bool_mask}`` as
-        returned by ``segment_point_cloud()``.  Int32 flat-label array is
-        accepted for backward compatibility.
+    labels_perturbed : dict[int, (N,) bool]
+        Perturbed segmentation, ``{geom_id: bool_mask}`` as returned by
+        ``segment_point_cloud()``.
     labels_canonical : (N,) int32
         Canonical geom_id labels (ground truth).
 
@@ -872,46 +859,27 @@ def segmentation_stats(
 
     ious, bl_fracs, conf_fracs = [], [], []
 
-    if isinstance(labels_perturbed, dict):
-        N = len(labels_canonical)
-        any_assigned = np.zeros(N, bool)
-        for mask in labels_perturbed.values():
-            any_assigned |= mask
+    N = len(labels_canonical)
+    any_assigned = np.zeros(N, bool)
+    for mask in labels_perturbed.values():
+        any_assigned |= mask
 
-        for g in inst_ids:
-            canon = labels_canonical == g
-            pert  = labels_perturbed.get(g, np.zeros(N, bool))
+    for g in inst_ids:
+        canon = labels_canonical == g
+        pert  = labels_perturbed.get(g, np.zeros(N, bool))
 
-            inter = (canon & pert).sum()
-            union = (canon | pert).sum()
-            ious.append(inter / (union + 1e-12))
+        inter = (canon & pert).sum()
+        union = (canon | pert).sum()
+        ious.append(inter / (union + 1e-12))
 
-            bl = (canon & ~any_assigned).sum()
-            bl_fracs.append(bl / (canon.sum() + 1e-12))
+        bl = (canon & ~any_assigned).sum()
+        bl_fracs.append(bl / (canon.sum() + 1e-12))
 
-            conf = (canon & ~pert & any_assigned).sum()
-            conf_fracs.append(conf / (canon.sum() + 1e-12))
+        conf = (canon & ~pert & any_assigned).sum()
+        conf_fracs.append(conf / (canon.sum() + 1e-12))
 
-        unassigned_frac = ((labels_canonical >= 0) & ~any_assigned).sum() / \
-                          ((labels_canonical >= 0).sum() + 1e-12)
-    else:
-        for g in inst_ids:
-            canon = labels_canonical == g
-            pert  = labels_perturbed  == g
-
-            inter = (canon & pert).sum()
-            union = (canon | pert).sum()
-            ious.append(inter / (union + 1e-12))
-
-            bl = (canon & (labels_perturbed == -1)).sum()
-            bl_fracs.append(bl / (canon.sum() + 1e-12))
-
-            conf = (canon & (labels_perturbed >= 0) & ~pert).sum()
-            conf_fracs.append(conf / (canon.sum() + 1e-12))
-
-        unassigned_frac = ((labels_canonical >= 0) & (labels_perturbed == -1)).sum() / \
-                          ((labels_canonical >= 0).sum() + 1e-12)
-
+    unassigned_frac = ((labels_canonical >= 0) & ~any_assigned).sum() / \
+                      ((labels_canonical >= 0).sum() + 1e-12)
     return {
         "n_instances":             len(inst_ids),
         "mean_iou":                float(np.mean(ious)),

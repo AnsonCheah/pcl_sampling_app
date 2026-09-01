@@ -16,15 +16,18 @@ The pipeline is designed to scale to thousands of part geometries without any pe
 The codebase is split into domain packages with a strict one-way dependency graph:
 
 ```
-geometry/          ← base layer (no local imports)
+geometry/                       base layer (no local imports)
     ↑
-sensor/            ← geometry only
-physics/           ← geometry only
-registration/      ← no local imports (standalone)
+sensor/  physics/               geometry only
     ↑
-stages/            ← geometry, sensor, physics
+stages/                         geometry, sensor, physics, MM_Optimizer
     ↑
-app.py             ← stages only
+app.py                          stages only
+
+MM_Optimizer/                   geometry; drives MechVision via the mm_adapter package
+registration/ppf/ + _shared/    no local imports at all — copyable out as a pair
+registration/ppf_saliency/      geometry + registration.ppf + _shared
+bench/                          top tier; may import everything
 ```
 
 Domain logic lives in its domain package. `stages/` orchestrates but does not implement physics or sensor math.
@@ -35,10 +38,17 @@ Domain logic lives in its domain package. `stages/` orchestrates but does not im
 
 ```bash
 conda env create -f environment.yaml
-conda activate pcd-sampling
+conda activate autotune
 ```
 
-Python interpreter: `C:\Users\Hmgics\AppData\Local\anaconda3\envs\pcd-sampling\python.exe`
+Every command below then runs as plain `python`, on any platform. If you invoke the
+interpreter directly instead of activating, point an environment variable at it rather than
+hardcoding the path — the location is install- and OS-specific:
+
+```bash
+export PCL_PY="$LOCALAPPDATA/anaconda3/envs/autotune/python.exe"   # Git Bash on Windows
+export PCL_PY="$HOME/miniconda3/envs/autotune/bin/python"          # Linux / macOS
+```
 
 ### GUI
 
@@ -74,18 +84,21 @@ app.stages[Stage.SCENE]._run_worker()     # build + settle physical scene
 app.stages[Stage.RENDER]._run_worker()    # sensor sim + segmentation -> synthetic targets
 ```
 
-See [headless_app_example.py](headless_app_example.py) for a runnable example.
-
 ## Pipeline stages
+
+The nine stages of `enums.Stage`, in pipeline order:
 
 | # | Stage | Output |
 |---|-------|--------|
-| 1 | **Import Mesh** | Loaded STL + convex decomposition |
+| 1 | **Import Mesh** | Loaded STL, unit-normalised and repaired |
 | 2 | **Raycast** | Multi-view canonical point cloud |
-| 3 | **Crop** | Outlier-free point cloud |
-| 4 | **Downsample** | Uniform or adaptive voxel-downsampled cloud |
-| 5 | **Save** | PLY with ground-truth pose metadata in comments |
-| 6 | **Synthetic** | MuJoCo bin sim + structured-light noise → labelled scene PLY |
+| 3 | **Crop** | Outlier-free point cloud (GUI only) |
+| 4 | **Downsample** | Uniform or adaptive voxel-downsampled cloud + ambiguity profile |
+| 5 | **Save** | PLY with geocenter and ground-truth pose metadata in comments |
+| 6 | **Decompose** | Convex decomposition (VHACD) for physics collision |
+| 7 | **Scene** | MuJoCo bin arrangement, settled under gravity |
+| 8 | **Render** | Structured-light sensor sim + segmentation → labelled scene PLY/NPZ |
+| 9 | **Tuning** | Optuna search over MechVision parameters against the synthetic GT |
 
 ## Key contracts
 
@@ -109,11 +122,13 @@ See [headless_app_example.py](headless_app_example.py) for a runnable example.
 
 | Package | Description |
 |---------|-------------|
-| [geometry/](geometry/) | 3D math, file I/O, `O3DSceneObject` dataclass |
+| [geometry/](geometry/) | 3D math, file I/O, ambiguity analysis, `O3DSceneObject` |
 | [sensor/](sensor/) | Structured-light depth sensor simulation and noise chain |
-| [physics/](physics/) | MuJoCo rigid-body bin simulation |
-| [registration/](registration/) | Geometry-derived pose estimation parameter auto-tuning |
+| [physics/](physics/) | MuJoCo rigid-body bin simulation (piles, partitions, trays) |
+| [registration/](registration/) | From-scratch PPF pose matcher, plus a weighted-voting variant |
+| [MM_Optimizer/](MM_Optimizer/) | Optuna tuner for MechVision pose-estimation parameters |
 | [stages/](stages/) | GUI panels and pipeline orchestration |
+| [bench/](bench/) | Batch scene generation, dataset fetch, ambiguity validation |
 
 ## Dependencies
 
@@ -122,5 +137,5 @@ Key libraries (see [environment.yaml](environment.yaml) for full pinned versions
 - `open3d` — geometry, raycasting, GUI
 - `mujoco` — rigid-body physics simulation
 - `trimesh` + `vhacdx` — mesh loading and convex decomposition
-- `optuna` — parameter optimisation
+- `optuna` — MechVision parameter tuning (`gp` sampler needs `torch`)
 - `numpy`, `scipy`, `scikit-learn` — numerical utilities

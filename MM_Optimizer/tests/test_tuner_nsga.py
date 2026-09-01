@@ -1,21 +1,21 @@
 """
-test_nsga_optimizer.py — Tests for the NSGA-II migration in OptunaOptimizer
-----------------------------------------------------------------------------
+test_tuner_nsga.py — the NSGA-II arm of Tuner and the referredStep constraint
+------------------------------------------------------------------------------
 Run from project root:
-    python MM_Optimizer/tests/test_nsga_optimizer.py [--live]
+    python -m pytest MM_Optimizer/tests/test_tuner_nsga.py -q
+    python MM_Optimizer/tests/test_tuner_nsga.py [--live]
+
+Kept separate from test_tuner.py: these pin the NSGA-II sampler arm and the
+constraint machinery, where test_tuner.py covers the default (gp) arm. The
+apparent overlap in Pareto / dry-run / multi-round tests is per-sampler
+coverage, not duplication.
 
 Unit tests (no MechVision, no disk files):
-  test_suggest_params_fixed_referredstep_bounds  — referredStep sampled from full [1,20] range
-  test_constraint_func_feasible                  — _referredstep_constraint returns 0 when ok
-  test_constraint_func_violated                  — _referredstep_constraint returns >0 when violated
+  test_suggest_params_fixed_referredstep_bounds  — referredStep spans the full [1,20]
+  test_constraint_func_feasible / _violated      — _referredstep_constraint sign
   test_constraint_guard_returns_worst_case       — guard fires, no MV call, sentinel returned
-  test_build_warm_joint_clamps_referredstep      — warm-start builder clamps referredStep ≤ refStep
-  test_pareto_winner_nsga                        — Pareto winner: max cov then min time
-
-Dry-run integration tests (scene files required, no MechVision):
-  test_dry_run_nsga_study                — NSGA-II study runs, n_evals=0, result not None
-  test_nsga_no_blowup_trials             — all violated suggestions caught by guard, not MechVision
-  test_multi_round_nsga                  — 2-round study with early-stop on negligible improvement
+  test_build_warm_clamps_referredstep            — warm start clamps referredStep <= refStep
+  test_pareto_winner_nsga                        — max coverage, then min time
 """
 
 import logging
@@ -32,12 +32,11 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 warnings.filterwarnings("ignore", category=optuna.exceptions.ExperimentalWarning)
 
 from MM_Optimizer.mesh_analysis    import analyze_mesh, load_reference_pcd
-from MM_Optimizer.mv_evaluator     import MM_MODEL_ROOT
 from MM_Optimizer.optimizer_utils  import list_synthetic_scenes
-from MM_Optimizer.optuna_optimizer import (
-    OptunaOptimizer,
-    suggest_params_joint,
-    _build_warm_joint,
+from MM_Optimizer.tuner import (
+    Tuner,
+    suggest_params,
+    _build_warm,
     _select_pareto_winner,
     _referredstep_constraint,
 )
@@ -49,7 +48,11 @@ log = logging.getLogger(__name__)
 
 PART       = "25333MB000"
 SCENES_DIR = os.path.join(_ROOT, "output", "synthetic_target", PART)
-MODEL_PATH = os.path.join(MM_MODEL_ROOT, f"{PART}_surface", f"{PART}_surface.ply")
+# Warm-start cloud comes from the app's own bundle, exactly as tuning_stage/tuner do.
+# NOT from the deployed MechVision library: model_sync writes <part>/<part>.ply there,
+# and it is rewritten per regime.
+MODEL_PATH = os.path.join(_ROOT, "output", "reference_pcd", PART,
+                          f"{PART}_surface", f"{PART}_surface.ply")
 
 _PAIRS        = [1250, 2500, 5000, 10000, 20000]
 _VOXEL_BOUNDS = (0.14, 4.2, 0.28, 16.8)   # (min_lo, min_hi, width_lo, width_hi)
@@ -67,11 +70,11 @@ def _make_study_multi():
     )
 
 
-def _ask_joint(regime, study=None):
+def _ask(regime, study=None):
     if study is None:
         study = _make_study_multi()
     trial = study.ask()
-    p = suggest_params_joint(trial, regime, _PAIRS, _VOXEL_BOUNDS)
+    p = suggest_params(trial, regime, _PAIRS, _VOXEL_BOUNDS)
     return p, trial, study
 
 
@@ -105,7 +108,7 @@ def test_suggest_params_fixed_referredstep_bounds():
     found_violation = False
 
     for _ in range(100):
-        p, trial, _ = _ask_joint(_REGIME_A, study)
+        p, trial, _ = _ask(_REGIME_A, study)
         study.tell(trial, [0.5, 1.0])
 
         assert lo <= p["refStep"]      <= hi, f"refStep={p['refStep']} out of [{lo},{hi}]"
@@ -137,7 +140,7 @@ def test_constraint_func_feasible():
 def test_constraint_func_violated():
     """_referredstep_constraint returns [violation > 0] when constraint_violation is set."""
     trial = _make_frozen_trial(
-        values=[0.0, SC.OPTUNA_TIME_INITIAL_CAP],   # worst-case for maximize coverage
+        values=[0.0, SC.TIME_INITIAL_CAP],   # worst-case for maximize coverage
         user_attrs={"constraint_violation": 4.0},   # referredStep=9, refStep=5 → 9-5=4
     )
     result = _referredstep_constraint(trial)
@@ -147,8 +150,8 @@ def test_constraint_func_violated():
 
 
 def test_constraint_guard_returns_worst_case():
-    """When referredStep > refStep, _objective_joint returns the worst-case sentinel
-    (1.0, OPTUNA_TIME_INITIAL_CAP) without calling MechVision, and sets constraint_violation."""
+    """When referredStep > refStep, _objective returns the worst-case sentinel
+    (1.0, TIME_INITIAL_CAP) without calling MechVision, and sets constraint_violation."""
     if not os.path.exists(MODEL_PATH):
         log.warning(f"SKIP test_constraint_guard_returns_worst_case — model not found")
         return
@@ -160,20 +163,20 @@ def test_constraint_guard_returns_worst_case():
     orig_full = SC.M_FULL
     SC.M_FULL = 2
     try:
-        opt = OptunaOptimizer(
+        opt = Tuner(
             part_name=PART, client=None, project_id=-1,
             scene_groups=groups, warm_start=ws, dry_run=True,
-            n_trials_joint=3, n_rounds=1, seed=0,
+            n_trials=3, n_rounds=1, seed=0,
         )
         best_regime = {"id": "A", "coarse_mode": 0.0, "fine_mode": 0.0,
                        "needs_edge": False, "coverage": 1.0,
-                       "coarse": opt.opt._default_coarse(),
-                       "fine":   opt.opt._default_fine()}
+                       "coarse": opt._default_coarse(),
+                       "fine":   opt._default_fine()}
 
         study = _make_study_multi()
         trial = study.ask()
 
-        # Craft a suggest_params_joint output where referredStep > refStep
+        # Craft a suggest_params output where referredStep > refStep
         from unittest.mock import patch
 
         violating_p = {
@@ -200,17 +203,17 @@ def test_constraint_guard_returns_worst_case():
         }
 
         mv_calls = [0]
-        original_eval = opt.opt.evaluate_config
+        original_eval = opt.evaluate_config
         def counting_eval(*a, **kw):
             mv_calls[0] += 1
             return original_eval(*a, **kw)
 
-        with patch.object(opt.opt, "evaluate_config", side_effect=counting_eval), \
-             patch("MM_Optimizer.optuna_optimizer.suggest_params_joint",
+        with patch.object(opt, "evaluate_config", side_effect=counting_eval), \
+             patch("MM_Optimizer.tuner.suggest_params",
                    return_value=violating_p):
-            ret = opt._objective_joint(trial, best_regime)
+            ret = opt._objective(trial, best_regime)
 
-        assert ret == (0.0, SC.OPTUNA_TIME_INITIAL_CAP), \
+        assert ret == (0.0, SC.TIME_INITIAL_CAP), \
             f"Expected worst-case sentinel, got {ret}"
         assert mv_calls[0] == 0, \
             f"MechVision must NOT be called for violating referredStep, got {mv_calls[0]}"
@@ -223,8 +226,8 @@ def test_constraint_guard_returns_worst_case():
     log.info("PASS: test_constraint_guard_returns_worst_case")
 
 
-def test_build_warm_joint_clamps_referredstep():
-    """_build_warm_joint still clamps referredStep ≤ refStep so warm-start is always feasible."""
+def test_build_warm_clamps_referredstep():
+    """_build_warm still clamps referredStep ≤ refStep so warm-start is always feasible."""
     coarse = {
         "refStep": 5, "distQuantification": 1.0, "angleQuantification": 90,
         "maxNumOfPointPairsPerFeature": 5000, "maxVoteRatio": 0.5,
@@ -237,15 +240,15 @@ def test_build_warm_joint_clamps_referredstep():
         "onlyConsiderVisibleSurfaceOfModel": False,
         "considerErrorofNormalAngles": False,
     }
-    p = _build_warm_joint(coarse, fine, _REGIME_A, _PAIRS, _VOXEL_BOUNDS)
+    p = _build_warm(coarse, fine, _REGIME_A, _PAIRS, _VOXEL_BOUNDS)
 
     assert p["referredStep"] <= p["refStep"], (
-        f"_build_warm_joint must clamp referredStep ≤ refStep, "
+        f"_build_warm must clamp referredStep ≤ refStep, "
         f"got referredStep={p['referredStep']} refStep={p['refStep']}"
     )
     assert p["referredStep"] == 5, \
         f"After clamping min(12, 5)=5, got referredStep={p['referredStep']}"
-    log.info("PASS: test_build_warm_joint_clamps_referredstep")
+    log.info("PASS: test_build_warm_clamps_referredstep")
 
 
 def test_pareto_winner_nsga():
@@ -285,11 +288,10 @@ def test_dry_run_nsga_study():
     pcd = load_reference_pcd(MODEL_PATH)
     ws  = analyze_mesh(pcd)
 
-    orig_full, orig_small = SC.M_FULL, SC.M_SMALL
-    SC.M_FULL  = 3
-    SC.M_SMALL = 2
+    orig_full = SC.M_FULL
+    SC.M_FULL = 3
     try:
-        opt = OptunaOptimizer(
+        opt = Tuner(
             part_name      = PART,
             client         = None,
             project_id     = -1,
@@ -297,7 +299,7 @@ def test_dry_run_nsga_study():
             warm_start     = ws,
             cache          = None,
             dry_run        = True,
-            n_trials_joint = SC.OPTUNA_NSGA_POPULATION_SIZE + 5,
+            n_trials = SC.NSGA_POPULATION_SIZE + 5,
             n_rounds       = 1,
             seed           = 0,
             storage_path   = None,
@@ -307,7 +309,7 @@ def test_dry_run_nsga_study():
         assert result is not None,    "Dry run must return an EvalResult"
         assert result.coverage >= 0.0
         assert result.mean_time >= 0.0
-        assert opt.opt._n_evals == 0, f"dry_run must have 0 MV evals, got {opt.opt._n_evals}"
+        assert opt._n_evals == 0, f"dry_run must have 0 MV evals, got {opt._n_evals}"
         assert opt._study is not None, "_study must be set after run()"
 
         n_complete = sum(1 for t in opt._study.trials
@@ -318,8 +320,7 @@ def test_dry_run_nsga_study():
                  f"time={result.mean_time:.3f}s")
         log.info("PASS: test_dry_run_nsga_study")
     finally:
-        SC.M_FULL  = orig_full
-        SC.M_SMALL = orig_small
+        SC.M_FULL = orig_full
         opt.cleanup()
 
 
@@ -337,11 +338,10 @@ def test_nsga_no_blowup_trials():
     pcd = load_reference_pcd(MODEL_PATH)
     ws  = analyze_mesh(pcd)
 
-    orig_full, orig_small = SC.M_FULL, SC.M_SMALL
-    SC.M_FULL  = 2
-    SC.M_SMALL = 1
+    orig_full = SC.M_FULL
+    SC.M_FULL = 2
     try:
-        opt = OptunaOptimizer(
+        opt = Tuner(
             part_name      = PART,
             client         = None,
             project_id     = -1,
@@ -349,7 +349,7 @@ def test_nsga_no_blowup_trials():
             warm_start     = ws,
             cache          = None,
             dry_run        = True,
-            n_trials_joint = 40,
+            n_trials = 40,
             n_rounds       = 1,
             seed           = 1,
             storage_path   = None,
@@ -368,9 +368,9 @@ def test_nsga_no_blowup_trials():
                 continue
             if rref > rs:
                 # Guard must have intercepted: sentinel values + violation attr
-                assert t.values == [0.0, SC.OPTUNA_TIME_INITIAL_CAP], (
+                assert t.values == [0.0, SC.TIME_INITIAL_CAP], (
                     f"Trial {t.number}: referredStep={rref} > refStep={rs} "
-                    f"but values={t.values} — expected sentinel (0.0, {SC.OPTUNA_TIME_INITIAL_CAP})"
+                    f"but values={t.values} — expected sentinel (0.0, {SC.TIME_INITIAL_CAP})"
                 )
                 assert "constraint_violation" in t.user_attrs, (
                     f"Trial {t.number}: referredStep > refStep but no constraint_violation attr"
@@ -379,8 +379,7 @@ def test_nsga_no_blowup_trials():
         log.info(f"  no-blowup check: {n_total} trials verified")
         log.info("PASS: test_nsga_no_blowup_trials")
     finally:
-        SC.M_FULL  = orig_full
-        SC.M_SMALL = orig_small
+        SC.M_FULL = orig_full
         opt.cleanup()
 
 
@@ -397,13 +396,12 @@ def test_multi_round_nsga():
     pcd = load_reference_pcd(MODEL_PATH)
     ws  = analyze_mesh(pcd)
 
-    orig_full, orig_small = SC.M_FULL, SC.M_SMALL
-    orig_refine = SC.OPTUNA_N_TRIALS_JOINT_REFINE
-    SC.M_FULL  = 2
-    SC.M_SMALL = 1
-    SC.OPTUNA_N_TRIALS_JOINT_REFINE = 5
+    orig_full = SC.M_FULL
+    orig_refine = SC.N_TRIALS_REFINE
+    SC.M_FULL = 2
+    SC.N_TRIALS_REFINE = 5
     try:
-        opt = OptunaOptimizer(
+        opt = Tuner(
             part_name      = PART,
             client         = None,
             project_id     = -1,
@@ -411,7 +409,7 @@ def test_multi_round_nsga():
             warm_start     = ws,
             cache          = None,
             dry_run        = True,
-            n_trials_joint = 20,
+            n_trials = 20,
             n_rounds       = 2,
             seed           = 0,
             storage_path   = None,
@@ -427,9 +425,8 @@ def test_multi_round_nsga():
         log.info(f"  multi-round NSGA-II: complete={n_complete}  cov={result.coverage:.2f}")
         log.info("PASS: test_multi_round_nsga")
     finally:
-        SC.M_FULL  = orig_full
-        SC.M_SMALL = orig_small
-        SC.OPTUNA_N_TRIALS_JOINT_REFINE = orig_refine
+        SC.M_FULL = orig_full
+        SC.N_TRIALS_REFINE = orig_refine
         opt.cleanup()
 
 
@@ -444,14 +441,14 @@ if __name__ == "__main__":
                    help="Run live MechVision tests (not yet implemented)")
     args = p.parse_args()
 
-    print("test_nsga_optimizer.py — NSGA-II migration tests\n")
+    print("test_tuner_nsga.py - NSGA-II sampler arm\n")
 
     print("--- Unit tests ---")
     test_suggest_params_fixed_referredstep_bounds()
     test_constraint_func_feasible()
     test_constraint_func_violated()
     test_constraint_guard_returns_worst_case()
-    test_build_warm_joint_clamps_referredstep()
+    test_build_warm_clamps_referredstep()
     test_pareto_winner_nsga()
 
     print("\n--- Dry-run integration tests ---")
