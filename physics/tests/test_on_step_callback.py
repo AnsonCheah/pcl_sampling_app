@@ -4,7 +4,7 @@ Tests for the simulate() on_step callback that drives the live GUI mesh preview.
 The callback runs inside simulate()'s stepping loop (the worker thread), so these tests
 verify two contracts the GUI preview relies on:
   1. on_step is invoked during stepping (at least once, roughly total_steps/preview_tick).
-  2. An on_step that raises does NOT abort the sim — physics still runs to completion and
+  2. An on_step that raises does NOT abort the sim -- physics still runs to completion and
      settles. This is what insulates the physics from a GUI hiccup.
 
 Run (in the `autotune` env):

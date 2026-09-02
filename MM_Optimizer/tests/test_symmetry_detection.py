@@ -35,7 +35,7 @@ def pcd_from_mesh(mesh: o3d.geometry.TriangleMesh, n: int = 5000) -> o3d.geometr
 def small_tab_plate() -> o3d.geometry.TriangleMesh:
     """500x70x20mm flat plate with a 20x20x10mm tab on the +X end only.
     The tab covers ~1.7% of the surface. After rotation, the ~85 tab points
-    land 5-10mm outside the plate surface — mean Chamfer contribution just
+    land 5-10mm outside the plate surface -- mean Chamfer contribution just
     above the ~2mm sampling noise baseline. In a bin-picking scene this small
     feature is frequently occluded, so enabling rotation search is correct.
     """
@@ -57,7 +57,7 @@ def asymmetric_step() -> o3d.geometry.TriangleMesh:
 
 
 def hex_bolt_head() -> o3d.geometry.TriangleMesh:
-    """Hex prism — 6-fold rotational symmetry about Z."""
+    """Hex prism -- 6-fold rotational symmetry about Z."""
     import math
     r, h = 0.05, 0.02
     top_z, bot_z = h, 0.0
@@ -82,7 +82,7 @@ def hex_bolt_head() -> o3d.geometry.TriangleMesh:
 
 
 def triangular_prism() -> o3d.geometry.TriangleMesh:
-    """Equilateral triangular prism — 3-fold symmetry about the long Z axis."""
+    """Equilateral triangular prism -- 3-fold symmetry about the long Z axis."""
     import math
     r, h = 0.05, 0.15
     verts = []
@@ -110,7 +110,7 @@ def shaft_with_symmetric_bar() -> o3d.geometry.TriangleMesh:
     The bar is centred on Z and aligned with X, giving 2-fold (C2) symmetry:
     a 180-degree Z rotation maps the assembly to itself.
 
-    90-degree rotation maps X-bar to Y-bar — clearly different — so this is C2, NOT SO2.
+    90-degree rotation maps X-bar to Y-bar -- clearly different -- so this is C2, NOT SO2.
 
     Thin shaft (small surface area ~6.5 cm2) ensures the bar (surface ~8.6 cm2)
     dominates the point cloud, so the Chamfer test is not diluted by the

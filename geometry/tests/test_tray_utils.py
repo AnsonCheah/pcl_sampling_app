@@ -1,4 +1,4 @@
-"""Tests for geometry/tray_utils.py — footprint silhouette + per-pocket tray tile.
+"""Tests for geometry/tray_utils.py -- footprint silhouette + per-pocket tray tile.
 
 Run:  python -m pytest geometry/tests/test_tray_utils.py
 """
@@ -73,14 +73,14 @@ def test_coalesce_merges_touching_lobes_without_dropping_area():
     p = MultiPolygon([box(0, 0, 1, 1), box(1.0, 0, 2, 1)])     # two edge-adjacent unit squares
     m = _coalesce(p)
     assert m.geom_type == "Polygon"
-    assert abs(m.area - 2.0) < 0.05                            # both lobes kept (old max() kept one → 1.0)
+    assert abs(m.area - 2.0) < 0.05                            # both lobes kept (old max() kept one -> 1.0)
 
 
 def test_build_tray_collision_frame_decomposed():
     poly = footprint_polygon(_lshape(), np.eye(3), clearance=0.0025)
     frame, pieces = build_tray_collision_frame(poly, pitch_xy=(0.075, 0.075), pocket_depth=0.014,
                                                base_z=0.004, max_convex_hulls=12, vhacd_resolution=200000)
-    # Frame is the wall ring at z in [base_z, base_z + pocket_depth] — no base under the pocket.
+    # Frame is the wall ring at z in [base_z, base_z + pocket_depth] -- no base under the pocket.
     assert frame.is_watertight
     assert abs(frame.bounds[0][2] - 0.004) < 1e-3
     assert abs(frame.bounds[1][2] - 0.018) < 1e-3

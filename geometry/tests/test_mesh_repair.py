@@ -82,7 +82,7 @@ def test_debris_removal_preserves_the_part_triangles():
 
 
 # --------------------------------------------------------------------------------------
-# Nested shells: the 96330MB100.STL shape — detached but inside the main AABB
+# Nested shells: the 96330MB100.STL shape -- detached but inside the main AABB
 # --------------------------------------------------------------------------------------
 
 def test_nested_inner_shell_is_kept():
@@ -134,7 +134,7 @@ def test_scattered_assembly_is_refused_not_cut():
 def test_triangle_cap_blocks_wholesale_deletion():
     """Even when detached bodies DO inflate the bbox, cutting more than the cap is refused.
     Here 200 specks are each individually negligible in area (so they pass the area+gap test)
-    but together make up 62% of the triangles — deleting them would gut the file."""
+    but together make up 62% of the triangles -- deleting them would gut the file."""
     main = _part((0.20, 0.20, 0.20))
     far = [_o3d_box((1e-4, 1e-4, 1e-4), translate=(1.0 + 0.01 * i, 0.0, 0.0))
            for i in range(200)]

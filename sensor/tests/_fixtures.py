@@ -1,11 +1,11 @@
 """
-_fixtures.py — Shared synthetic scene helpers for sensor/ unit tests.
+_fixtures.py -- Shared synthetic scene helpers for sensor/ unit tests.
 
 Builds minimal render dicts using real scene_render() so tests exercise the
 actual pipeline without requiring any file I/O or MuJoCo.
 
 Usage
-─────
+-----
     from sensor.tests._fixtures import make_render_dict, make_two_plane_render_dict
 
     render, keep = make_render_dict()              # single face-on plane
@@ -25,14 +25,14 @@ import open3d as o3d
 from geometry.geom_utils import O3DSceneObject, camera_view_matrix
 from sensor.scene_render import scene_render, compute_dropout_mask
 
-# ── Scene constants ────────────────────────────────────────────────────────────
-_H, _W   = 120, 160          # image resolution — small for speed
+# -- Scene constants ------------------------------------------------------------
+_H, _W   = 120, 160          # image resolution -- small for speed
 _FOV     = 41.11             # degrees, matches production pipeline
 _CAM_POS = np.array([0., 0., 0.])
-_LOOK_AT = np.array([0., 0., 1.5])   # plane centre, 1.5 m range (mid of 1–2 m robotics range)
+_LOOK_AT = np.array([0., 0., 1.5])   # plane centre, 1.5 m range (mid of 1-2 m robotics range)
 
 
-# ── Private mesh builder ───────────────────────────────────────────────────────
+# -- Private mesh builder -------------------------------------------------------
 
 def _plane_mesh(cx: float = 0., cy: float = 0., cz: float = 1.5,
                 w: float = 0.25, h: float = 0.25,
@@ -51,7 +51,7 @@ def _plane_mesh(cx: float = 0., cy: float = 0., cz: float = 1.5,
     return mesh
 
 
-# ── Public fixtures ────────────────────────────────────────────────────────────
+# -- Public fixtures ------------------------------------------------------------
 
 def make_render_dict(tilt_deg: float = 0., seed: int = 0):
     """
@@ -61,7 +61,7 @@ def make_render_dict(tilt_deg: float = 0., seed: int = 0):
     ----------
     tilt_deg : float
         X-axis tilt in degrees. 0 = face-on (normal points at camera).
-        45 = tilted away (specular lobe points off-camera → patch missing trigger).
+        45 = tilted away (specular lobe points off-camera -> patch missing trigger).
     seed : int
         Passed to compute_dropout_mask.
 
@@ -73,12 +73,12 @@ def make_render_dict(tilt_deg: float = 0., seed: int = 0):
     mesh  = _plane_mesh(tilt_deg=tilt_deg)
     T_cam = camera_view_matrix(_CAM_POS, _LOOK_AT)
     meshes = {"plane": O3DSceneObject(geom=mesh, T_gt=np.eye(4))}
-    # normal_radius=0.020 m: at 120×160 resolution the point spacing at 1.5 m is
+    # normal_radius=0.020 m: at 120x160 resolution the point spacing at 1.5 m is
     # ~6.7 mm, so the default 5 mm radius gives zero neighbours and wrong normals.
-    # 20 mm (~3× point spacing) produces correct PCA normals for tilted surfaces.
+    # 20 mm (~3x point spacing) produces correct PCA normals for tilted surfaces.
     render = scene_render(meshes, T_cam, _LOOK_AT, _FOV, _W, _H, normal_radius=0.020)
     assert render is not None, (
-        "Fixture plane not visible — check _CAM_POS / _LOOK_AT geometry."
+        "Fixture plane not visible -- check _CAM_POS / _LOOK_AT geometry."
     )
     keep = compute_dropout_mask(render, roughness=0.4, seed=seed)
     return render, keep
@@ -88,7 +88,7 @@ def make_two_plane_render_dict(seed: int = 0):
     """
     Two adjacent planes side-by-side in image space, with distinct geom_ids.
 
-    Plane L: centred at x = −0.10 m  (left half of image)
+    Plane L: centred at x = -0.10 m  (left half of image)
     Plane R: centred at x = +0.10 m  (right half of image)
 
     Their projected silhouettes touch at the image centre, providing a shared
@@ -96,7 +96,7 @@ def make_two_plane_render_dict(seed: int = 0):
 
     Returns
     -------
-    render : dict from scene_render() — geom_ids will be 0 (left) and 1 (right)
+    render : dict from scene_render() -- geom_ids will be 0 (left) and 1 (right)
     keep   : (N,) bool mask from compute_dropout_mask()
     """
     mesh_l = _plane_mesh(cx=-0.10, w=0.15)
@@ -108,7 +108,7 @@ def make_two_plane_render_dict(seed: int = 0):
     }
     render = scene_render(meshes, T_cam, _LOOK_AT, _FOV, _W, _H, normal_radius=0.020)
     assert render is not None, (
-        "Fixture planes not visible — check scene geometry."
+        "Fixture planes not visible -- check scene geometry."
     )
     keep = compute_dropout_mask(render, roughness=0.4, seed=seed)
     return render, keep
@@ -117,12 +117,12 @@ def make_two_plane_render_dict(seed: int = 0):
 def make_multi_instance_render_dict(layout: str = "grid", W: int = _W, H: int = _H,
                                     seed: int = 0):
     """
-    Several small planes with distinct geom_ids — for confusion bbox-pruning and
+    Several small planes with distinct geom_ids -- for confusion bbox-pruning and
     scaling tests.
 
-    layout : "grid" — 2×2 block of planes whose silhouettes sit close together so
+    layout : "grid" -- 2x2 block of planes whose silhouettes sit close together so
                        neighbouring pairs share a boundary zone (pruning keeps them).
-             "far"  — the same planes pushed apart so most pairs' padded bounding
+             "far"  -- the same planes pushed apart so most pairs' padded bounding
                        boxes do NOT overlap (pruning skips them). Pruned and
                        un-pruned confusion must give identical masks either way.
     W, H   : render resolution. Pixel separation between instances scales with
@@ -132,7 +132,7 @@ def make_multi_instance_render_dict(layout: str = "grid", W: int = _W, H: int = 
 
     Returns
     -------
-    render : dict from scene_render() — geom_ids 0..3
+    render : dict from scene_render() -- geom_ids 0..3
     keep   : (N,) bool mask from compute_dropout_mask()
     """
     spread = 0.06 if layout == "grid" else 0.16
@@ -145,6 +145,6 @@ def make_multi_instance_render_dict(layout: str = "grid", W: int = _W, H: int = 
         for i, (cx, cy) in enumerate(centres)
     }
     render = scene_render(meshes, T_cam, _LOOK_AT, _FOV, W, H, normal_radius=0.020)
-    assert render is not None, "Multi-instance fixture not visible — check geometry."
+    assert render is not None, "Multi-instance fixture not visible -- check geometry."
     keep = compute_dropout_mask(render, roughness=0.4, seed=seed)
     return render, keep

@@ -2,7 +2,7 @@
 
 Everything here is in **metres**, matching the rest of the pipeline. BOP ships its models in
 millimetres, so ``symmetry_transforms_from_bop`` rescales the translation part of every
-symmetry transform on the way in — a symmetry whose offset is expressed in mm applied to a
+symmetry transform on the way in -- a symmetry whose offset is expressed in mm applied to a
 model in metres is off by 1000x and silently turns a correct pose into a gross failure.
 
 Why not just compare rotations against a single ground-truth pose
@@ -10,13 +10,13 @@ Why not just compare rotations against a single ground-truth pose
     comparison fails ~75% of the time on a cuboid for reasons that say nothing about the
     matcher. The existing MechVision-side evaluator dodges this by switching angular scoring
     off entirely (``ANG_THRESH_REGIME_GATE = 360``), which is safe but cannot tell "correctly
-    oriented modulo symmetry" from "completely wrong" — and for bin picking the gripper
+    oriented modulo symmetry" from "completely wrong" -- and for bin picking the gripper
     approach vector is exactly what a wrong orientation ruins.
 
     So MSSD is the primary metric: it minimises surface distance over the symmetry group, so
     it is symmetry-aware by construction and needs no angular threshold at all. Measured on
     T-LESS obj_000001 (continuous symmetry about z): a 37 degree rotation about z scores
-    MSSD 0.13 mm — essentially free, correctly — while ADD charges 7.65 mm for it. About x,
+    MSSD 0.13 mm -- essentially free, correctly -- while ADD charges 7.65 mm for it. About x,
     which is not a symmetry, MSSD charges 20.9 mm.
 
 The distinction that matters most, and that BOP alone cannot make
@@ -24,7 +24,7 @@ The distinction that matters most, and that BOP alone cannot make
     symmetry: the part genuinely is not invariant, the returned pose is genuinely wrong, and
     it will fail at the gripper. Folding those into the quotient would hide precisely the
     failures this project exists to fix. They are instead counted as failures and *tagged*
-    against the ``geometry.ambiguity`` axis that predicted them — and that tagged count is a
+    against the ``geometry.ambiguity`` axis that predicted them -- and that tagged count is a
     headline result, because it measures whether the heat map is telling the truth.
 """
 
@@ -56,7 +56,7 @@ class PoseError:
     axis_err_deg: float = float("nan")   # deg between predicted and GT symmetry axis
     phase_err_deg: float = float("nan")  # deg about that axis, mod 360/fold; NaN if continuous
     ambiguity_tagged: bool = False   # a view-dependent axis explains this failure
-    diameter: float = 0.0            # m, of the model — for the BOP-relative gate
+    diameter: float = 0.0            # m, of the model -- for the BOP-relative gate
 
     def passes(self, gate=TIGHT) -> bool:
         """Recall gate on the *symmetry-aware* pair, not the raw one."""
@@ -70,7 +70,7 @@ class PoseError:
 
         ``TIGHT`` (2 mm / 5 deg) comes from ``MM_Optimizer/search_config.py``, where it is
         the target for MechVision's coarse **plus fine** pipeline. PPF alone is a coarse
-        stage — it returns the best pose on a quantised accumulator, with no refinement — so
+        stage -- it returns the best pose on a quantised accumulator, with no refinement -- so
         scoring it there judges it for missing a step it does not contain. Worse for the
         ablation, it compresses every arm toward zero and hides the differences between them:
         on T-LESS obj_000018 (111 mm diameter) the median MSSD was 15.4 mm, which is a
@@ -91,7 +91,7 @@ def symmetry_transforms_from_bop(model_info: dict, diameter_m: float,
                                  max_disc_step: float = 0.01) -> List[Dict[str, np.ndarray]]:
     """Global symmetry group from a BOP ``models_info.json`` entry, converted to metres.
 
-    Continuous symmetries are discretised the way BOP does it — finely enough that the
+    Continuous symmetries are discretised the way BOP does it -- finely enough that the
     furthest model vertex moves less than ``max_disc_step`` of the diameter between steps.
     """
     from bop_toolkit_lib import misc
@@ -151,7 +151,7 @@ def _axis_phase(R_est: np.ndarray, R_gt: np.ndarray, profile) -> tuple:
     degree flip (a C2 confusion) from an axis that is off by 30 degrees (a plain miss), and
     that difference is much of what the ablation is trying to measure.
 
-    Phase is ``NaN`` for a continuous axis, where it is genuinely meaningless — recorded as
+    Phase is ``NaN`` for a continuous axis, where it is genuinely meaningless -- recorded as
     NaN rather than zero so it cannot be averaged into a summary as if it were a measurement.
     """
     axes = [a for a in getattr(profile, "axes", []) if getattr(a, "is_global", False)] \
@@ -206,7 +206,7 @@ def _explained_by_view_ambiguity(R_est: np.ndarray, R_gt: np.ndarray, profile,
                                  tol_deg: float = 12.0) -> bool:
     """Is this failure a flip about a *view-dependent* ambiguity axis?
 
-    Answering yes does not excuse the pose — it is still counted as a failure. It records
+    Answering yes does not excuse the pose -- it is still counted as a failure. It records
     that the heat map predicted this specific way of being wrong, which is the cheapest
     available test of whether the ambiguity analysis is describing reality.
     """
@@ -234,7 +234,7 @@ def summarise(errors: Sequence[PoseError], n_expected: Optional[int] = None) -> 
     """Aggregate per-instance errors, with the confidence interval attached.
 
     The CI is not decoration. At 26 instances its half-width on a ~0.5 recall is +/- 19
-    points, which is wider than any arm difference measured so far — so a summary that
+    points, which is wider than any arm difference measured so far -- so a summary that
     reports recall without it invites reading noise as a result.
     """
     n = len(errors)

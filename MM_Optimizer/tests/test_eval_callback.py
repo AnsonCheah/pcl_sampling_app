@@ -1,16 +1,16 @@
 """
-test_eval_callback.py — guards the GUI-tuning hooks added to the optimizer
+test_eval_callback.py -- guards the GUI-tuning hooks added to the optimizer
 --------------------------------------------------------------------------
 Run from project root:
     python MM_Optimizer/tests/test_eval_callback.py
     python -m pytest MM_Optimizer/tests/test_eval_callback.py -q
 
 Covers the small, additive edits the TUNING GUI stage relies on:
-  test_on_scene_eval_default_none   — MVEvaluator.on_scene_eval defaults to None
-  test_on_scene_eval_fires          — the hook fires from _run_one_scene's live branch
+  test_on_scene_eval_default_none   -- MVEvaluator.on_scene_eval defaults to None
+  test_on_scene_eval_fires          -- the hook fires from _run_one_scene's live branch
                                       with the raw fine_poses + gt_poses
-  test_dry_run_skips_hook           — dry_run early-returns before the hook (documented)
-  test_iter_pareto_and_trial_hook   — (dry-run integration) iter_pareto_configs returns
+  test_dry_run_skips_hook           -- dry_run early-returns before the hook (documented)
+  test_iter_pareto_and_trial_hook   -- (dry-run integration) iter_pareto_configs returns
                                       expandable (coarse, fine); on_trial_complete fires
 """
 
@@ -56,7 +56,7 @@ class _StubClient:
 def _make_evaluator(poses, dry_run=False):
     ev = MVEvaluator(PART, _StubClient(poses), project_id=1,
                      scene_groups=[], warm_start=None, cache=None, dry_run=dry_run)
-    # Bypass the model-file param assembly — the hook is upstream of it.
+    # Bypass the model-file param assembly -- the hook is upstream of it.
     ev._make_params_dict = lambda c, f, s: {}
     return ev
 
@@ -100,11 +100,11 @@ def test_iter_pareto_and_trial_hook():
     """Dry-run integration: iter_pareto_configs expands (coarse, fine) and the
     on_trial_complete callback fires during run(). Skips if scene/model missing."""
     if not os.path.exists(MODEL_PATH):
-        log.warning(f"SKIP test_iter_pareto_and_trial_hook — model not found: {MODEL_PATH}")
+        log.warning(f"SKIP test_iter_pareto_and_trial_hook -- model not found: {MODEL_PATH}")
         return
     groups = list_synthetic_scenes(SCENES_DIR) if os.path.isdir(SCENES_DIR) else []
     if not groups:
-        log.warning(f"SKIP test_iter_pareto_and_trial_hook — no scenes: {SCENES_DIR}")
+        log.warning(f"SKIP test_iter_pareto_and_trial_hook -- no scenes: {SCENES_DIR}")
         return
 
     pcd = load_reference_pcd(MODEL_PATH)
@@ -144,7 +144,7 @@ def test_iter_pareto_and_trial_hook():
 
 
 if __name__ == "__main__":
-    print("test_eval_callback.py — GUI-tuning hooks\n")
+    print("test_eval_callback.py -- GUI-tuning hooks\n")
     test_on_scene_eval_default_none()
     test_on_scene_eval_fires()
     test_dry_run_skips_hook()

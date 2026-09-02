@@ -35,7 +35,7 @@ def test_identical_bbox_is_unchanged(headless_app):
 
 
 def test_cloud_sampled_from_a_mesh_counts_as_the_same_object(headless_app):
-    """Raycast shows raw_pcd where Import showed the mesh — the sampled cloud misses the mesh
+    """Raycast shows raw_pcd where Import showed the mesh -- the sampled cloud misses the mesh
     extremes by a hair. That must not be treated as new content, or navigating between the two
     stages throws away the user's orbit."""
     mesh = _bbox((0, 0, 0), (0.2, 0.1, 0.2))
@@ -45,7 +45,7 @@ def test_cloud_sampled_from_a_mesh_counts_as_the_same_object(headless_app):
 
 
 def test_part_to_bin_counts_as_new_content(headless_app):
-    """Generating a scene swaps a 0.2 m part for a 0.76 m bin — the camera must follow."""
+    """Generating a scene swaps a 0.2 m part for a 0.76 m bin -- the camera must follow."""
     headless_app._remember_framing(_bbox((0, 0, 0), (0.2, 0.1, 0.2)))
     assert headless_app._framing_changed(_bbox((-0.38, -0.29, 0.0), (0.38, 0.29, 0.25)))
 
@@ -73,7 +73,7 @@ def test_redraw_is_a_noop_headless(headless_app):
 
 
 def test_default_world_bbox_is_framable():
-    """The empty-scene fallback must be a real, non-degenerate box — _reframe divides by its
+    """The empty-scene fallback must be a real, non-degenerate box -- _reframe divides by its
     diagonal, so a degenerate one would reintroduce the unresponsive-R symptom."""
     bbox = MeshSamplingApp._default_world_bbox()
     assert not bbox.is_empty()
@@ -94,7 +94,7 @@ def test_default_world_bbox_contains_the_origin():
 
 
 def test_reframe_is_a_noop_headless(headless_app):
-    # No window, no renderer — must return before touching self.scene.
+    # No window, no renderer -- must return before touching self.scene.
     assert headless_app.target_mesh is None
     headless_app._reframe()          # must not raise
 
@@ -107,7 +107,7 @@ def test_reframe_noop_with_a_mesh_loaded(headless_app, box_mesh):
 
 
 def test_reframe_takes_no_bbox_or_view_kwargs(headless_app):
-    """_reframe_scene and the bbox/view overrides were removed — callers must not resurrect them."""
+    """_reframe_scene and the bbox/view overrides were removed -- callers must not resurrect them."""
     assert not hasattr(headless_app, "_reframe_scene")
     with pytest.raises(TypeError):
         headless_app._reframe(bbox=object())
@@ -133,7 +133,7 @@ def test_headless_app_constructs_without_touching_gui():
 
 
 def test_glyph_fallback_is_ascii():
-    """If the label ever falls back it must still render — the point of the fallback is that a
+    """If the label ever falls back it must still render -- the point of the fallback is that a
     missing glyph draws a blank button."""
     from app import MeshSamplingApp as A
     import inspect

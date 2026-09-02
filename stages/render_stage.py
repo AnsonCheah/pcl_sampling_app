@@ -39,8 +39,8 @@ def _passes_2d_filter(aspect, area_ratio, aspect_range, area_range) -> bool:
 
 
 class RenderStage(BaseStage):
-    """Simulate the 3D sensor scanning the physical scene produced by SceneStage: raycast → noise
-    pipeline → instance segmentation → per-target export. Reads app.o3d_scene + app.mj_scene; writes
+    """Simulate the 3D sensor scanning the physical scene produced by SceneStage: raycast -> noise
+    pipeline -> instance segmentation -> per-target export. Reads app.o3d_scene + app.mj_scene; writes
     app.synthetic_targets + app.synthetic_scenes."""
 
     downstream = {
@@ -92,10 +92,10 @@ class RenderStage(BaseStage):
         if self.app.headless:
             return
         if len(self.app.synthetic_targets) > 0:
-            # Targets already generated — keep the segmented preview on screen.
+            # Targets already generated -- keep the segmented preview on screen.
             self.show_segmented_scene()
         elif self.app.scene_mesh is not None:
-            # Scene built but not yet rendered — show the physical scene as context.
+            # Scene built but not yet rendered -- show the physical scene as context.
             self.app.main_thread(lambda: self.app._clear_scene())
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry(
                 "scene_mesh", self.app.scene_mesh, self.app.default_material))
@@ -157,7 +157,7 @@ class RenderStage(BaseStage):
             self.app.main_thread(lambda: self.app.scene.scene.add_geometry(name, geom, material))
             # Frame the first cloud only. Later noise steps add outliers that would otherwise
             # keep widening the bounds and walk the camera backwards on every step. The later
-            # steps still need an explicit repaint — they run with no input events to piggyback on.
+            # steps still need an explicit repaint -- they run with no input events to piggyback on.
             if not self._framed:
                 self._framed = True
                 self.app.main_thread(self.app._reframe)
@@ -222,7 +222,7 @@ class RenderStage(BaseStage):
             render, pts, pix_all,
             erosion_px=5.0,
             dilation_px=5.0,
-            confusion_depth_sigma=0.015,   # ~15 mm — tune to your part height spread
+            confusion_depth_sigma=0.015,   # ~15 mm -- tune to your part height spread
             confusion_boundary_px=4,
             occlusion_loss_px=2,
             boundary_noise_px=10.0,
@@ -365,7 +365,7 @@ class RenderStage(BaseStage):
                     out_dir / f"{inst_stem}.npz",
                     xyz0    = value.xyz0,                     # reference in part frame
                     xyz1    = value.xyz1,                    # noisy instance in scene frame
-                    T_gt    = value.T_gt,                        # part_frame → scene_frame
+                    T_gt    = value.T_gt,                        # part_frame -> scene_frame
                     overlap = np.float32(value.overlap),
                     source  = str(out_dir).encode(),
                 )

@@ -1,5 +1,5 @@
 """
-eval_cache.py  —  Strategy 1: Transposition Table
+eval_cache.py  --  Strategy 1: Transposition Table
 --------------------------------------------------
 Caches evaluate_config() results keyed by (config_hash, scene_set_hash).
 Eliminates re-evaluation of the same config across phases (e.g., Phase 5
@@ -57,7 +57,7 @@ class EvalCache:
 
         A scene path is a scene_NNNNN *directory*; its identity is the set of ``sample_*.ply``
         files it holds. We fold each file's ``(name, size, mtime_ns)`` into the signature so that
-        **regenerating scenes into the same directory changes the cache key** — otherwise a
+        **regenerating scenes into the same directory changes the cache key** -- otherwise a
         path-only key returns a stale result computed on the previous scene data (this masked a
         real world-Z matching offset behind a high cached coverage). Falls back to the bare path
         when it doesn't exist (keeps unit tests with synthetic paths deterministic) or when it is a
@@ -117,7 +117,7 @@ class EvalCache:
         os.makedirs(os.path.dirname(self.cache_path) or ".", exist_ok=True)
         with open(self.cache_path, "w") as f:
             json.dump(self._store, f, indent=2, default=str)
-        log.info(f"Cache saved: {len(self._store)} entries → {self.cache_path}")
+        log.info(f"Cache saved: {len(self._store)} entries -> {self.cache_path}")
 
     def _load(self) -> None:
         try:

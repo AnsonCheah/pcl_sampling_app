@@ -103,7 +103,7 @@ class CropStage(BaseStage):
         view = np.asarray(cam.get_view_matrix())
         proj = np.asarray(cam.get_projection_matrix())
 
-        # World → clip space
+        # World -> clip space
         pts_h = np.hstack([points, np.ones((len(points), 1))])
         clip = (proj @ view @ pts_h.T).T
 
@@ -119,7 +119,7 @@ class CropStage(BaseStage):
         # Perspective divide
         ndc = clip[:, :3] / clip[:, 3:4]
 
-        # NDC → screen
+        # NDC -> screen
         x = (ndc[:, 0] * 0.5 + 0.5) * self.app.scene.frame.width
         y = (1.0 - (ndc[:, 1] * 0.5 + 0.5)) * self.app.scene.frame.height
 

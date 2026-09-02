@@ -13,7 +13,7 @@ def list_synthetic_scenes(part_dir):
 
     Each inner list contains all sample_*.ply files for one bin capture
     (one M-scene).  These are fed as a list of N individual clouds to
-    MechVision's read_synthetic, which returns N point clouds — one per
+    MechVision's read_synthetic, which returns N point clouds -- one per
     instance in the bin.
 
     Parameters
@@ -33,7 +33,7 @@ def list_synthetic_scenes(part_dir):
         if re.match(r'^scene_\d+$', d) and os.path.isdir(os.path.join(part_dir, d))
     )
     if not subdirs:
-        # Already a single scene directory — wrap as one M-scene
+        # Already a single scene directory -- wrap as one M-scene
         plys = sorted(
             [os.path.join(part_dir, f) for f in os.listdir(part_dir)
              if f.startswith('sample_') and f.endswith('.ply')],

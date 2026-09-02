@@ -5,15 +5,15 @@ VHACD wrapper in ``geometry.convex_decomp`` to decompose the (non-convex) pocket
 for MuJoCo collision (MuJoCo collides meshes as their convex hull, so concave geometry must be split).
 
 Pipeline per stable pose:
-  1. footprint_polygon(): project a part (in its aligned stable pose) onto XY → shapely polygon, fill
+  1. footprint_polygon(): project a part (in its aligned stable pose) onto XY -> shapely polygon, fill
      interior holes, then buffer() by the clearance (outward offset + corner smoothing). The COLLISION
-     pocket is traced from the part's CONVEX COLLISION (union of its VHACD pieces), not its raw mesh —
+     pocket is traced from the part's CONVEX COLLISION (union of its VHACD pieces), not its raw mesh --
      that is what MuJoCo actually collides; the mesh silhouette is too tight and ejects the part. The
      VISUAL pocket uses the true concave mesh silhouette for the molded look.
-  2. build_tray_collision_frame(): a cell block minus a through-pocket (NO base) → VHACD convex pieces.
+  2. build_tray_collision_frame(): a cell block minus a through-pocket (NO base) -> VHACD convex pieces.
      The caller adds a separate floor slab; keeping the base out of the decomposed frame stops hull
      pieces from bridging the base into the cavity. High vhacd_resolution keeps wall intrusion < clearance.
-  3. tray_visual_tile(): a cell block minus the pocket — the smooth molded mesh for rendering only.
+  3. tray_visual_tile(): a cell block minus the pocket -- the smooth molded mesh for rendering only.
 
 Requires ``shapely`` (silhouette union + buffer) and ``mapbox_earcut`` (polygon triangulation behind
 ``trimesh.creation.extrude_polygon``).
@@ -26,7 +26,7 @@ from shapely.ops import unary_union
 
 from geometry.convex_decomp import vhacd_decompose
 
-# Tiny vertical overshoot so a pocket prism pokes through the slab top/bottom — avoids coplanar faces
+# Tiny vertical overshoot so a pocket prism pokes through the slab top/bottom -- avoids coplanar faces
 # that make the manifold boolean unstable at the cut surfaces.
 _CUT_EPS = 1e-4
 
@@ -35,7 +35,7 @@ def footprint_polygon(part_mesh, R_aligned, clearance: float, fill_holes: bool =
                       corner_segs: int = 2, simplify_tol: float = 0.0) -> Polygon:
     """Return a 2D footprint (shapely Polygon) in the aligned-pose mesh frame.
 
-    part_mesh   : trimesh.Trimesh — pass the part mesh for the VISUAL pocket, or the concatenated convex
+    part_mesh   : trimesh.Trimesh -- pass the part mesh for the VISUAL pocket, or the concatenated convex
                   collision pieces for the COLLISION pocket (what MuJoCo collides).
     R_aligned   : 3x3 rotation placing the part in its tray-facing stable pose.
     clearance   : outward offset (m). buffer() rounds convex corners, giving the smoothed outline.
@@ -50,9 +50,9 @@ def footprint_polygon(part_mesh, R_aligned, clearance: float, fill_holes: bool =
     try:
         path = m.projected(normal=[0.0, 0.0, 1.0])   # trimesh Path2D (shapely-backed silhouette)
         poly = unary_union(list(path.polygons_full))
-    except Exception as e:                            # degenerate/non-watertight → convex fallback
+    except Exception as e:                            # degenerate/non-watertight -> convex fallback
         print(f"[tray] projection failed ({e}); falling back to convex hull of projected vertices")
-        pts2d = np.asarray(m.vertices)[:, :2]         # m is ALREADY rotated by R — do not re-apply it
+        pts2d = np.asarray(m.vertices)[:, :2]         # m is ALREADY rotated by R -- do not re-apply it
         poly = shapely.MultiPoint(pts2d).convex_hull
 
     poly = _coalesce(poly)                             # merge hairline-split lobes (don't drop them)
@@ -82,7 +82,7 @@ def convex_footprint_polygon(convex_pieces, R_aligned, clearance: float, fill_ho
                              corner_segs: int = 2) -> Polygon:
     """Robust COLLISION footprint: the union of each convex piece's 2D convex hull in the aligned pose.
 
-    This is exactly what MuJoCo collides — each part geom collides as its convex hull — and unioning
+    This is exactly what MuJoCo collides -- each part geom collides as its convex hull -- and unioning
     clean convex polygons avoids trimesh's ``mesh.projected()``, which on real meshes can return an
     INCOMPLETE silhouette (fractured into lobes, of which only the largest was kept). An incomplete
     collision footprint shrinks the pocket below the part, so the part overlaps the walls and is ejected.
@@ -159,15 +159,15 @@ def build_tray_conforming_hfield(convex_pieces, R_aligned, pitch_xy, pocket_dept
                                  grid_res: float = 0.0015, max_grid: int = 128,
                                  visual_grid_res: float = 0.00075, visual_max_grid: int = 192,
                                  visual_wall_radius: float = None):
-    """Conforming tray pocket as a MuJoCo height field that cradles the part's bottom surface — like a
+    """Conforming tray pocket as a MuJoCo height field that cradles the part's bottom surface -- like a
     3D-print support bed. The pocket FLOOR follows the part's bottom depth map z_bottom(x,y) of its
     CONVEX COLLISION (what MuJoCo collides), and the WALLS rise to the cell top outside the
     clearance-buffered footprint. The part is seated `clearance` above the floor, so it settles into a
     uniform-clearance cradle across its whole underside.
 
-    Built from a 2D orthographic depth map (Open3D raycast from below) — fast, no VHACD. Returns a dict:
-      elevation  : (nrow, ncol) float32 in [0, 1]  → MjSpec hfield userdata
-      size       : [radius_x, radius_y, z_range, base]  → MjSpec hfield size
+    Built from a 2D orthographic depth map (Open3D raycast from below) -- fast, no VHACD. Returns a dict:
+      elevation  : (nrow, ncol) float32 in [0, 1]  -> MjSpec hfield userdata
+      size       : [radius_x, radius_y, z_range, base]  -> MjSpec hfield size
       z_offset   : geom-local z of the minimum hfield elevation
       center_xy  : (cx, cy) footprint centre in the part frame; the hfield geom goes at body_xy + center
       seat_dz    : part-body z so its lowest point rests `clearance` above the floor (z0 = 0)
@@ -189,7 +189,7 @@ def build_tray_conforming_hfield(convex_pieces, R_aligned, pitch_xy, pocket_dept
     nrow = int(np.clip(round(py / grid_res), 8, max_grid))
     gx = np.linspace(-px / 2, px / 2, ncol)
     gy = np.linspace(-py / 2, py / 2, nrow)
-    GX, GY = np.meshgrid(gx, gy)                               # (nrow, ncol): rows↔y, cols↔x
+    GX, GY = np.meshgrid(gx, gy)                               # (nrow, ncol): rows<->y, cols<->x
 
     scene = o3d.t.geometry.RaycastingScene()
     scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(trimesh_to_o3d(M)))
@@ -285,7 +285,7 @@ def tray_visual_tile(footprint_poly: Polygon, pitch_xy, pocket_depth: float, bas
     """Smooth molded tray cell (a pitch-sized block minus the pocket) for rendering only.
 
     Centred on the footprint bbox so a pure (x, y) translation by a body position places it under the
-    part. Concave — used for the visual/raycast mesh, never for collision.
+    part. Concave -- used for the visual/raycast mesh, never for collision.
     """
     px, py = float(pitch_xy[0]), float(pitch_xy[1])
     minx, miny, maxx, maxy = footprint_poly.bounds

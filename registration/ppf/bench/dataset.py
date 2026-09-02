@@ -6,18 +6,18 @@ Three things about this data are easy to get wrong, and all three are load-beari
   before the two were unified.**  ``MujocoBinScene.export_scene_state`` used to write poses
   straight from the physics bodies, while ``SceneStage.worker`` post-multiplied a
   mesh-recentring shift onto the per-instance poses whenever the imported mesh was not
-  already centred on its bounding box (which is the normal case — ``center_mesh`` is a manual
+  already centred on its bounding box (which is the normal case -- ``center_mesh`` is a manual
   button).  Only the per-sample one was expressed in the same frame as
   ``reference_cloud.ply``.  ``export_scene_state`` now composes the same shift, so both agree;
   the marker is the ``body_offset`` key, present only on scenes written since.  This loader
-  reads the per-sample pose either way, which is correct for old and new directories alike —
+  reads the per-sample pose either way, which is correct for old and new directories alike --
   do not "simplify" it to the scene-level array.
 
 * **``sample_<i>`` does not necessarily correspond to ``part_<i>``.**  Samples are numbered
   by a running counter over instances that pass the 2D aspect/area filter, so the mapping is
   identity only when every instance passes.  Never join the two by index.
 
-* **Normals.**  ``sample_*.ply`` carries the raycast surface normals, which are exact — the
+* **Normals.**  ``sample_*.ply`` carries the raycast surface normals, which are exact -- the
   sensor noise chain perturbs the *points* but those normals came from the mesh.  A real
   sensor delivers depth, and normals get estimated from the noisy points, so benchmarking
   against the stored ones flatters the matcher.  ``normals="estimated"`` (the default) is
@@ -114,7 +114,7 @@ def _sample_index(path: str) -> int:
 
 
 def load_reference(scene_dir: str):
-    """Just the reference cloud — ``(points, normals)``.
+    """Just the reference cloud -- ``(points, normals)``.
 
     Split out so a caller can derive its matching parameters before loading the instances,
     because the normal-estimation radius has to come *from* those parameters. See
@@ -133,7 +133,7 @@ def load_scene(scene_dir: str,
     """Load one scene directory.
 
     ``normal_radius`` is **required and not defaulted**, because it is not a cosmetic
-    preprocessing choice — it moves the answer.  Measured on this bunny scene, switching it
+    preprocessing choice -- it moves the answer.  Measured on this bunny scene, switching it
     from 2*tau (14 mm) to 4x the reference spacing (2.8 mm) moved recall @5mm/10deg from
     0.77 to 0.62 on the unweighted arm, and *reordered* the weighting arms against each
     other.  A quietly-defaulted value here would silently become the most influential

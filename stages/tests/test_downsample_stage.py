@@ -53,7 +53,7 @@ def test_worker_does_not_move_the_geometry(headless_app, box_mesh):
     """Downsampling computes the profile but applies no frame.
 
     In the stage-by-stage GUI flow the operator must see the cloud sit still until they ask
-    for the recentre, and `app.geocenter` records what has been APPLIED — so it stays
+    for the recentre, and `app.geocenter` records what has been APPLIED -- so it stays
     identity here. It used to hold a *pending* transform, which made "has this been
     recentred?" unanswerable from the attribute alone.
     """

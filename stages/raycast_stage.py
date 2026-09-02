@@ -99,7 +99,7 @@ class RaycastStage(BaseStage):
         all_points = []
         all_cam_pos = []
         self.point_counts = np.zeros((self.num_views))
-        # Per-view 2D silhouette metrics of the isolated part — used to auto-derive the
+        # Per-view 2D silhouette metrics of the isolated part -- used to auto-derive the
         # aspect-ratio / area-ratio candidate filter in RenderStage (mirrors the real
         # Mask2Former post-filter, which gates the network's 2D mask output per part).
         aspects     = np.zeros((self.num_views))

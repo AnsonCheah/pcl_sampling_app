@@ -1,12 +1,12 @@
 """
-test_n_instances.py  —  N-instance I/O contract verification
+test_n_instances.py  --  N-instance I/O contract verification
 =============================================================
 Verifies the input/output shape of the .vis pipeline when fed a list of
 N individual point clouds via read_synthetic.
 
 Variable convention:
   N  = number of part instances (point clouds) fed into the .vis project
-  H  = outputNum parameter on CoarseMatchingV2 — hypotheses generated per
+  H  = outputNum parameter on CoarseMatchingV2 -- hypotheses generated per
        instance internally during coarse matching
 
 candidateTopNum on FineMatchingLite is fixed at 1 throughout (production
@@ -16,14 +16,14 @@ Output contract (candidateTopNum=1 fixed):
     len(coarse_poses)  == N   (outer list: one sublist per input cloud)
     len(fine_poses)    == N   (flat list: one refined pose per input cloud)
 
-H (outputNum) controls internal search quality only — it does NOT change
+H (outputNum) controls internal search quality only -- it does NOT change
 the N-length output counts with candidateTopNum=1.
 
 Tests:
-  test_io_contract()   — assert n_coarse == N AND n_fine == N for a
+  test_io_contract()   -- assert n_coarse == N AND n_fine == N for a
                           representative set of (N, H) pairs; log timing
                           and inner hypothesis counts as informational
-  test_nms_impact()    — full scene only; check whether NMS can drop
+  test_nms_impact()    -- full scene only; check whether NMS can drop
                           n_coarse or n_fine below N
 
 Requires live MechVision (CAD_Match project loaded).
@@ -56,7 +56,7 @@ log = logging.getLogger(__name__)
 PART       = "25333MB000"
 SCENES_DIR = os.path.join(_ROOT, "output", "synthetic_target", PART)
 
-# Representative (N, H) pairs — small, mid, full-scene × low and high H
+# Representative (N, H) pairs -- small, mid, full-scene x low and high H
 TRIALS = [
     (1,  1),
     (1,  3),
@@ -154,7 +154,7 @@ def _source_plys():
 
 
 # ---------------------------------------------------------------------------
-# Test 1: I/O contract — n_coarse == N and n_fine == N
+# Test 1: I/O contract -- n_coarse == N and n_fine == N
 # ---------------------------------------------------------------------------
 
 def test_io_contract():
@@ -164,7 +164,7 @@ def test_io_contract():
     coarse_poses outer == N : one sublist per input cloud
     fine_poses           == N : one refined pose per input cloud
 
-    Inner hypothesis counts are logged as informational — MechVision may
+    Inner hypothesis counts are logged as informational -- MechVision may
     produce fewer than H hypotheses per cloud when geometry is sparse
     (independent of NMS).
     """
@@ -206,7 +206,7 @@ def test_io_contract():
 
 
 # ---------------------------------------------------------------------------
-# Test 2: NMS impact — full scene, check floor
+# Test 2: NMS impact -- full scene, check floor
 # ---------------------------------------------------------------------------
 
 def _gt_positions(plys):
@@ -219,7 +219,7 @@ def test_nms_impact():
     """
     Full-scene only: check whether distance NMS drops n_coarse or n_fine below N.
 
-    MechVision removes coarse candidates within 0.1 × model_diameter of an
+    MechVision removes coarse candidates within 0.1 x model_diameter of an
     already-selected candidate within the same input cloud (per-cloud NMS).
     This test verifies NMS does not cause cross-cloud candidate loss by
     comparing observed counts against N and reporting the minimum
@@ -241,7 +241,7 @@ def test_nms_impact():
     min_dist_mm = float(dists.min()) * 1e3
     n_close_pairs = int((dists < nms_thresh).sum()) // 2
 
-    log.info(f"\nNMS threshold:    {nms_thresh*1e3:.1f} mm  (0.1 × D={ws.diameter_m*1e3:.1f} mm)")
+    log.info(f"\nNMS threshold:    {nms_thresh*1e3:.1f} mm  (0.1 x D={ws.diameter_m*1e3:.1f} mm)")
     log.info(f"Min GT distance:  {min_dist_mm:.1f} mm  ({n_close_pairs} pairs < threshold)")
 
     client, project_id = _connect()
@@ -263,12 +263,12 @@ def test_nms_impact():
                 n_coarse, _, n_fine, _, _ = _run(
                     client, project_id, scene_dir, H, use_nms=use_nms)
                 c_ok = "OK" if n_coarse >= N_full else f"FAIL({n_coarse}<{N_full})"
-                f_ok = "OK" if n_fine   == N_full else f"FAIL({n_fine}≠{N_full})"
+                f_ok = "OK" if n_fine   == N_full else f"FAIL({n_fine}!={N_full})"
                 log.info(f"{N_full:>5}  {H:>3}  {'ON' if use_nms else 'OFF':>5}"
                          f"  {n_coarse:>9}  {n_fine:>7}  {c_ok:>13}  {f_ok:>11}")
 
         log.info("=" * len(hdr))
-        log.info("DONE: test_nms_impact  (informational — no assertions)")
+        log.info("DONE: test_nms_impact  (informational -- no assertions)")
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
         client.close()

@@ -1,12 +1,12 @@
 """
-visualize_match.py — Overlay MechVision matched poses on synthetic scenes
+visualize_match.py -- Overlay MechVision matched poses on synthetic scenes
 -------------------------------------------------------------------------
 Runs MechVision once per scene with a tuned config (default:
 optuna_best_config_<part>.json) and produces, for every scene:
 
   - the raw synthetic scene cloud (grey),
   - the reference/model cloud placed at each MATCHED pose, one colour per
-    instance (this is the "matched result" — how the model fits the scene),
+    instance (this is the "matched result" -- how the model fits the scene),
   - a coordinate triad for every instance's GROUND-TRUTH pose (dim RGB) and
     MATCHED pose (bright RGB), joined by a yellow error line.
 
@@ -45,7 +45,7 @@ from geometry.geom_utils import pose_to_matrix, golden_hue_color
 PART_ROOT_DEFAULT = os.path.join(_ROOT, "output", "synthetic_target")
 
 
-# ── geometry helpers ──────────────────────────────────────────────────────────
+# -- geometry helpers ----------------------------------------------------------
 
 def instance_color(i):
     """High-saturation colour for instance i."""
@@ -85,7 +85,7 @@ def error_lineset(gt_pos, match_pos, color=(1.0, 1.0, 0.0)):
     return ls
 
 
-# ── matching ──────────────────────────────────────────────────────────────────
+# -- matching ------------------------------------------------------------------
 
 def match_gt_to_returned(returned, gt, thresh):
     """Nearest-neighbour GT->returned index map within *thresh* (position).
@@ -109,7 +109,7 @@ def match_gt_to_returned(returned, gt, thresh):
     return out
 
 
-# ── per-scene pipeline ──────────────────────────────────────────────────────────
+# -- per-scene pipeline ----------------------------------------------------------
 
 
 def build_scene_geometry(scene_dir, ref_pcd, fine_poses,
@@ -194,14 +194,14 @@ def show_and_save(geoms, title, png_path, show=True):
     vis.destroy_window()
 
 
-# ── main ────────────────────────────────────────────────────────────────────
+# -- main --------------------------------------------------------------------
 
 def _resolve_config_path(config, sampler, part):
     """Pick the best_config JSON to visualize.
 
     The optuna tuner writes ``results/<SAMPLER>_best_config_<part>.json`` (e.g. ``GP_best_config``),
     NOT ``optuna_best_config_<part>.json``. Defaulting to the latter silently overlaid a stale
-    config against fresh scenes — the exact failure this diagnosis chased. Resolution order:
+    config against fresh scenes -- the exact failure this diagnosis chased. Resolution order:
       1. explicit --config path,
       2. results/<SAMPLER>_best_config_<part>.json when --sampler given,
       3. the most-recently-modified ``*_best_config_<part>.json`` in results/ (the freshly tuned one).

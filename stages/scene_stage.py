@@ -59,7 +59,7 @@ MIN_AUTO_PARTS      = 2      # never fewer than this
 MAX_AUTO_PARTS      = 500    # safety cap (tune): tiny parts otherwise explode the sim
 FILL_SLIDER_MIN, FILL_SLIDER_MAX   = 20, 100   # fill-rate slider range (percent)
 COUNT_SLIDER_MIN, COUNT_SLIDER_MAX = 2, 500    # override-count slider range (parts)
-PREVIEW_PARKED_Z = 1.0   # m — live-preview bodies above this z are still parked (PARKING_Z≈10);
+PREVIEW_PARKED_Z = 1.0   # m -- live-preview bodies above this z are still parked (PARKING_Z~10);
 #                          hide them until release_batch() drops them onto the pile (bin ~0.25 m tall)
 
 
@@ -111,7 +111,7 @@ class SceneStage(BaseStage):
         v = gui.Vert(4)
 
         # Single scene-mode selector. Drives BOTH self.arrangement (random vs structured)
-        # and self.structure_type (none/partition/tray) — see the _is_random() /
+        # and self.structure_type (none/partition/tray) -- see the _is_random() /
         # _structure_type() helpers. Cluttered = random pile; Arranged = static grid at a
         # single pose; Partition = egg-crate dividers; Tray = molded pockets.
         self.arrangement_combo = self.register_widget(gui.Combobox())
@@ -225,9 +225,9 @@ class SceneStage(BaseStage):
         else:
             proceed()
 
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
     # On-disk saved-scene mesh preview
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
 
     def _synth_dir(self):
         part = self.app.mesh_basename
@@ -258,8 +258,8 @@ class SceneStage(BaseStage):
 
     def _build_disk_scene_geoms(self, scene_dir):
         """Reconstruct a saved scene as meshes: a copy of the part mesh at each stored GT pose
-        plus the outer bin box (from scene_state.npz). Returns [(name, mesh), …]; empty when
-        the mesh isn't imported or the npz is missing/unreadable. Pure geometry — no GUI."""
+        plus the outer bin box (from scene_state.npz). Returns [(name, mesh), ...]; empty when
+        the mesh isn't imported or the npz is missing/unreadable. Pure geometry -- no GUI."""
         npz_path = os.path.join(str(scene_dir), "scene_state.npz")
         if self.app.target_mesh is None or not os.path.exists(npz_path):
             return []
@@ -343,9 +343,9 @@ class SceneStage(BaseStage):
             self._exit_pick_mode()
         self.enable_widgets()
 
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
     # Manual face-up picking (structured modes)
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
     def _enter_pick_mode(self):
         """Show the bare part mesh, build the pick caches, and arm hover+click picking. Hovering
         highlights the coplanar patch under the cursor; a click sets it as 'up'; a drag still
@@ -361,7 +361,7 @@ class SceneStage(BaseStage):
         self.app._reframe()
 
         # Built once, reused for every hover/click: a raycast scene + coplanar facet grouping.
-        self.pick_status_label.text = "Preparing pick…"
+        self.pick_status_label.text = "Preparing pick..."
         self._pick_rc = o3d.t.geometry.RaycastingScene()
         self._pick_rc.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(self.app.target_mesh))
         tri = o3d_to_trimesh(self.app.target_mesh)
@@ -492,7 +492,7 @@ class SceneStage(BaseStage):
         rays = o3d.core.Tensor([[*cam_pos, *ray_dir]], dtype=o3d.core.Dtype.Float32)
         ans = self._pick_rc.cast_rays(rays)
         if not np.isfinite(float(ans["t_hit"].numpy()[0])):
-            self.pick_status_label.text = "Missed the part — click on a face."
+            self.pick_status_label.text = "Missed the part -- click on a face."
             return
 
         prim_id = int(ans["primitive_ids"].numpy()[0])
@@ -577,8 +577,8 @@ class SceneStage(BaseStage):
         of the bin height as spill headroom. See module constants.
 
         The packing factor is shape-aware: it tapers from PACKING_FACTOR_BASE by the OBB
-        aspect ratio (longest/shortest edge) so elongated/flat parts — which pack far less
-        densely — no longer over-count. We do NOT also multiply by solidity: the count divides
+        aspect ratio (longest/shortest edge) so elongated/flat parts -- which pack far less
+        densely -- no longer over-count. We do NOT also multiply by solidity: the count divides
         by OBB volume, so the correct multiplier is the box-packing fraction (folding solidity
         in again would double-count). Anchors: AR 1->0.62, 2->0.44, 4->0.31, >=12->0.18 floor."""
         bw, bl, bh, _ = MAX_BIN_DIM
@@ -594,7 +594,7 @@ class SceneStage(BaseStage):
 
     def _show_scene_mesh(self):
         """GUI helper: show the settled physical scene, framed on the bin. Everything runs on the main
-        thread (Open3D GUI is not thread-safe — touching it from the worker silently corrupts the scene,
+        thread (Open3D GUI is not thread-safe -- touching it from the worker silently corrupts the scene,
         which is what blanked the tray view). If the merged preview mesh is missing/empty it falls back
         to the per-object settled meshes so the scene never blanks out."""
         def show():
@@ -616,7 +616,7 @@ class SceneStage(BaseStage):
             return
         self._populate_disk_scenes()
         if self.app.scene_mesh is not None:
-            # Scene already generated — keep the settled physical scene on screen.
+            # Scene already generated -- keep the settled physical scene on screen.
             self._show_scene_mesh()
         else:
             # Stage entry, before generation: show the decomposed convex hulls.
@@ -651,7 +651,7 @@ class SceneStage(BaseStage):
 
     def on_clear(self):
         # Reset stage-local scratch alongside the app-level scene state. NOTE: do not clear
-        # user_R / picked_normal here — worker() calls clear_state_from() at its start, so
+        # user_R / picked_normal here -- worker() calls clear_state_from() at its start, so
         # wiping the pick here would drop the override before the same run reads it. The pick
         # is reset instead on stage entry (on_enter).
         self.o3d_scene = {}
@@ -700,8 +700,8 @@ class SceneStage(BaseStage):
         # MujocoBinScene requires mesh centered at its own origin: every rotation, spawn-height,
         # stable-pose, and tray-pocket calculation rotates vertices around (0,0,0). Center a
         # local copy without modifying app.target_mesh so the user's centering choice is preserved.
-        # Anchored on the AABB centre (not the vertex mean) so r_max and bounding_sphere — both
-        # measured about the body origin — are not skewed by tessellation density.
+        # Anchored on the AABB centre (not the vertex mean) so r_max and bounding_sphere -- both
+        # measured about the body origin -- are not skewed by tessellation density.
         mesh_center = np.asarray(self.app.target_mesh.get_axis_aligned_bounding_box().get_center())
         needs_centering = np.linalg.norm(mesh_center) > 1e-9
         part_mesh = o3d_to_trimesh(self.app.target_mesh)
@@ -719,7 +719,7 @@ class SceneStage(BaseStage):
         if self.generate_mode == "fill_rate" and self.arrangement == "random":
             self.num_targets = self._auto_part_count(part_mesh)
             rp(f"[AUTO-COUNT] fill={self.fill_rate:.0%} "
-               f"part OBB vol={part_mesh.bounding_box_oriented.volume:.2e} m³ "
+               f"part OBB vol={part_mesh.bounding_box_oriented.volume:.2e} m^3 "
                f"-> n_parts={self.num_targets}")
         # `body_offset` tells MujocoBinScene what we subtracted, so `export_scene_state` can put
         # `scene_state.npz` back into the model frame itself. Without it that file stayed in the
@@ -735,8 +735,8 @@ class SceneStage(BaseStage):
         self.app.mj_scene = self.mj_scene   # handoff to RenderStage
 
         # Live mesh preview: shown whenever the scene actually simulates (random, or structured
-        # partition/tray which now settle under gravity). Structured/none is static → no preview.
-        # The callback runs inside simulate()'s step loop (this thread) — no MjData race.
+        # partition/tray which now settle under gravity). Structured/none is static -> no preview.
+        # The callback runs inside simulate()'s step loop (this thread) -- no MjData race.
         sim_runs = self.arrangement == "random" or (
             self.arrangement == "structured" and self.structure_type in ("partition", "tray"))
         if not self.app.headless and sim_runs:
@@ -765,7 +765,7 @@ class SceneStage(BaseStage):
         self.app.o3d_scene = self.o3d_scene   # handoff to RenderStage
         _update_pb("Compiling physical scene mesh...")
 
-        # Merged physical-scene preview mesh — GUI only (RenderStage consumes app.o3d_scene, not this).
+        # Merged physical-scene preview mesh -- GUI only (RenderStage consumes app.o3d_scene, not this).
         # The boolean union can degenerate on the non-manifold tray bin mesh, so guard it and fall back
         # to a plain concatenation (which always renders) rather than leaving the scene blank.
         if not self.app.headless:
@@ -804,7 +804,7 @@ class SceneStage(BaseStage):
         start hidden. Must run before mj_scene.simulate()."""
         import mujoco
         # Populate xpos/xquat for the initial spawn poses (pure kinematics; does not advance the
-        # sim — simulate() recomputes everything from qpos/qvel via mj_step).
+        # sim -- simulate() recomputes everything from qpos/qvel via mj_step).
         mujoco.mj_forward(self.mj_scene.model, self.mj_scene.data)
         state = self.mj_scene.extract_scene_state()
         part_mesh_o3d = trimesh_to_o3d(self.mj_scene.part_mesh)
@@ -826,7 +826,7 @@ class SceneStage(BaseStage):
         # Scene bounds work here even though parked bodies are hidden and still counted: they keep
         # an identity transform (see add_all above), so they sit at the part's own origin, and the
         # bin dominates the box either way.
-        self.app.main_thread(self.app._reframe)   # GUI op → main thread (Open3D not thread-safe)
+        self.app.main_thread(self.app._reframe)   # GUI op -> main thread (Open3D not thread-safe)
 
     def _live_preview_update(self):
         """Called from inside simulate()'s step loop (worker thread). Snapshots body poses into

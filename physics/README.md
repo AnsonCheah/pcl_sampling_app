@@ -6,7 +6,7 @@ MuJoCo-based rigid-body simulation of parts settling in a bin. Produces collisio
 
 | File | Description |
 |------|-------------|
-| `mujoco_bin_scene.py` | `MujocoBinScene` class — scene construction, gravity settling, pose extraction |
+| `mujoco_bin_scene.py` | `MujocoBinScene` class -- scene construction, gravity settling, pose extraction |
 
 ## `MujocoBinScene`
 
@@ -14,8 +14,8 @@ MuJoCo-based rigid-body simulation of parts settling in a bin. Produces collisio
 class MujocoBinScene:
     def __init__(
         self,
-        part_mesh,                          # trimesh.Trimesh — the CAD part
-        part_convex_meshes,                 # list[trimesh.Trimesh] — convex hull decomposition
+        part_mesh,                          # trimesh.Trimesh -- the CAD part
+        part_convex_meshes,                 # list[trimesh.Trimesh] -- convex hull decomposition
         n_parts: int = 1,
         bin_dim: tuple = (0.76, 0.585, 0.25, 0.005),  # (W, D, H, wall_thickness) metres
         settle_time: float = 10.0,          # simulation seconds to run
@@ -30,7 +30,7 @@ class MujocoBinScene:
 ```python
 scene = MujocoBinScene(part_mesh, convex_meshes, n_parts=8)
 scene_state = scene.simulate()                      # run gravity settling
-o3d_objects = scene.mujoco_scene_to_o3d(scene_state)  # → {geom_id: O3DSceneObject}
+o3d_objects = scene.mujoco_scene_to_o3d(scene_state)  # -> {geom_id: O3DSceneObject}
 ```
 
 ### `scene_state` dict
@@ -46,7 +46,7 @@ After `simulate()`, `scene_state` contains one entry per simulated body:
 }
 ```
 
-`T` is a 4×4 world-frame transform. The `bin` key is always present — `RenderStage` uses it to separate bin points from part points during labelling. Partition/tray fixtures are merged into `bin_mesh`, so they share the bin id and segment as background.
+`T` is a 4x4 world-frame transform. The `bin` key is always present -- `RenderStage` uses it to separate bin points from part points during labelling. Partition/tray fixtures are merged into `bin_mesh`, so they share the bin id and segment as background.
 
 ## Constraints
 

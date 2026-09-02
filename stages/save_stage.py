@@ -52,15 +52,16 @@ class SaveStage(BaseStage):
         """The `geocenter_*` PLY header comments: this cloud's model-frame provenance.
 
         `app.geocenter` is the transform APPLIED to the geometry, so its inverse is the model
-        frame expressed in the pre-recentre frame — where the geocenter origin sat, and how
+        frame expressed in the pre-recentre frame -- where the geocenter origin sat, and how
         its axes were oriented, before `recenter_mesh_pcd` moved anything.
 
         Read the translation from **column 3**, not row 3: `pcd_geocenter` returns
         `inv([R|o])`, whose row 3 is always `[0, 0, 0, 1]`. An un-recentred export gives
-        identity, so zeros and a unit quaternion — honest, not missing.
+        identity, so zeros and a unit quaternion -- honest, not missing.
         """
         G = np.linalg.inv(np.asarray(self.app.geocenter, dtype=float))
         quat = R.from_matrix(G[:3, :3]).as_quat()
+        fold, aligned = self._ambiguity_metadata()
         return [
             f"geocenter_x {G[0, 3]}",
             f"geocenter_y {G[1, 3]}",
@@ -69,7 +70,29 @@ class SaveStage(BaseStage):
             f"geocenter_qy {quat[1]}",
             f"geocenter_qz {quat[2]}",
             f"geocenter_qw {quat[3]}",
+            f"ambiguity_fold {fold}",
+            f"ambiguity_aligned {aligned}",
         ]
+
+    def _ambiguity_metadata(self):
+        """`(fold, aligned)` for the header -- what lets the tuner aim the symmetry search.
+
+        `fold` follows the crystallographic convention, so no negative sentinel is needed:
+        0 = continuous, 1 = C1 (no rotational symmetry), N = N-fold. Both keys are always
+        written, so a reader can tell "analysed, found nothing" from "exported before these
+        keys existed" (which reads as no keys at all).
+
+        `aligned` requires a dominant axis as well as `frame_changed`. With the checkbox on but
+        no axis found, `pcd_geocenter(pcd, axis=None)` quietly falls through to the PCA branch
+        while `_geocenter_for` still sets `frame_changed = True` -- trusting that flag alone
+        would advertise a PCA frame as ambiguity-aligned, and MechVision's `rotationStrategy`
+        would then sweep an arbitrary line.
+        """
+        profile = self.app.ambiguity_profile
+        dominant = profile.dominant if profile is not None else None
+        if dominant is None:
+            return 1, 0
+        return int(dominant.fold), int(bool(profile.frame_changed))
 
     def _save_cloud_bundle(self, pcd, folder_path, stem, cloud_type):
         """Save PLY + sidecar files for one cloud type into folder_path."""

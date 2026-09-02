@@ -1,6 +1,6 @@
 """
 segment_instances.py
-────────────────────
+--------------------
 Realistic 2D instance segmentation simulation for synthetic bin-picking scenes.
 
 Given a render dict from scene_render.py (which contains a canonical geom_id
@@ -9,23 +9,23 @@ boundary errors of a real 2D segmentation network.
 
 Five physical error sources are modelled in image space before back-projection:
 
-  1. Global erosion bias        — mask contour sits 2-5 px inside true silhouette
-  2. Dilation into background   — mask bleeds 1-3 px outward into bin floor/walls
-  3. Inter-object confusion     — boundary pixels near adjacent objects are
+  1. Global erosion bias        -- mask contour sits 2-5 px inside true silhouette
+  2. Dilation into background   -- mask bleeds 1-3 px outward into bin floor/walls
+  3. Inter-object confusion     -- boundary pixels near adjacent objects are
                                   probabilistically re-assigned; confusion rate
-                                  scales with exp(-depth_gap / σ_gap)
-  4. Occlusion-edge gap         — the occluded object's mask is over-eroded where
+                                  scales with exp(-depth_gap / sigma_gap)
+  4. Occlusion-edge gap         -- the occluded object's mask is over-eroded where
                                   it disappears behind another instance
-  5. Soft-mask threshold noise  — Gaussian-correlated pixel-level boundary noise
+  5. Soft-mask threshold noise  -- Gaussian-correlated pixel-level boundary noise
                                   at the scale of a network's boundary receptive
                                   field (~8-16 px)
 
 Typical call
-────────────
+------------
     from segment_instances import segment_point_cloud
 
     labels = segment_point_cloud(render, points, pixel_idx)
-    # labels : (N,) int  -1 = unassigned background, ≥0 = instance id
+    # labels : (N,) int  -1 = unassigned background, >=0 = instance id
 
     for inst_id in np.unique(labels[labels >= 0]):
         inst_pts = points[labels == inst_id]
@@ -35,14 +35,14 @@ All errors are applied in image space on the geom_id image, then the resulting
 label map is back-projected to the surviving point cloud via pixel_idx.
 
 Performance
-───────────
+-----------
 Each instance is processed on its own padded **bounding-box crop** rather than the
 full (H, W) frame, and inter-object confusion only touches pairs whose padded
 bboxes overlap. The five error models are local operators, so a crop padded by the
 operator support radius produces results identical to the full-frame computation
 (see `_influence_margin`). When CuPy + a CUDA device are available the crop ops run
 on the GPU (`cupyx.scipy.ndimage`); otherwise they fall back to SciPy/NumPy
-transparently — there is no hard GPU dependency.
+transparently -- there is no hard GPU dependency.
 """
 
 import numpy as np
@@ -52,7 +52,7 @@ import time
 import sys
 from rich import print as rp
 
-# ── Optional GPU backend ────────────────────────────────────────────────────────
+# -- Optional GPU backend --------------------------------------------------------
 # Resolved lazily via _backend() so tests can monkeypatch _HAS_GPU. The morphology
 # / filter ops below are routed through the selected `ndi` module and array ops
 # through `xp`, so the same code runs on CuPy or NumPy/SciPy unchanged.
@@ -67,7 +67,7 @@ except Exception:
 
 
 def _backend():
-    """Return (xp, ndi) — CuPy/cupyx when a device is present, else NumPy/SciPy."""
+    """Return (xp, ndi) -- CuPy/cupyx when a device is present, else NumPy/SciPy."""
     if _HAS_GPU and _cp is not None:
         return _cp, _cupy_ndi
     return np, _scipy_ndi
@@ -80,9 +80,9 @@ def _to_cpu(arr):
     return np.asarray(arr)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 #  Crop representation
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 @dataclass
 class _Crop:
@@ -151,7 +151,7 @@ def _tight_bbox_metrics(arr) -> "tuple[int, int, int]":
 def _metrics_from_mask(arr, H: int, W: int) -> "dict | None":
     """
     {pixel_area, aspect_ratio, area_ratio} for a single 2D bool mask, or None if
-    the mask is empty. `arr` may be a padded crop array or a full-frame mask —
+    the mask is empty. `arr` may be a padded crop array or a full-frame mask --
     only the tight extent of the True region matters. area_ratio is normalised by
     the full image (H * W).
     """
@@ -178,9 +178,9 @@ def compute_2d_instance_metrics(
     -------
     dict[geom_id] -> {
         "pixel_area"   : int    count of True pixels in the mask,
-        "aspect_ratio" : float  max(h, w) / max(min(h, w), 1)  — elongation (>= 1),
+        "aspect_ratio" : float  max(h, w) / max(min(h, w), 1)  -- elongation (>= 1),
                                  orientation-agnostic,
-        "area_ratio"   : float  pixel_area / (H * W)  — fraction of the full image.
+        "area_ratio"   : float  pixel_area / (H * W)  -- fraction of the full image.
     }
     Empty masks are skipped.
     """
@@ -202,7 +202,7 @@ def _influence_margin(
     result. Each model is a local operator; the margin is the sum of every enabled
     model's outward influence radius so the operator support never reaches the crop
     edge. The erosion/boundary-noise Gaussians use SciPy's default truncate=4.0, so
-    their support is 4σ (σ_erosion = 1.3·erosion_px/0.42 at max jitter)."""
+    their support is 4sigma (sigma_erosion = 1.3*erosion_px/0.42 at max jitter)."""
     m = 1
     if apply_erosion:
         sigma_max = 1.3 * erosion_px / 0.42
@@ -218,9 +218,9 @@ def _influence_margin(
     return int(m)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 1 — Build the canonical geom_id / depth images
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+#  SECTION 1 -- Build the canonical geom_id / depth images
+# ==============================================================================
 
 def build_geom_id_image(render: dict) -> np.ndarray:
     """
@@ -249,9 +249,9 @@ def build_depth_image(render: dict) -> np.ndarray:
     return img.reshape(H, W)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 2 — Per-instance crop helpers
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+#  SECTION 2 -- Per-instance crop helpers
+# ==============================================================================
 
 def _instance_crops(geom_img: np.ndarray, margin: int, xp) -> "dict[int, _Crop]":
     """
@@ -277,33 +277,33 @@ def _instance_crops(geom_img: np.ndarray, margin: int, xp) -> "dict[int, _Crop]"
 
 def _boundary_map(mask, ndi, xp, width: int = 1):
     """
-    bool — True where `mask` has a boundary within `width` pixels.
+    bool -- True where `mask` has a boundary within `width` pixels.
     Computed as: mask AND NOT eroded(mask, width).
     """
     struct = xp.ones((2 * width + 1, 2 * width + 1), bool)
     return mask & ~ndi.binary_erosion(mask, structure=struct)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 3 — Five error models (operate on a single instance's crop array)
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+#  SECTION 3 -- Five error models (operate on a single instance's crop array)
+# ==============================================================================
 
 def _apply_erosion_bias(mask, erosion_px: float, rng, *, xp=np, ndi=_scipy_ndi):
     """
     Model 1: Global erosion bias.
 
-    The network is conservative at boundaries — the predicted mask contour
+    The network is conservative at boundaries -- the predicted mask contour
     sits slightly inside the true object silhouette. Modelled as a soft erosion:
     Gaussian blur the binary mask, then threshold above 0.5.
 
-        eroded = gaussian_blur(mask, σ) > 0.5
+        eroded = gaussian_blur(mask, sigma) > 0.5
 
     Using a Gaussian blur instead of morphological erosion gives smooth,
     rounded boundary errors that match network output statistics. The effective
-    erosion radius is ≈ 0.42 · σ (for a threshold of 0.5).
+    erosion radius is ~ 0.42 * sigma (for a threshold of 0.5).
 
-    erosion_px : target erosion radius in pixels. σ = erosion_px / 0.42.
-    A small random jitter (±30%) is added per call to avoid identical masks
+    erosion_px : target erosion radius in pixels. sigma = erosion_px / 0.42.
+    A small random jitter (+/-30%) is added per call to avoid identical masks
     across frames.
     """
     jitter = float(rng.uniform(0.7, 1.3))
@@ -348,10 +348,10 @@ def _apply_boundary_noise(mask, noise_px: float, rng, *, xp=np, ndi=_scipy_ndi):
     signed distance transform, then re-threshold at zero.
 
         sdt    = signed_distance_transform(mask)   (positive inside, negative outside)
-        sdt   += gaussian_noise(σ=noise_amplitude, spatial_σ=noise_px)
+        sdt   += gaussian_noise(sigma=noise_amplitude, spatial_sigma=noise_px)
         result = sdt > 0
 
-    The noise amplitude is set to noise_px / 3 so that the 3σ range spans
+    The noise amplitude is set to noise_px / 3 so that the 3sigma range spans
     noise_px pixels, matching the boundary region where the mask is uncertain.
     """
     dist_in  = ndi.distance_transform_edt(mask).astype(xp.float32)
@@ -367,9 +367,9 @@ def _apply_boundary_noise(mask, noise_px: float, rng, *, xp=np, ndi=_scipy_ndi):
     return (sdt + amplitude * corr) > 0
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 3b — Cross-instance models (confusion, occlusion)
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+#  SECTION 3b -- Cross-instance models (confusion, occlusion)
+# ==============================================================================
 
 def _bboxes_overlap(a: _Crop, b: _Crop) -> bool:
     """True if the two crop windows intersect (half-open boxes)."""
@@ -407,7 +407,7 @@ def _apply_interobject_confusion(
 
     Each pair is processed inside the union of their two padded crop windows; when
     `prune` is True, pairs whose windows do not overlap are skipped (they have no
-    shared boundary zone, so the full-frame reference would skip them too — the
+    shared boundary zone, so the full-frame reference would skip them too -- the
     result is identical, the cost is not). `boundary_zones[g]` is the pre-confusion
     boundary band for instance g (same window as crops[g]).
 
@@ -527,9 +527,9 @@ def _apply_occlusion_edge_loss(
     return result
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 4 — Utility helpers
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+#  SECTION 4 -- Utility helpers
+# ==============================================================================
 
 def _disk_struct(radius: int, xp=np):
     """Circular binary structuring element of given radius (backend `xp`)."""
@@ -541,8 +541,8 @@ def _disk_struct(radius: int, xp=np):
 def _local_depth_gap(depth_img, rows, cols, mask_i, mask_j, xp, ndi):
     """
     Estimate the depth gap between objects i and j at each (row, col) position in
-    the shared boundary zone, using a 5×5 window mean (uniform_filter) of each
-    object's depth. Within a smooth depth surface the 5×5 spread is negligible.
+    the shared boundary zone, using a 5x5 window mean (uniform_filter) of each
+    object's depth. Within a smooth depth surface the 5x5 spread is negligible.
     """
     d = xp.where(xp.isfinite(depth_img), depth_img, 0.0)
     wi = mask_i.astype(xp.float64)
@@ -578,9 +578,9 @@ def _resolve_conflicts_full(masks: "dict[int, np.ndarray]") -> "dict[int, np.nda
     return {g: (best_id == g) for g in ids}
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 5 — Main API
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+#  SECTION 5 -- Main API
+# ==============================================================================
 
 def _build_perturbed_crops(
     render:              dict,
@@ -625,19 +625,19 @@ def _build_perturbed_crops(
     geom_img = xp.asarray(geom_img_np)
     depth_img = xp.asarray(depth_img_np.astype(np.float32))
 
-    # ── Model 1: Erosion bias ────────────────────────────────────────────────
+    # -- Model 1: Erosion bias ------------------------------------------------
     if apply_erosion:
         for g, c in crops.items():
             c.arr = _apply_erosion_bias(c.arr, erosion_px, rng, xp=xp, ndi=ndi)
 
-    # ── Model 2: Dilation into background ────────────────────────────────────
+    # -- Model 2: Dilation into background ------------------------------------
     if apply_dilation:
         for g, c in crops.items():
             geom_crop = geom_img[c.r0:c.r1, c.c0:c.c1]
             c.arr = _apply_dilation_into_background(c.arr, geom_crop, dilation_px,
                                                     rng, xp=xp, ndi=ndi)
 
-    # ── Model 3: Inter-object confusion ──────────────────────────────────────
+    # -- Model 3: Inter-object confusion --------------------------------------
     if apply_confusion and len(crops) > 1:
         struct = _disk_struct(confusion_boundary_px, xp)
         boundary_zones = {
@@ -649,13 +649,13 @@ def _build_perturbed_crops(
             confusion_boundary_px, rng, xp, ndi, prune=prune_confusion,
         )
 
-    # ── Model 4: Occlusion edge loss ──────────────────────────────────────────
+    # -- Model 4: Occlusion edge loss ------------------------------------------
     if apply_occlusion_loss:
         crops = _apply_occlusion_edge_loss(
             crops, depth_img, geom_img, occlusion_loss_px, rng, xp, ndi,
         )
 
-    # ── Model 5: Boundary threshold noise ────────────────────────────────────
+    # -- Model 5: Boundary threshold noise ------------------------------------
     if apply_boundary_noise:
         for g, c in crops.items():
             c.arr = _apply_boundary_noise(c.arr, boundary_noise_px, rng, xp=xp, ndi=ndi)
@@ -703,15 +703,15 @@ def build_perturbed_masks(
     apply_*                : toggle each error model independently.
     resolve_conflicts      : if True, run conflict resolution so every pixel belongs
                              to at most one instance (single-label output). Default
-                             False — masks may overlap, matching a real network.
+                             False -- masks may overlap, matching a real network.
     prune_confusion        : skip non-overlapping pairs in Model 3 (default True;
                              identical result, lower cost).
     seed                   : RNG seed for reproducibility.
 
     Returns
     -------
-    masks   : {geom_id: (H, W) bool} — perturbed instance masks in image space.
-    geom_img: (H, W) int32 — canonical geom_id image (before perturbation).
+    masks   : {geom_id: (H, W) bool} -- perturbed instance masks in image space.
+    geom_img: (H, W) int32 -- canonical geom_id image (before perturbation).
     """
     crops, geom_img = _build_perturbed_crops(
         render,
@@ -753,7 +753,7 @@ def segment_point_cloud(
     full-frame mask per instance.
 
     A real 2D segmentation network outputs one independent binary mask per
-    instance — masks CAN overlap at shared boundary pixels. This function
+    instance -- masks CAN overlap at shared boundary pixels. This function
     replicates that behaviour by default (resolve_conflicts=False).
 
     Parameters
@@ -772,7 +772,7 @@ def segment_point_cloud(
     Returns
     -------
     instance_masks : dict[int, np.ndarray]
-        {geom_id: (N,) bool} — one boolean mask per instance.
+        {geom_id: (N,) bool} -- one boolean mask per instance.
         A point may be True in multiple masks (overlap at boundaries).
         Points with pixel_idx == -1 are False in every mask.
     metrics : dict[int, dict]  (only when return_metrics=True)

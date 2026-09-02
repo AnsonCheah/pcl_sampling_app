@@ -1,5 +1,5 @@
 """
-test_scene_render.py — Regression + new-stage tests for sensor/scene_render.py.
+test_scene_render.py -- Regression + new-stage tests for sensor/scene_render.py.
 
 Run from project root:
     python sensor/tests/test_scene_render.py
@@ -40,13 +40,13 @@ _results = []
 
 def _check(name, cond, detail=""):
     status = PASS if cond else FAIL
-    print(f"  [{status}] {name}" + (f" — {detail}" if detail else ""))
+    print(f"  [{status}] {name}" + (f" -- {detail}" if detail else ""))
     _results.append((name, cond))
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 #  Existing function regression tests
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def test_scene_render_returns_expected_keys():
     render, _ = make_render_dict()
@@ -65,7 +65,7 @@ def test_scene_render_returns_expected_keys():
 
 def test_scene_render_returns_none_on_miss():
     import open3d as o3d
-    # Plane placed 100 m away — outside FOV at 1.5 m focal distance
+    # Plane placed 100 m away -- outside FOV at 1.5 m focal distance
     mesh = o3d.geometry.TriangleMesh.create_box(0.1, 0.1, 0.001)
     mesh.translate([0, 0, 100.])
     T_cam   = camera_view_matrix(_CAM_POS, _LOOK_AT)
@@ -75,7 +75,7 @@ def test_scene_render_returns_none_on_miss():
 
 
 def test_compute_dropout_mask_lambertian_keeps_more_than_specular():
-    # Use a 40° tilted plane so the specular lobe is misaligned — only Lambertian
+    # Use a 40deg tilted plane so the specular lobe is misaligned -- only Lambertian
     # (roughness=1.0, diffuse floor=1) keeps all points; roughness=0.0 (pure mirror)
     # drops most because the reflected ray doesn't align with the camera.
     render, _ = make_render_dict(tilt_deg=40.)
@@ -188,9 +188,9 @@ def test_subset_render_preserves_image_buffers():
         _check(f"subset_render_preserves_{key}", same)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 #  New stage tests
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def test_specular_patch_missing_reduces_keep():
     render, keep = make_render_dict(tilt_deg=45.)
@@ -209,7 +209,7 @@ def test_specular_patch_missing_reduces_keep():
 
 
 def test_specular_patch_missing_lambertian_unchanged():
-    # Face-on plane: normal points at camera → specular lobe aligned → few dark patches
+    # Face-on plane: normal points at camera -> specular lobe aligned -> few dark patches
     render, keep = make_render_dict(tilt_deg=0.)
     keep_after   = add_specular_patch_missing(render, keep, roughness=0.25,
                                               patch_dropout_rate=1.0, seed=0)
@@ -253,7 +253,7 @@ def test_anisotropic_roughness_zero_matches_isotropic():
 def test_anisotropic_roughness_elongates_dropout():
     # Test the Ward BRDF math directly on synthetic ray vectors that span
     # different azimuthal orientations. A flat plane has uniform normals so the
-    # count can't differ — we instead verify that the per-point lobe VALUES
+    # count can't differ -- we instead verify that the per-point lobe VALUES
     # differ between the isotropic and anisotropic formulations.
     from sensor.scene_render import _specular_keep_anisotropic, _specular_keep
 
@@ -286,9 +286,9 @@ def test_anisotropic_roughness_elongates_dropout():
            f"iso_kept={keep_iso.sum()}, ani_kept={keep_ani.sum()}")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 #  Runner
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 if __name__ == "__main__":
     tests = [
@@ -316,7 +316,7 @@ if __name__ == "__main__":
     ]
 
     print(f"\n{'='*60}")
-    print(f"  test_scene_render.py — {len(tests)} tests")
+    print(f"  test_scene_render.py -- {len(tests)} tests")
     print(f"{'='*60}")
     for t in tests:
         print(f"\n{t.__name__}")

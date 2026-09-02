@@ -1,4 +1,4 @@
-"""Tests for registration.ppf_saliency — the weighted-voting PPF variant.
+"""Tests for registration.ppf_saliency -- the weighted-voting PPF variant.
 
 The vanilla matcher is `registration.ppf` and has its own suite (`test_ppf.py`). This
 file keeps the weighting-specific properties: uniform weights must reproduce the
@@ -51,9 +51,9 @@ FAST = dict(model_target_points=220)
 N_SAMPLE = 6000
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Fixtures
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _centred(mesh):
     mesh.translate(-mesh.get_axis_aligned_bounding_box().get_center())
@@ -72,7 +72,7 @@ def _box():
 
 
 def _bumpy():
-    """A box with an off-centre boss — asymmetric, so it has a unique correct pose.
+    """A box with an off-centre boss -- asymmetric, so it has a unique correct pose.
 
     A bare primitive is a bad correctness fixture precisely because it is symmetric: any of
     several poses is right, so a test on one of them cannot distinguish a working matcher
@@ -102,7 +102,7 @@ def _pose_error(T_est, T_gt):
 
 
 def _orbit_error(T_est, T_gt, sym_rotations):
-    """Smallest pose error over a symmetry group — the only meaningful score for a
+    """Smallest pose error over a symmetry group -- the only meaningful score for a
     symmetric part, since every group element names the same physical placement."""
     best = (1e9, 1e9)
     for S in sym_rotations:
@@ -119,12 +119,12 @@ def _box_c2_group():
     return [np.eye(3)] + [Rot.from_rotvec(np.pi * np.eye(3)[k]).as_matrix() for k in range(3)]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 1. The local-frame convention
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def test_frames_map_normals_onto_x_including_the_degenerate_ones():
-    """The ±x normals have no unique rotation axis, so the generic Rodrigues formula
+    """The +/-x normals have no unique rotation axis, so the generic Rodrigues formula
     divides by zero there. Both are exercised explicitly."""
     rng = np.random.default_rng(0)
     n = rng.normal(size=(200, 3))
@@ -162,9 +162,9 @@ def test_alpha_and_pose_reconstruction_are_inverse():
     assert np.allclose(rec, T, atol=1e-9)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 2. Recovery
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def test_identity_recovery_on_an_asymmetric_part():
     model, pts, nrm = _build(_bumpy())
@@ -181,8 +181,8 @@ def test_known_transform_recovery_on_an_asymmetric_part(seed):
     """The core claim: an arbitrary rigid placement is recovered to coarse-match tolerance.
 
     5 mm / 10 deg is the repo's LOOSE gate (``MM_Optimizer/search_config.py``). Coarse PPF
-    is not expected to reach the 2 mm / 5 deg TIGHT gate unaided — that is what a fine
-    refinement stage is for — so asserting the tight gate here would encode a false
+    is not expected to reach the 2 mm / 5 deg TIGHT gate unaided -- that is what a fine
+    refinement stage is for -- so asserting the tight gate here would encode a false
     expectation of the algorithm.
     """
     model, pts, nrm = _build(_bumpy())
@@ -201,7 +201,7 @@ def test_symmetric_part_lands_in_the_symmetry_orbit():
     """A cuboid's C2 axes make four rotations physically identical.
 
     Scored against one nominated ground truth this fails ~75% of the time for reasons that
-    say nothing about the matcher — which is exactly why the benchmark quotients pose error
+    say nothing about the matcher -- which is exactly why the benchmark quotients pose error
     by the symmetry group instead of switching angular scoring off.
     """
     model, pts, nrm = _build(_box())
@@ -231,9 +231,9 @@ def test_recall_degrades_gracefully_with_occlusion():
     assert pos < 8e-3 and ang < 15.0, f"half-visible: {pos * 1e3:.2f} mm / {ang:.2f} deg"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. Weighted voting — the mechanism the ablation depends on
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# 3. Weighted voting -- the mechanism the ablation depends on
+# -----------------------------------------------------------------------------
 
 @pytest.mark.parametrize("mode", ["ref", "product", "geometric_mean"])
 def test_uniform_weights_reproduce_the_unweighted_result(mode):
@@ -271,7 +271,7 @@ def test_weights_actually_change_the_vote_tally():
 
 def test_negative_weights_are_rejected():
     """A negative vote is not a down-weighting, it is a subtraction from an unrelated
-    hypothesis's tally — silently corrupting the accumulator rather than the intended cell."""
+    hypothesis's tally -- silently corrupting the accumulator rather than the intended cell."""
     model, _, _ = _build(_bumpy())
     with pytest.raises(ValueError):
         model.with_weights(-np.ones(model.n_points))
@@ -279,9 +279,9 @@ def test_negative_weights_are_rejected():
         model.with_weights(np.ones(model.n_points + 3))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 4. Parameter derivation
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @pytest.mark.parametrize("scale", [0.25, 1.0, 4.0])
 def test_derived_config_is_scale_invariant(scale):
@@ -319,7 +319,7 @@ def test_tau_hits_the_requested_point_budget():
 
 def test_under_resolved_parts_are_reported_not_silently_accepted():
     """When the smallest feature is finer than the sensor can see, the honest answer is to
-    clamp to the sensor floor *and say so* — that is a real answer to "will this part work",
+    clamp to the sensor floor *and say so* -- that is a real answer to "will this part work",
     which nothing else in the pipeline currently provides."""
     pts, _ = _cloud(_bumpy())
     cfg = PPFConfig.derive(pts, min_feature_size=1e-6, sensor=SensorProfile())
@@ -327,7 +327,7 @@ def test_under_resolved_parts_are_reported_not_silently_accepted():
 
 
 def test_bucket_cap_bounds_a_degenerate_part():
-    """A cuboid collapses onto six distinct normals, so its feature bins are enormous —
+    """A cuboid collapses onto six distinct normals, so its feature bins are enormous --
     12 000 entries before capping, which expands to ~1.8e9 votes for a single instance.
 
     Deduplication does not help here: it runs after expansion, so it fixes the vote *bias*
@@ -340,7 +340,7 @@ def test_bucket_cap_bounds_a_degenerate_part():
 
 def test_key_index_agrees_with_binary_search_and_survives_weighting():
     """The direct lookup index must be invisible in the result, including through
-    ``with_weights`` — which rebuilds the model from ``__dict__`` and would silently drop the
+    ``with_weights`` -- which rebuilds the model from ``__dict__`` and would silently drop the
     index (costing speed, not correctness) or carry a stale one (costing correctness)."""
     from registration.ppf_saliency.model import _build_key_offsets
 
@@ -375,7 +375,7 @@ def test_backend_and_match_many_preserve_weighted_results():
 
     Weighted voting is the whole reason this package exists separately, so it is the path
     most worth pinning: if the accumulator's weights were dropped or reordered on the device,
-    every ablation arm would silently collapse toward the uniform baseline — which looks like
+    every ablation arm would silently collapse toward the uniform baseline -- which looks like
     a finding rather than a bug.
     """
     from registration.ppf_saliency import cupy_available, match_many
@@ -421,7 +421,7 @@ def test_unknown_backend_is_rejected_but_a_missing_gpu_is_not():
     """A typo must raise; an absent GPU must not.
 
     The CuPy path is implemented now, so the old blanket ``NotImplementedError`` no longer
-    applies. What it was protecting — a GPU benchmark quietly reporting CPU timings — is
+    applies. What it was protecting -- a GPU benchmark quietly reporting CPU timings -- is
     preserved by ``MatchResult.backend`` recording which module actually ran.
     """
     model, pts, nrm = _build(_bumpy())

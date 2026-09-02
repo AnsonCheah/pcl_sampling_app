@@ -1,4 +1,4 @@
-"""PCL Sampling App — single entrypoint for GUI and headless use.
+"""PCL Sampling App -- single entrypoint for GUI and headless use.
 
     python app.py                 # GUI (default)
     python app.py --headless      # interactive terminal pipeline
@@ -135,7 +135,7 @@ class MeshSamplingApp:
 
         # Stages are built AFTER the GUI shell and AFTER their owned state is seeded, because
         # BaseStage.__init__ calls build_panel(), which reads both. Seeding comes from the
-        # classes' `downstream` dicts — the same declarations _restart() replays — so no stage
+        # classes' `downstream` dicts -- the same declarations _restart() replays -- so no stage
         # has to defend itself with getattr(app, "x", None) against its own construction order.
         for cls in STAGE_CLASSES.values():
             for attr, factory in cls.downstream.items():
@@ -194,7 +194,7 @@ class MeshSamplingApp:
         """Merge the axes glyph into the default UI font and return the button label.
 
         gui.Button carries no font id (only Label does), so a custom font cannot be attached to
-        the widget — the glyph has to go into DEFAULT_FONT_ID itself. The stock UI faces do not
+        the widget -- the glyph has to go into DEFAULT_FONT_ID itself. The stock UI faces do not
         have it: segoeui.ttf and arial.ttf carry none of the candidate code points. DejaVuSans
         does, and ships inside the conda env via matplotlib, so it needs no OS font.
 
@@ -322,7 +322,7 @@ class MeshSamplingApp:
     # ===============================
     @staticmethod
     def _framing_key(bbox):
-        """(centre, diagonal) — the shape-and-place summary _framing_changed compares."""
+        """(centre, diagonal) -- the shape-and-place summary _framing_changed compares."""
         lo = np.asarray(bbox.get_min_bound(), dtype=float)
         hi = np.asarray(bbox.get_max_bound(), dtype=float)
         return (lo + hi) / 2.0, float(np.linalg.norm(hi - lo))
@@ -334,7 +334,7 @@ class MeshSamplingApp:
         """Has the viewport's content actually changed since the last framing?
 
         Compared as centre + diagonal rather than raw corners, so re-showing the same object in a
-        slightly different form counts as unchanged — a cloud sampled from a mesh has almost the
+        slightly different form counts as unchanged -- a cloud sampled from a mesh has almost the
         same box, just not to the millimetre. Both are relative to the diagonal, so the test scales
         from a 5 cm part to a 76 cm bin.
         """
@@ -350,7 +350,7 @@ class MeshSamplingApp:
     def _reframe(self, fov_deg=41.1, margin=1.15, force=False):
         """Frame the camera on whatever is currently in the viewport, from a fixed isometric angle.
 
-        The renderer's own accumulated bounding box is the only source of bounds — no stage state,
+        The renderer's own accumulated bounding box is the only source of bounds -- no stage state,
         no per-caller overrides. Deriving the view from app state instead of scene contents is what
         made the face-up picker frame the bin after a scene had been generated.
 
@@ -396,12 +396,12 @@ class MeshSamplingApp:
         """Repaint the viewport. Use this, never `scene.force_redraw()` on its own.
 
         `SceneWidget::ForceRedraw` opens with `if (!scene_caching_enabled_) return;` and caching
-        defaults to off (we never enable it), so calling it alone is a no-op — which is why
+        defaults to off (we never enable it), so calling it alone is a no-op -- which is why
         geometry added from a finished worker only appeared once the mouse moved and generated a
         real input event. `window.post_redraw()` is the call that actually queues a repaint; the
         `post_to_main_thread` binding documents it ("you will need to manually request a redraw of
         the window with w.post_redraw()"). Both are issued here, in that order, so this stays
-        correct if scene caching is ever turned on — the same pairing O3DVisualizer uses.
+        correct if scene caching is ever turned on -- the same pairing O3DVisualizer uses.
         """
         if self.headless:
             return
@@ -419,7 +419,7 @@ class MeshSamplingApp:
 
     def _set_origin_axes(self, show: bool):
         """Single entry point for the axes toggle, shared by the button and the X key, so the two
-        can never disagree. Deliberately does not reframe — the camera must not jump."""
+        can never disagree. Deliberately does not reframe -- the camera must not jump."""
         self.show_origin_frame = bool(show)
         self.btn_axes.is_on = self.show_origin_frame
         self.scene.scene.show_axes(self.show_origin_frame)
@@ -463,7 +463,7 @@ class MeshSamplingApp:
 
     def _clear_scene(self):
         self.scene.scene.clear_geometry()
-        # Deliberately no show_axes() here — see the note in _reframe. Calling it at this point
+        # Deliberately no show_axes() here -- see the note in _reframe. Calling it at this point
         # rebuilds the axes from the bounds clear_geometry just emptied, pinning them at 1 m.
 
     def main_thread(self, fn):
@@ -683,7 +683,7 @@ def run_sampling(app, express):
     if express:
         # Uniform, matching the GUI default and `bench/generate_scenes.py`. Adaptive
         # produced a p90/p10 spacing spread of ~4.3, and the ambiguity analysis derives a
-        # single global epsilon from the median spacing — one number that is simultaneously
+        # single global epsilon from the median spacing -- one number that is simultaneously
         # too tight for the sparse regions and too loose for the dense ones. It also meant
         # the express path and the bench sweep built different clouds for the same part,
         # so any comparison between them varied two things at once.

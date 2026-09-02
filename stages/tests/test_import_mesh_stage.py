@@ -11,7 +11,7 @@ from enums import Stage
 
 
 def _mesh_with_debris():
-    """A dense part plus a 12-triangle speck 1 m away — the 96330MB000.STL failure shape."""
+    """A dense part plus a 12-triangle speck 1 m away -- the 96330MB000.STL failure shape."""
     part = trimesh.creation.icosphere(subdivisions=3, radius=0.5)
     part.apply_scale([0.20, 0.07, 0.19])
     speck = trimesh.creation.box(extents=[1e-5, 1e-5, 1e-5])

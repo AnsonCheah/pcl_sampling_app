@@ -1,16 +1,16 @@
-"""Tests for the benchmark harness — arm construction, metrics, and dataset conventions.
+"""Tests for the benchmark harness -- arm construction, metrics, and dataset conventions.
 
 Run:  python -m pytest bench/tests/test_bench.py -q
 
 The harness decides what the ablation *measures*, so a silent fault here does not crash
-anything — it produces a confident wrong answer about which method is better. Two of these
+anything -- it produces a confident wrong answer about which method is better. Two of these
 tests exist because exactly that happened during development:
 
-* ``test_knee_mask_survives_an_atom_at_zero`` — 41.5% of a real heat map is exactly 0.0, the
+* ``test_knee_mask_survives_an_atom_at_zero`` -- 41.5% of a real heat map is exactly 0.0, the
   CDF knee landed on that spike, the threshold came back 0.0, and the "pruned" arm kept 100%
   of the points. It was a byte-identical copy of the baseline and would have been reported as
   evidence that pruning is harmless.
-* ``test_symmetry_aware_error_forgives_only_real_symmetry`` — the whole point of the metric
+* ``test_symmetry_aware_error_forgives_only_real_symmetry`` -- the whole point of the metric
   is to separate "correct modulo symmetry" from "wrong". Quotienting too much silently
   passes real failures; too little fails correct poses on symmetric parts.
 """
@@ -32,9 +32,9 @@ from geometry.ambiguity import AmbiguityAxis, AmbiguityProfile
 from registration.ppf_saliency import PPFConfig, downsample
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Arm construction
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def test_knee_mask_survives_an_atom_at_zero():
     """A large spike at the minimum must not swallow the knee.
@@ -49,7 +49,7 @@ def test_knee_mask_survives_an_atom_at_zero():
     heat = np.concatenate([np.zeros(4000), rng.uniform(0.05, 1.0, 6000)])
 
     mask = _knee_mask(heat)
-    assert not mask.all(), "the atom at zero swallowed the knee — nothing was pruned"
+    assert not mask.all(), "the atom at zero swallowed the knee -- nothing was pruned"
     assert not mask[:4000].any(), "zero-scoring points must be dropped, they are the point"
     assert mask.sum() >= 50
 
@@ -64,7 +64,7 @@ def test_knee_mask_keeps_everything_when_there_is_nothing_to_split():
 
 def test_arms_produce_distinct_models_that_still_span_the_part():
     """Each cloud-modifying arm must actually change the cloud, and must not collapse it
-    into one clustered patch — a model whose points share a small region has no lever arm on
+    into one clustered patch -- a model whose points share a small region has no lever arm on
     rotation and fails for a reason unrelated to what the arm is testing."""
     mesh = o3d.geometry.TriangleMesh.create_torus(0.03, 0.01, 60, 30)
     mesh.compute_vertex_normals()
@@ -120,9 +120,9 @@ def test_heat_needing_arms_refuse_to_run_without_a_heat_map():
                 build_arm(name, ctx)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Metrics
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _cylinder_points(n=3000, r=0.02, h=0.08):
     mesh = o3d.geometry.TriangleMesh.create_cylinder(r, h, resolution=48)
@@ -166,7 +166,7 @@ def test_symmetry_aware_error_forgives_only_real_symmetry():
 
 
 def test_view_dependent_axes_are_never_quotiented_away():
-    """A view-dependent ambiguity is not a symmetry — the part is genuinely not invariant and
+    """A view-dependent ambiguity is not a symmetry -- the part is genuinely not invariant and
     the pose is genuinely wrong. Forgiving it would hide exactly the failures this project
     exists to fix."""
     view_only = _profile_with_axis(fold=2, is_global=False)

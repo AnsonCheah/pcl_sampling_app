@@ -1,5 +1,5 @@
 """
-test_segment_instances.py — Regression + multi-label tests for segment_instances.py.
+test_segment_instances.py -- Regression + multi-label tests for segment_instances.py.
 
 Run from project root:
     python sensor/tests/test_segment_instances.py
@@ -42,7 +42,7 @@ def _ensure_det_golden(name, render):
     """Load (or, if absent, regenerate) the deterministic-models golden for `name`.
 
     The golden .npz are gitignored, so on a fresh checkout they are rebuilt from the
-    current CPU code — this turns the bitwise test into a regression lock on the
+    current CPU code -- this turns the bitwise test into a regression lock on the
     current (verified) behaviour. The committed goldens carry the original
     pre-refactor values; delete them to re-baseline.
     """
@@ -75,13 +75,13 @@ _results = []
 
 def _check(name, cond, detail=""):
     status = PASS if cond else FAIL
-    print(f"  [{status}] {name}" + (f" — {detail}" if detail else ""))
+    print(f"  [{status}] {name}" + (f" -- {detail}" if detail else ""))
     _results.append((name, cond))
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 #  Existing function regression tests
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def test_build_geom_id_image_shape_and_background():
     render, _ = make_render_dict()
@@ -93,7 +93,7 @@ def test_build_geom_id_image_shape_and_background():
     bg_count = (img == -1).sum()
     _check("geom_id_image_has_background", bg_count > 0,
            f"bg_pixels={bg_count}")
-    # All visible-point pixels hold a valid (≥0) geom_id
+    # All visible-point pixels hold a valid (>=0) geom_id
     valid_ids = set(render["geom_ids"].tolist())
     img_ids   = set(img[img >= 0].tolist())
     _check("geom_id_image_ids_match_render", img_ids.issubset(valid_ids),
@@ -192,9 +192,9 @@ def test_build_perturbed_masks_toggles_work():
                iou > 0.90, f"iou={iou:.3f}")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 #  Multi-label segmentation tests
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def test_segment_returns_dict():
     render, keep = make_render_dict()
@@ -214,7 +214,7 @@ def test_no_resolve_conflicts_allows_overlap():
     # Structural overlap: a large dilation bridges the ~8 px gap between the two
     # silhouettes deterministically. Erosion and boundary noise are disabled so the
     # overlap does not depend on a stochastic boundary realisation (with crops, the
-    # boundary-noise field is a different draw than the full frame — see module docs).
+    # boundary-noise field is a different draw than the full frame -- see module docs).
     render, keep = make_two_plane_render_dict()
     pts  = render["points"][keep]
     pidx = render["pixel_idx"][keep]
@@ -224,7 +224,7 @@ def test_no_resolve_conflicts_allows_overlap():
     ids = list(result.keys())
     if len(ids) < 2:
         _check("two_plane_overlap_skipped_single_instance",
-               True, "only 1 instance survived segmentation — skip overlap check")
+               True, "only 1 instance survived segmentation -- skip overlap check")
         return
     masks_img, _ = build_perturbed_masks(render, resolve_conflicts=False, **ov_kw)
     pairs = [(ids[i], ids[j]) for i in range(len(ids)) for j in range(i+1, len(ids))]
@@ -291,12 +291,12 @@ def test_single_instance_no_overlap():
            f"assigned={mask.sum()}")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  segmentation_stats — dict-format path
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+#  segmentation_stats -- dict-format path
+# ==============================================================================
 
 def test_segmentation_stats_dict_perfect_match():
-    # {geom_id: bool_mask} with no errors → iou=1, confusion=0, boundary_loss=0
+    # {geom_id: bool_mask} with no errors -> iou=1, confusion=0, boundary_loss=0
     canonical  = np.array([0, 0, 0, 1, 1, 1, -1], dtype=np.int32)
     perturbed  = {
         0: np.array([True, True, True, False, False, False, False]),
@@ -318,14 +318,14 @@ def test_segmentation_stats_dict_perfect_match():
 
 
 def test_segmentation_stats_dict_confusion():
-    # Point 1 (canonical inst 0) absorbed into inst 1 → confusion detected
+    # Point 1 (canonical inst 0) absorbed into inst 1 -> confusion detected
     canonical  = np.array([0, 0, 1, 1], dtype=np.int32)
     perturbed  = {
         0: np.array([True,  False, False, False]),
         1: np.array([False, True,  True,  True ]),
     }
     stats = segmentation_stats(perturbed, canonical)
-    # Inst 0 confused frac = 1/2 = 0.5; inst 1 = 0 → mean = 0.25
+    # Inst 0 confused frac = 1/2 = 0.5; inst 1 = 0 -> mean = 0.25
     _check("stats_dict_confusion_detected",
            stats["mean_confusion_frac"] > 0.0,
            f"confusion={stats['mean_confusion_frac']:.4f}")
@@ -335,7 +335,7 @@ def test_segmentation_stats_dict_confusion():
 
 
 def test_segmentation_stats_dict_unassigned():
-    # Point 1 (canonical inst 0) appears in no mask → boundary loss + unassigned
+    # Point 1 (canonical inst 0) appears in no mask -> boundary loss + unassigned
     canonical  = np.array([0, 0, 1, 1], dtype=np.int32)
     perturbed  = {
         0: np.array([True,  False, False, False]),
@@ -353,9 +353,9 @@ def test_segmentation_stats_dict_unassigned():
            f"confusion={stats['mean_confusion_frac']:.4f}")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 #  Crop refactor + GPU backend equivalence
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def test_crop_equiv_deterministic_models_bitwise():
     # With boundary noise OFF, the cropped pipeline (erosion+dilation+confusion+
@@ -377,7 +377,7 @@ def test_crop_equiv_deterministic_models_bitwise():
 
 def test_crop_equiv_boundary_noise_statistical():
     # Boundary noise draws an array-shaped field, so a crop is a different RNG
-    # realisation than the full frame — not bitwise. The model must still be
+    # realisation than the full frame -- not bitwise. The model must still be
     # statistically the same under cropping: near-zero-mean area change, of a
     # magnitude comparable to the full-frame computation.
     render, _ = make_two_plane_render_dict()
@@ -505,9 +505,9 @@ def test_scaling_smoke():
         si._HAS_GPU = saved
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 #  2D instance metrics (aspect ratio / area ratio candidate-filter inputs)
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def test_tight_bbox_metrics_known_mask():
     # 3-row x 6-col solid block embedded (with padding) in a larger frame.
@@ -552,9 +552,9 @@ def test_segment_point_cloud_return_metrics_aligns_with_masks():
                f"got={m['pixel_area']} expected={expected_area}")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 #  Runner
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 if __name__ == "__main__":
     tests = [
@@ -591,7 +591,7 @@ if __name__ == "__main__":
     ]
 
     print(f"\n{'='*60}")
-    print(f"  test_segment_instances.py — {len(tests)} tests")
+    print(f"  test_segment_instances.py -- {len(tests)} tests")
     print(f"{'='*60}")
     for t in tests:
         print(f"\n{t.__name__}")

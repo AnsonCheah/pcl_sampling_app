@@ -12,7 +12,7 @@ What you are looking at
     Coloured clouds the reference model placed at each ESTIMATED pose.  If the pose is right
                     the colour sits flush on the grey; if it is wrong the model visibly
                     floats, sinks, or spins away from the points it claims to explain.  No
-                    ground-truth rendering is needed to see that — the scene points *are*
+                    ground-truth rendering is needed to see that -- the scene points *are*
                     the evidence.
     Colour          green within 2 mm / 5 deg, amber within 5 mm / 10 deg, red beyond.
                     (``--color-by instance`` reverts to one hue per instance if you want to
@@ -63,7 +63,7 @@ RED = (0.92, 0.22, 0.22)
 GREY = (0.55, 0.55, 0.55)
 
 
-# ── arms ──────────────────────────────────────────────────────────────────────
+# -- arms ----------------------------------------------------------------------
 
 def build_arms(model: PPFModel, names: List[str], scene) -> Dict[str, PPFModel]:
     """Map arm name -> a model carrying that arm's vote weights."""
@@ -77,7 +77,7 @@ def build_arms(model: PPFModel, names: List[str], scene) -> Dict[str, PPFModel]:
             w = _ambiguity_weights(model, scene)
             if w is None:
                 print("[skip] arm 'ambiguity': no per-point heat map available. It is never "
-                      "persisted, so it has to be recomputed from the mesh — pass "
+                      "persisted, so it has to be recomputed from the mesh -- pass "
                       "--mesh <part.stl>.")
                 continue
             out[name] = model.with_weights(w)
@@ -107,7 +107,7 @@ def _ambiguity_weights(model: PPFModel, scene) -> Optional[np.ndarray]:
     return transfer_weights(scene.ref_points, disc, model.points)
 
 
-# ── geometry helpers (visual language shared with MM_Optimizer/visualize_match.py) ──
+# -- geometry helpers (visual language shared with MM_Optimizer/visualize_match.py) --
 
 def _instance_color(i: int) -> Tuple[float, float, float]:
     return golden_hue_color(i, 0.75, 0.98)
@@ -160,7 +160,7 @@ def _class_color(pos: float, ang: float) -> Tuple[float, float, float]:
     return RED
 
 
-# ── per-arm pass ──────────────────────────────────────────────────────────────
+# -- per-arm pass --------------------------------------------------------------
 
 def backdrop_points(scene, mode: str, voxel: float) -> np.ndarray:
     """The grey cloud a panel is drawn against.
@@ -168,7 +168,7 @@ def backdrop_points(scene, mode: str, voxel: float) -> np.ndarray:
     Defaults to the union of the *segmented instances* rather than ``scene.ply``. The full
     bin cloud is ~1.25 M points of which the floor and walls are the overwhelming majority,
     so on a 760 mm bin holding 110 mm parts the parts are visually lost in background the
-    matcher never even saw — it is handed one cluster at a time.
+    matcher never even saw -- it is handed one cluster at a time.
     """
     if mode == "none":
         return np.empty((0, 3))
@@ -256,7 +256,7 @@ def _report(name: str, rows, elapsed: float) -> Dict[str, float]:
     return stat
 
 
-# ── entry point ───────────────────────────────────────────────────────────────
+# -- entry point ---------------------------------------------------------------
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
@@ -358,7 +358,7 @@ def main() -> None:
           f"{' | '.join(arms)}")
 
     if args.save or not args.no_show:
-        _show(geoms, f"ppf overlay — {part} {os.path.basename(scene_dir)}",
+        _show(geoms, f"ppf overlay -- {part} {os.path.basename(scene_dir)}",
               args.save, not args.no_show, args.point_size)
 
 

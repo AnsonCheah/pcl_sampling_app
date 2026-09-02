@@ -1,11 +1,11 @@
 """
-scene_render.py — Synthetic structured-light depth sensor simulation pipeline.
+scene_render.py -- Synthetic structured-light depth sensor simulation pipeline.
 
 scene_render() is the single entry point for geometry. It performs a pure
 canonical raycast and returns a render dict. Every noise, dropout, and
 outlier function in this file operates on that dict downstream.
 
-Call order is load-bearing — each stage builds on the previous state:
+Call order is load-bearing -- each stage builds on the previous state:
 
     dropout -> image-space effects -> edge artifacts -> structured outliers
             -> scan-line banding -> sensor noise -> surface noise
@@ -14,7 +14,7 @@ Call order is load-bearing — each stage builds on the previous state:
 rather than a copy kept here, which would drift.
 
 render dict fields
-──────────────────
+------------------
   Geometry  (N = projector-illuminated, shadow-free points)
     points           (N,3)   world-space hit positions
     normals          (N,3)   estimated surface normals
@@ -24,11 +24,11 @@ render dict fields
   Per-point ray/sensor geometry
     ray_origins      (N,3)
     ray_dirs         (N,3)   unit camera ray direction
-    proj_dirs        (N,3)   unit projector→point direction
-    proj_dist        (N,)    projector–point distance
-    cos_cam          (N,)    |n · v_cam|
-    cos_proj         (N,)    |n · v_proj|
-    snr_proxy        (N,)    cos_cam·cos_proj/proj_dist²  normalised [0,1]
+    proj_dirs        (N,3)   unit projector->point direction
+    proj_dist        (N,)    projector-point distance
+    cos_cam          (N,)    |n * v_cam|
+    cos_proj         (N,)    |n * v_proj|
+    snr_proxy        (N,)    cos_cam*cos_proj/proj_dist^2  normalised [0,1]
     sensor_origin    (3,)    camera position (world)
     proj_origin      (3,)    projector position (world)
 
@@ -61,18 +61,18 @@ _PER_POINT_KEYS = frozenset({
     "cos_cam", "cos_proj", "snr_proxy", "pixel_idx",
 })
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 1 — Canonical renderer
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+#  SECTION 1 -- Canonical renderer
+# ==============================================================================
 
 def scene_render(meshes:dict, T_cam, look_at, fov, res_width, res_height,
                  baseline=0.27, normal_radius=0.005, normal_max_nn=50,
                  verbose=False):
     """
-    Pure canonical raycast. Applies only binary projector shadow — a geometric
+    Pure canonical raycast. Applies only binary projector shadow -- a geometric
     fact, not a stochastic model.
 
-    FIX (was absolute 1 mm): shadow tolerance is now RELATIVE to range —
+    FIX (was absolute 1 mm): shadow tolerance is now RELATIVE to range --
     max(1 mm, 0.05% of projector distance). This prevents false occlusion at
     close range and missed shadows at long range.
 
@@ -139,7 +139,7 @@ def scene_render(meshes:dict, T_cam, look_at, fov, res_width, res_height,
     cos_cam  = np.abs(np.einsum("ij,ij->i", v_cam,  normals))
     cos_proj = np.abs(np.einsum("ij,ij->i", v_proj, normals))
 
-    # SNR proxy precomputed once; avoids 3× redundant recomputation downstream.
+    # SNR proxy precomputed once; avoids 3x redundant recomputation downstream.
     snr_raw   = cos_cam * cos_proj / (proj_dist**2 + 1e-12)
     snr_proxy = (snr_raw - snr_raw.min()) / (snr_raw.max() - snr_raw.min() + 1e-12)
 
@@ -171,9 +171,9 @@ def scene_render(meshes:dict, T_cam, look_at, fov, res_width, res_height,
     )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 2 — Depth image helpers
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+#  SECTION 2 -- Depth image helpers
+# ==============================================================================
 
 def make_depth_image(render):
     """(H,W) float32 from visible points only. NaN for missing pixels."""
@@ -184,7 +184,7 @@ def make_depth_image(render):
 
 
 def compute_edge_strength(depth_img):
-    """Sobel magnitude, NaN→far, normalised [0,1] by 99th pct."""
+    """Sobel magnitude, NaN->far, normalised [0,1] by 99th pct."""
     gx, gy = compute_depth_gradient(depth_img)
     mag = np.sqrt(gx.astype(np.float64) ** 2 + gy.astype(np.float64) ** 2).astype(np.float32)
     hi  = np.percentile(mag[mag > 0], 99) if np.any(mag > 0) else 1.0
@@ -192,7 +192,7 @@ def compute_edge_strength(depth_img):
 
 
 def compute_depth_gradient(depth_img):
-    """Sobel (gx, gy) each (H,W) float32. NaN→far before differencing."""
+    """Sobel (gx, gy) each (H,W) float32. NaN->far before differencing."""
     d = depth_img.copy().astype(np.float64)
     far = float(np.nanmax(d)) * 10.0 if not np.all(np.isnan(d)) else 1e6
     d[np.isnan(d)] = far
@@ -202,9 +202,9 @@ def compute_depth_gradient(depth_img):
     return gx, gy
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 3 — Dropout
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+#  SECTION 3 -- Dropout
+# ==============================================================================
 
 def _specular_keep(normals, ray_dirs, proj_dirs, roughness):
     """
@@ -235,19 +235,19 @@ def _specular_keep_anisotropic(normals, ray_dirs, proj_dirs,
     Anisotropic specular keep-mask using Ward BRDF  (N,) bool.
 
     Models brushed / milled / rolled surfaces with directional micro-grooves:
-      alpha_t = roughness along brush direction  (tight, small — e.g. 0.10)
-      alpha_b = roughness across brush direction (loose, large — e.g. 0.40)
+      alpha_t = roughness along brush direction  (tight, small -- e.g. 0.10)
+      alpha_b = roughness across brush direction (loose, large -- e.g. 0.40)
 
     anisotropy blends Ward anisotropic with Ward isotropic:
-      0.0 → delegates to existing _specular_keep() (no regression)
-      1.0 → full Ward anisotropic
+      0.0 -> delegates to existing _specular_keep() (no regression)
+      1.0 -> full Ward anisotropic
 
     Physical model
-    ──────────────
+    --------------
     Ward spherical-Gaussian in the half-angle H domain:
-        lobe_aniso = exp(-tan²θ_h · (cos²φ_h/α_t² + sin²φ_h/α_b²))
-    where θ_h = elevation of H above n, φ_h = azimuth of H in the (t, b)
-    surface tangent frame.  Normalisation constants are dropped — only the
+        lobe_aniso = exp(-tan^2theta_h * (cos^2phi_h/alpha_t^2 + sin^2phi_h/alpha_b^2))
+    where theta_h = elevation of H above n, phi_h = azimuth of H in the (t, b)
+    surface tangent frame.  Normalisation constants are dropped -- only the
     relative per-point keep probability matters.
     """
     if anisotropy == 0.:
@@ -263,7 +263,7 @@ def _specular_keep_anisotropic(normals, ray_dirs, proj_dirs,
     n_dot_h  = np.einsum("ij,ij->i", normals, H).clip(0., 1.)
     tan_h_sq = np.maximum(0., 1. - n_dot_h ** 2) / (n_dot_h ** 2 + 1e-6)
 
-    # ── Tangent frame ──────────────────────────────────────────────────────────
+    # -- Tangent frame ----------------------------------------------------------
     if brush_dir is None:
         brush_world = np.broadcast_to(np.array([1., 0., 0.]), (N, 3)).copy()
     else:
@@ -272,7 +272,7 @@ def _specular_keep_anisotropic(normals, ray_dirs, proj_dirs,
     dot_nb = np.einsum("ij,ij->i", normals, brush_world)
     t      = brush_world - dot_nb[:, None] * normals
     t_norm = np.linalg.norm(t, axis=1, keepdims=True)
-    # Fallback: brush direction is parallel to normal → use world Y
+    # Fallback: brush direction is parallel to normal -> use world Y
     fallback = np.cross(normals, np.broadcast_to([0., 1., 0.], (N, 3)))
     fallback /= np.linalg.norm(fallback, axis=1, keepdims=True) + 1e-12
     t = np.where(t_norm > 1e-6, t / (t_norm + 1e-12), fallback)
@@ -297,7 +297,7 @@ def _specular_keep_anisotropic(normals, ray_dirs, proj_dirs,
 
 
 def _grazing_keep(cos_cam, cos_proj, cam_thr, proj_thr, steepness, rng):
-    """Soft sigmoid grazing dropout. p_keep = sigmoid((cos−thr)/steepness)."""
+    """Soft sigmoid grazing dropout. p_keep = sigmoid((cos-thr)/steepness)."""
     def _s(c, t): return rng.random(len(c)) < 1. / (1. + np.exp(-(c-t) / (steepness+1e-12)))
     return _s(cos_cam, cam_thr) & _s(cos_proj, proj_thr)
 
@@ -310,11 +310,11 @@ def _albedo_pepper_keep(snr, albedo, base_rate, rng):
     regardless of geometry, driving effective SNR near zero and hence near-total dropout.
 
         effective_snr = snr_proxy * albedo      (both in [0, 1])
-        p_drop = base_rate * (1 − effective_snr)
+        p_drop = base_rate * (1 - effective_snr)
 
     Key: we do NOT renormalise effective_snr. Renormalising would divide out the
-    albedo factor and make all surfaces equally likely to drop — defeating the
-    purpose entirely. albedo=0.03 drives effective_snr ≈ 0 → p_drop ≈ base_rate
+    albedo factor and make all surfaces equally likely to drop -- defeating the
+    purpose entirely. albedo=0.03 drives effective_snr ~ 0 -> p_drop ~ base_rate
     for all points on that surface, regardless of geometry.
     """
     eff = snr * np.asarray(albedo, np.float64)   # in [0, 1]
@@ -346,13 +346,13 @@ def compute_dropout_mask(render, roughness=0.4,
     Boolean keep-mask  (N,)  for render["points"].
 
     Four effects in order:
-      1. Specular    — bidirectional GGX: reflect v_proj off n, check v_cam.
+      1. Specular    -- bidirectional GGX: reflect v_proj off n, check v_cam.
                        Diffuse floor (= roughness) prevents Lambertian dropout.
                        When anisotropy > 0, Ward anisotropic BRDF is used instead,
                        modelling brushed / milled / rolled metal micro-grooves.
-      2. Grazing     — sigmoid on both cos_cam and cos_proj.
-      3. Albedo/SNR  — dark materials absorb projected light → high dropout.
-      4. Density     — oblique surfaces get probabilistically thinned (optional).
+      2. Grazing     -- sigmoid on both cos_cam and cos_proj.
+      3. Albedo/SNR  -- dark materials absorb projected light -> high dropout.
+      4. Density     -- oblique surfaces get probabilistically thinned (optional).
 
     Parameters
     ----------
@@ -361,12 +361,12 @@ def compute_dropout_mask(render, roughness=0.4,
                           white plastic ~0.85, bare steel ~0.60,
                           anodized Al ~0.15, black rubber ~0.03.
     default_albedo      : fallback for unspecified geom_ids.
-    density_cos_ref     : enable density thinning; typical 0.7 (≈45° half-angle).
+    density_cos_ref     : enable density thinning; typical 0.7 (~45deg half-angle).
     anisotropy          : 0 = isotropic GGX (default, no change), 1 = full Ward
                           anisotropic. Set > 0 for brushed/milled metal parts.
-    alpha_t             : Ward roughness along brush direction. Typical 0.05–0.20.
-    alpha_b             : Ward roughness across brush direction. Typical 0.30–0.60.
-    brush_dir           : (3,) world-space brush direction. None → horizontal [1,0,0].
+    alpha_t             : Ward roughness along brush direction. Typical 0.05-0.20.
+    alpha_b             : Ward roughness across brush direction. Typical 0.30-0.60.
+    brush_dir           : (3,) world-space brush direction. None -> horizontal [1,0,0].
     """
     start = time.time()
     rng    = np.random.default_rng(seed)
@@ -408,7 +408,7 @@ def add_projector_nonuniformity(render, proj_fpn_sigma=0.05, proj_fpn_scale=20.0
     """
     Projector illumination non-uniformity (projector-side FPN).
 
-    DMD / LCD projector pixels have individual gain variation (~2–8 % for typical
+    DMD / LCD projector pixels have individual gain variation (~2-8 % for typical
     industrial projectors), causing spatially non-uniform fringe contrast across
     the field. This is DISTINCT from camera FPN (sensor-side, per camera pixel):
     - Camera FPN: same sensor pixel always reads the same bias, regardless of
@@ -419,19 +419,19 @@ def add_projector_nonuniformity(render, proj_fpn_sigma=0.05, proj_fpn_scale=20.0
       different camera FPN.
 
     Model
-    ─────
+    -----
     3D Perlin noise evaluated at the unit projector direction vector
     (proj_dirs) parameterises the projector's angular image space. The gain
-    G ∈ [1 − σ, 1 + σ] is multiplied into snr_proxy before dropout. At σ = 0.05
-    this produces a ±5 % intensity variation, typical for an industrial DMD.
+    G in [1 - sigma, 1 + sigma] is multiplied into snr_proxy before dropout. At sigma = 0.05
+    this produces a +/-5 % intensity variation, typical for an industrial DMD.
 
     Returns a shallow copy of render with snr_proxy modulated.
 
     Parameters
     ----------
-    proj_fpn_sigma : 1σ gain variation (fractional). Typical: 0.03–0.08.
-    proj_fpn_scale : Perlin scale in projector direction space. Higher → finer
-                     non-uniformity pattern. Typical: 10–30.
+    proj_fpn_sigma : 1sigma gain variation (fractional). Typical: 0.03-0.08.
+    proj_fpn_scale : Perlin scale in projector direction space. Higher -> finer
+                     non-uniformity pattern. Typical: 10-30.
     """
     start = time.time()
     # proj_dirs are unit vectors from projector to each surface point.
@@ -440,7 +440,7 @@ def add_projector_nonuniformity(render, proj_fpn_sigma=0.05, proj_fpn_scale=20.0
     field = _Perlin3D(seed=seed + 2000)(render["proj_dirs"], scale=proj_fpn_scale)
     # Normalise to [-1, 1] then apply gain variation
     field  = field / (np.abs(field).max() + 1e-12)
-    gain   = 1.0 + proj_fpn_sigma * field          # gain ∈ [1-σ, 1+σ]
+    gain   = 1.0 + proj_fpn_sigma * field          # gain in [1-sigma, 1+sigma]
     out    = dict(render)
     out["snr_proxy"] = np.clip(render["snr_proxy"] * gain, 0., 1.)
     if verbose: rp(f"{sys._getframe().f_code.co_name} took {np.round(time.time() - start, 6)}s")
@@ -453,8 +453,8 @@ def add_specular_patch_missing(render, keep, roughness=0.25,
     """
     Coherent specular patch missing.
 
-    Real structured-light sensors exhibit contiguous missing regions — not
-    scattered per-point dropout — when the specular lobe of a smooth surface
+    Real structured-light sensors exhibit contiguous missing regions -- not
+    scattered per-point dropout -- when the specular lobe of a smooth surface
     sweeps away from the camera. The GGX NDF D(H) is low across the whole
     connected patch simultaneously, so the entire region falls below the
     sensor's detection threshold together.
@@ -465,19 +465,19 @@ def add_specular_patch_missing(render, keep, roughness=0.25,
       is uniformly low and drops the entire patch at once (coherent failure).
 
     Algorithm
-    ─────────
+    ---------
     1. For each visible point: compute GGX Trowbridge-Reitz NDF D(H) where
-       H = normalize(v_cam + v_proj).  Low D → specular lobe points away.
+       H = normalize(v_cam + v_proj).  Low D -> specular lobe points away.
     2. Project D values to image space; threshold to find dark candidate pixels.
     3. scipy.ndimage.label to find connected dark regions.
-    4. For each region with area ≥ min_patch_area_px: drop with patch_dropout_rate.
+    4. For each region with area >= min_patch_area_px: drop with patch_dropout_rate.
 
-    Default parameters sit midway between matte plastic (roughness ≈ 0.4) and
-    brushed metal (roughness ≈ 0.15) for a generic industrial SL camera.
+    Default parameters sit midway between matte plastic (roughness ~ 0.4) and
+    brushed metal (roughness ~ 0.15) for a generic industrial SL camera.
 
     Parameters
     ----------
-    roughness           : GGX roughness parameter (α). Lower → sharper lobe →
+    roughness           : GGX roughness parameter (alpha). Lower -> sharper lobe ->
                           more coherent dark patches.  Default 0.25.
     specular_threshold  : Normalised NDF threshold below which a pixel is
                           classified as 'specular dark'. Default 0.15.
@@ -489,7 +489,7 @@ def add_specular_patch_missing(render, keep, roughness=0.25,
     start = time.time()
     rng   = np.random.default_rng(seed)
 
-    # ── GGX NDF D(H) for ALL visible points (dense image → coherent patches) ─────
+    # -- GGX NDF D(H) for ALL visible points (dense image -> coherent patches) -----
     # Using ALL visible points (not just the post-dropout kept subset) is essential:
     # kept points are sparse (~5% image fill), so their connected components are
     # single pixels.  The specular dark patch is a property of surface geometry,
@@ -505,16 +505,16 @@ def add_specular_patch_missing(render, keep, roughness=0.25,
     ndoth  = np.abs(np.einsum("ij,ij->i", nrm_all, H_all)).clip(0., 1.)
 
     # GGX Trowbridge-Reitz NDF, normalised by its own peak at ndoth=1.
-    # D_norm = alpha^4 / (ndoth^2*(alpha^2-1) + 1)^2  where alpha = roughness (GGX α).
-    # At ndoth=1 (face-on): D_norm=1.0 → always lit, never dark.
-    # At ndoth=0.707 (45° tilt), roughness=0.25: D_norm≈0.014 << 0.15 → dark.
-    # Note: alpha = roughness directly (NOT roughness²).  Squaring twice would
-    # give α=0.0625 for roughness=0.25, making D_norm≈0.10 even face-on — wrong.
-    alpha     = roughness + 1e-6                         # GGX α = roughness ∈ (0,1]
+    # D_norm = alpha^4 / (ndoth^2*(alpha^2-1) + 1)^2  where alpha = roughness (GGX alpha).
+    # At ndoth=1 (face-on): D_norm=1.0 -> always lit, never dark.
+    # At ndoth=0.707 (45deg tilt), roughness=0.25: D_norm~0.014 << 0.15 -> dark.
+    # Note: alpha = roughness directly (NOT roughness^2).  Squaring twice would
+    # give alpha=0.0625 for roughness=0.25, making D_norm~0.10 even face-on -- wrong.
+    alpha     = roughness + 1e-6                         # GGX alpha = roughness in (0,1]
     denom     = ndoth ** 2 * (alpha ** 2 - 1.0) + 1.0
-    D_norm    = alpha ** 4 / (denom ** 2 + 1e-12)       # ∈ (0, 1]
+    D_norm    = alpha ** 4 / (denom ** 2 + 1e-12)       # in (0, 1]
 
-    # ── Project D_norm to image space (dense) ─────────────────────────────────
+    # -- Project D_norm to image space (dense) ---------------------------------
     H_img, W_img = render["res"]
     D_flat           = np.zeros(H_img * W_img, np.float32)
     D_flat[pidx_all] = D_norm.astype(np.float32)
@@ -526,17 +526,17 @@ def add_specular_patch_missing(render, keep, roughness=0.25,
 
     # Pixels where the GGX lobe is weak (D_norm below threshold) are candidates
     # for coherent patch dropout.  specular_threshold=0.15 means the lobe has
-    # dropped to <15 % of peak — empirically the point where SL decoders fail.
+    # dropped to <15 % of peak -- empirically the point where SL decoders fail.
     dark_img = lit_img & (D_img < specular_threshold)
 
     if not dark_img.any():
         if verbose: rp(f"{sys._getframe().f_code.co_name} took {np.round(time.time() - start, 6)}s")
         return keep.copy()
 
-    # ── Connected components → patch dropout ──────────────────────────────────
+    # -- Connected components -> patch dropout ----------------------------------
     labeled, n_comp = _ndimage_label(dark_img)
 
-    # pixel → global index in render["points"] (all visible, not just kept)
+    # pixel -> global index in render["points"] (all visible, not just kept)
     pix2global = np.full(H_img * W_img, -1, np.int32)
     pix2global[render["pixel_idx"]] = np.arange(len(render["points"]), dtype=np.int32)
 
@@ -555,9 +555,9 @@ def add_specular_patch_missing(render, keep, roughness=0.25,
     return updated_keep
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 4 — Image-space reconstruction artifacts
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+#  SECTION 4 -- Image-space reconstruction artifacts
+# ==============================================================================
 
 def add_image_space_effects(render, keep_mask, smooth_sigma_px=0., z_ref=2., 
                             fringe_period_px=8., sigma_fringe_corr=0., seed=0,
@@ -567,30 +567,30 @@ def add_image_space_effects(render, keep_mask, smooth_sigma_px=0., z_ref=2.,
     Two depth-image-space effects that must precede edge-artifact computation.
     Returns a shallow copy of render with updated 'points' and 't_hit'.
 
-    Effect 1 — Range-dependent spatial smoothing  (smooth_sigma_px > 0)
-    ─────────────────────────────────────────────
+    Effect 1 -- Range-dependent spatial smoothing  (smooth_sigma_px > 0)
+    ---------------------------------------------
     NEW. At long range the projected fringe pitch covers more world area per
-    pixel. Surface detail finer than ~one fringe width cannot be resolved —
+    pixel. Surface detail finer than ~one fringe width cannot be resolved --
     a low-pass effect on the depth map.
 
-    σ(z) = smooth_sigma_px · (z̄/z_ref)²   where z̄ = mean depth of kept pts.
+    sigma(z) = smooth_sigma_px * (z_bar/z_ref)^2   where z_bar = mean depth of kept pts.
     Density-normalised Gaussian blur preserves absolute depth at NaN boundaries.
 
-    Effect 2 — Fringe phase correlation noise  (sigma_fringe_corr > 0)
-    ──────────────────────────────────────────
+    Effect 2 -- Fringe phase correlation noise  (sigma_fringe_corr > 0)
+    ------------------------------------------
     NEW. Adjacent pixels within one fringe period share the same captured
-    phase images → their noise is spatially correlated within ~one fringe width.
+    phase images -> their noise is spatially correlated within ~one fringe width.
     Produces the characteristic low-frequency ripple visible in real SL scans.
 
-    Modelled as Gaussian-filtered (σ = fringe_period_px/2) white noise scaled
+    Modelled as Gaussian-filtered (sigma = fringe_period_px/2) white noise scaled
     by sigma_fringe_corr, applied as a depth offset along each point's LOS.
 
     Parameters
     ----------
-    smooth_sigma_px    : blur σ at z_ref (pixels). Typical 0.3–1.0 px.
+    smooth_sigma_px    : blur sigma at z_ref (pixels). Typical 0.3-1.0 px.
     fringe_period_px   : fringe period (pixels). Sets correlation length.
-    sigma_fringe_corr  : 1σ correlated noise amplitude (metres).
-                         Typical: 0.3–0.8 × sigma_z_ref.
+    sigma_fringe_corr  : 1sigma correlated noise amplitude (metres).
+                         Typical: 0.3-0.8 x sigma_z_ref.
     """
     start = time.time()
     H, W      = render["res"]
@@ -598,7 +598,7 @@ def add_image_space_effects(render, keep_mask, smooth_sigma_px=0., z_ref=2.,
     t_hit     = render["t_hit"].copy().astype(np.float64)
     points    = render["points"].copy()
 
-    # Effect 1 — depth smoothing
+    # Effect 1 -- depth smoothing
     if smooth_sigma_px > 0.:
         vis_depth = make_depth_image(render)
         z_mean    = float(t_hit[keep_mask].mean()) if keep_mask.any() else z_ref
@@ -614,7 +614,7 @@ def add_image_space_effects(render, keep_mask, smooth_sigma_px=0., z_ref=2.,
             t_hit[ok] = t_new[ok]
             points[ok] = render["ray_origins"][ok] + t_hit[ok, None] * render["ray_dirs"][ok]
 
-    # Effect 2 — fringe phase correlation
+    # Effect 2 -- fringe phase correlation
     if sigma_fringe_corr > 0.:
         rng   = np.random.default_rng(seed)
         white = rng.standard_normal((H, W)).astype(np.float32)
@@ -635,9 +635,9 @@ def add_image_space_effects(render, keep_mask, smooth_sigma_px=0., z_ref=2.,
     return out
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 5 — Edge artifacts  (edge bleeding + flying pixels)
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+#  SECTION 5 -- Edge artifacts  (edge bleeding + flying pixels)
+# ==============================================================================
 
 def _build_tree(pts): return cKDTree(pts)
 
@@ -675,13 +675,13 @@ def add_edge_artifacts(render, keep_mask=None, max_bleed=0.006,
     Edge bleeding + flying pixel injection (fully vectorised).
 
     Edge bleeding
-    ─────────────
+    -------------
     Foreground points near depth discontinuities are displaced toward the
     background along the image-space Sobel depth gradient projected into 3D.
-    Δ = max_bleed · Gaussian-smoothed-sigmoid(edge_strength).
+    Delta = max_bleed * Gaussian-smoothed-sigmoid(edge_strength).
 
     Flying pixels
-    ─────────────
+    -------------
     A pixel straddling a depth edge integrates fringe from both surfaces.
     The SL decoder places the output point between them.
 
@@ -706,14 +706,14 @@ def add_edge_artifacts(render, keep_mask=None, max_bleed=0.006,
     edge_img   = compute_edge_strength(vis_depth)
     gx, gy     = compute_depth_gradient(vis_depth)
 
-    # ── Edge bleeding ──────────────────────────────────────────────────────
+    # -- Edge bleeding ------------------------------------------------------
     strength = edge_img[pidx//W, pidx%W].astype(np.float64)
     tree     = _build_tree(pts)
     falloff  = _smooth_falloff_3d(strength, edge_width, pts, k, tree)
     bleed    = _bleed_dirs_image(rdir, gx, gy, pidx, render["res"])
     bled_pts = pts + max_bleed * falloff[:, None] * bleed
 
-    # ── Flying pixels — vectorised ─────────────────────────────────────────
+    # -- Flying pixels -- vectorised -----------------------------------------
     full_filled = np.where(np.isfinite(full_depth), full_depth, -np.inf)
     bg_depth    = maximum_filter(full_filled, size=7).astype(np.float32)
     bg_depth    = np.where(bg_depth > -1e30, bg_depth, np.nan)
@@ -732,7 +732,7 @@ def add_edge_artifacts(render, keep_mask=None, max_bleed=0.006,
         tot  = int(n_sp.sum())
         if tot > 0:
             rep     = np.repeat(np.arange(len(cand_flat)), n_sp)
-            # Beta(1.5, 3.0): mean≈0.33, foreground-biased mixed-pixel distribution
+            # Beta(1.5, 3.0): mean~0.33, foreground-biased mixed-pixel distribution
             u       = rng.beta(1.5, 3.0, tot)
             ts      = fg_d[rep] + u * depth_gap_fraction * gaps[rep]
             o_rep   = render["ray_origins_img"][cand_flat[rep]]
@@ -750,9 +750,9 @@ def add_edge_artifacts(render, keep_mask=None, max_bleed=0.006,
     return bled_pts, nrm
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 6 — Structured outliers  (multipath + pepper + scan-line banding)
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+#  SECTION 6 -- Structured outliers  (multipath + pepper + scan-line banding)
+# ==============================================================================
 
 def _snr_proxy(render):
     if "snr_proxy" in render:
@@ -778,13 +778,13 @@ def add_multipath_outliers(render, fringe_period=0.003, rate=0.01,
     Ghost-surface points from multi-path interference in concave regions.
 
     Physical model
-    ──────────────
+    --------------
     A bounced projector ray arrives at the surface with a longer optical path
-    → positive phase offset → the ghost is almost always BEHIND (farther from
+    -> positive phase offset -> the ghost is almost always BEHIND (farther from
     sensor).
 
     Sign is 75 % positive rather than even, matching that bias. Displacement is not purely
-    quantised either — indirect-path BRDF uncertainty adds phase noise:
+    quantised either -- indirect-path BRDF uncertainty adds phase noise:
 
         t_ghost = t_true + sign*k*lambda + N(0, lambda*phase_sigma_rel)
 
@@ -795,7 +795,7 @@ def add_multipath_outliers(render, fringe_period=0.003, rate=0.01,
     max_order        : maximum fringe-order displacement.
     concavity_thresh : normalised Laplacian threshold to identify concavities.
     phase_sigma_rel  : Gaussian spread around each integer order, as fraction
-                       of fringe_period. Typical 0.05–0.10.
+                       of fringe_period. Typical 0.05-0.10.
     """
     start = time.time()
     rng  = np.random.default_rng(seed)
@@ -836,7 +836,7 @@ def add_pepper_noise(render, rate=0.005, depth_sigma_rel=0.05, seed=0,
                      verbose=False):
     """
     Isolated wrong-depth points from single-pixel decoder failures.
-    Rate ∝ (1 − SNR); depth ~ N(z_true, z_true·depth_sigma_rel).
+    Rate proportional to (1 - SNR); depth ~ N(z_true, z_true*depth_sigma_rel).
     """
     start = time.time()
     rng  = np.random.default_rng(seed)
@@ -863,21 +863,21 @@ def add_scan_line_banding(points, normals, pixel_idx, res, sensor_origin,
     NEW effect.
 
     Physical model
-    ──────────────
+    --------------
     Multi-frequency SL phase unwrapping resolves fringe-order ambiguity by
     comparing decoded phases across frequencies. At fringe-period boundaries,
     thermal drift and projector non-uniformity cause the unwrapper to miscount
-    by ±1 order. This shifts all pixels within the same fringe band by the same
+    by +/-1 order. This shifts all pixels within the same fringe band by the same
     shared offset, producing the 'staircase' banding visible in real SL scans.
 
     All pixels in the same horizontal band (height = fringe_period_px rows)
-    receive an independent Gaussian depth offset with σ = band_amplitude.
+    receive an independent Gaussian depth offset with sigma = band_amplitude.
     Points without a pixel index (outliers, injected flying pixels, pixel_idx=-1)
     are left unchanged.
 
     Parameters
     ----------
-    band_amplitude    : 1σ depth shift per band (metres). Typical 0.1–0.5 mm.
+    band_amplitude    : 1sigma depth shift per band (metres). Typical 0.1-0.5 mm.
     fringe_period_px  : band height in pixels. Match your projector fringe pitch.
     """
     start = time.time()
@@ -894,9 +894,9 @@ def add_scan_line_banding(points, normals, pixel_idx, res, sensor_origin,
     return points + z_off[:, None] * los
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 7 — Sensor electronics noise
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+#  SECTION 7 -- Sensor electronics noise
+# ==============================================================================
 
 def _axial_depth(pts, origin): return np.linalg.norm(pts - origin, axis=1)
 
@@ -998,7 +998,7 @@ def _axial_noise(pts, origin, sigma_z_ref, z_ref, model, rng, cos_proj):
 
 
 def _quantisation_noise(pts, origin, depth_res_ref, z_ref, model, rng):
-    """Uniform ±½ LSB depth snap. LSB scales with depth same as axial noise."""
+    """Uniform +/-1/2 LSB depth snap. LSB scales with depth same as axial noise."""
     z   = _axial_depth(pts, origin)
     lsb = depth_res_ref * _depth_scale(z, z_ref, model)
     q   = rng.uniform(-.5, .5, len(pts)) * lsb
@@ -1011,7 +1011,7 @@ def _ray_jitter(pts, origin, sigma_px, sigma_global, rng):
 
     Per-pixel (sigma_px): independent per pixel (lens PSF, aberrations).
     Global (sigma_global): one draw per frame, same for all points (vibration).
-    Lateral error = z · δθ (small-angle approximation).
+    Lateral error = z * deltatheta (small-angle approximation).
     """
     z   = _axial_depth(pts, origin)
     ray = _sensor_ray(pts, origin)
@@ -1040,20 +1040,20 @@ def add_sensor_noise(points, normals, sensor_origin,
     Full sensor electronics noise chain in physical signal order.
 
     Stages
-    ──────
-      1. Systematic bias     — deterministic smooth warp; identical every frame.
-      2. Fixed pattern noise — per-pixel persistent bias evaluated in IMAGE
+    ------
+      1. Systematic bias     -- deterministic smooth warp; identical every frame.
+      2. Fixed pattern noise -- per-pixel persistent bias evaluated in IMAGE
                                SPACE (pixel coords) for canonical points.
-                               [FIX] was world-space Perlin — wrong domain.
-      3. Axial Gaussian      — Z-repeatability; amplified by 1/cos_proj at
+                               [FIX] was world-space Perlin -- wrong domain.
+      3. Axial Gaussian      -- Z-repeatability; amplified by 1/cos_proj at
                                oblique projector incidence.
                                [FIX] was angle-independent.
-      4. Quantisation        — uniform ±½ LSB depth snap.
-      5. Ray angular jitter  — lateral XY: per-pixel independent + global
+      4. Quantisation        -- uniform +/-1/2 LSB depth snap.
+      5. Ray angular jitter  -- lateral XY: per-pixel independent + global
                                correlated rigid frame shift.
 
     New parameters vs previous version
-    ────────────────────────────────────
+    ------------------------------------
     pixel_idx  : (N,) int64. -1 for injected outlier/flying-pixel points.
                  Enables image-space FPN for canonical points.
     res        : (H,W). Required with pixel_idx.
@@ -1075,12 +1075,12 @@ def add_sensor_noise(points, normals, sensor_origin,
     return pts
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 8 — Surface microgeometry  (fBm / Perlin normal displacement)
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+#  SECTION 8 -- Surface microgeometry  (fBm / Perlin normal displacement)
+# ==============================================================================
 
 class _FBM:
-    """Fractal Brownian Motion. H→1 = smooth; H→0 = rough."""
+    """Fractal Brownian Motion. H->1 = smooth; H->0 = rough."""
     def __init__(self, H=0.75, octaves=6, lacunarity=2., seed=0):
         gain=lacunarity**(-H); amps=gain**np.arange(octaves)
         self._amps=amps/amps.sum()
@@ -1100,13 +1100,13 @@ def add_surface_noise(points, normals, mode="fbm", amplitude=0.004,
     Surface microgeometry
     Displace each point along its surface normal by an analytical noise field.
     Models machined tooling marks, casting texture, or paint grain not in CAD.
-    Applied last — on top of all electronics and outlier effects.
+    Applied last -- on top of all electronics and outlier effects.
 
     Parameters
     ----------
     mode      : "fbm" (natural spectrum, recommended) | "perlin" (single octave).
     amplitude : max normal-direction displacement (metres).
-    scale     : spatial frequency; higher → finer detail.
+    scale     : spatial frequency; higher -> finer detail.
     H         : [fBm] Hurst exponent. 0.75 = natural rough surface.
     octaves   : [fBm] number of frequency octaves.
     lacunarity: [fBm] frequency multiplier per octave.

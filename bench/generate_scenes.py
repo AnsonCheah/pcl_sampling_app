@@ -8,7 +8,7 @@ Run::
 
 Expect hours, not minutes: roughly 1-3 min per part for raycast + downsample + ambiguity,
 plus 1-2 min per scene for the MuJoCo settle and the sensor simulation.  The run is
-therefore **resumable** — a part already holding the requested number of scenes is skipped,
+therefore **resumable** -- a part already holding the requested number of scenes is skipped,
 and a part that fails is logged and stepped over rather than taking the sweep down with it.
 
 Two headless-only hazards this works around, both of which fail *silently*:
@@ -16,7 +16,7 @@ Two headless-only hazards this works around, both of which fail *silently*:
 * ``app.main_thread(fn)`` drops ``fn`` entirely when headless (``app.py``), and
   ``_express_sampling_worker`` sets the stage through it.  So ``app.stage`` never becomes
   ``SAVE``, ``SaveStage.worker()`` matches neither of its two branches, and the reference
-  bundle is simply not written — no error, no output.  Every stage transition here is
+  bundle is simply not written -- no error, no output.  Every stage transition here is
   therefore made with a direct ``app.set_stage(...)``.
 * ``SceneStage.rendering_flag`` opens MuJoCo's *blocking* passive viewer.  Left on, a batch
   run stops at the first scene and waits for a window nobody is watching.

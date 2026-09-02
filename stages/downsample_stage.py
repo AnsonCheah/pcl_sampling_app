@@ -336,7 +336,7 @@ class DownsampleStage(BaseStage):
         ran on, so the frame is built from the same points the axis was found in.
 
         Safe to invoke twice: re-deriving the frame from an already-recentred cloud returns
-        (numerically) the identity, so a second press is a no-op — measured at 8e-8 mm of
+        (numerically) the identity, so a second press is a no-op -- measured at 8e-8 mm of
         point movement on 25333MB000, the floor being the ``np.round(rot, decimals=6)`` in
         ``pcd_geocenter``. That is why there is no "already applied" guard; the composition
         below is self-limiting rather than needing to be gated.
@@ -346,7 +346,7 @@ class DownsampleStage(BaseStage):
         T = self._geocenter_for(self.app.down_pcd_surface)
 
         self.app.down_pcd_surface.transform(T)
-        # In uniform mode down_pcd is the same object as down_pcd_surface — skip to avoid double-transform
+        # In uniform mode down_pcd is the same object as down_pcd_surface -- skip to avoid double-transform
         if self.app.down_pcd is not None and self.app.down_pcd is not self.app.down_pcd_surface:
             self.app.down_pcd.transform(T)
         if self.app.down_pcd_edge is not None:
@@ -379,4 +379,4 @@ class DownsampleStage(BaseStage):
         # SaveStage can invert this to say where the model origin sat beforehand.
         self.app.geocenter = T @ self.app.geocenter
         print("recentered mesh and pointcloud")
-        self._refresh_ui()   # swaps the geometry, then reframes — do not reframe before this
+        self._refresh_ui()   # swaps the geometry, then reframes -- do not reframe before this

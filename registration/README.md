@@ -6,7 +6,7 @@ Two packages, deliberately separate:
 
 | Package | What it is |
 |---|---|
-| **`ppf/`** | **Vanilla PPF. Standalone — imports nothing from this repo.** Use this one. |
+| **`ppf/`** | **Vanilla PPF. Standalone -- imports nothing from this repo.** Use this one. |
 | `ppf_saliency/` | The same matcher plus weighted voting and saliency. Kept to re-test the weighting question on a new catalogue; it does not currently win. |
 
 ## Why from scratch
@@ -17,30 +17,30 @@ Every off-the-shelf option was unusable for this work:
 |---|---|
 | OpenCV `ppf_match_3d` | Heap-corruption bug open since 2015 (opencv_contrib #170); wrong pose in its own official sample (#2034); unnormalised quaternion in `clusterPoses` (#3223). Not installed or declared here either. |
 | PCL `PPFRegistration` | Missing `acos` in the feature computation itself (#1171). Maintainers advise against using it. |
-| Misc3D (MIT, C++) | Best algorithmic reference available, but the accumulator is a thread-local temporary inside an OpenMP loop — vote diagnostics never reach Python. Needs Open3D *master* circa 2022 and pybind11 2.6; last commit Aug 2022. |
+| Misc3D (MIT, C++) | Best algorithmic reference available, but the accumulator is a thread-local temporary inside an OpenMP loop -- vote diagnostics never reach Python. Needs Open3D *master* circa 2022 and pybind11 2.6; last commit Aug 2022. |
 | Open3D | Has no PPF, and never has. |
 
 This work needs accumulator internals (peak margin, supporting model points), and those live
 on the far side of a C++ compile step in every alternative.
 
-## `ppf/` + `_shared/` — the standalone unit
+## `ppf/` + `_shared/` -- the standalone unit
 
 The contract is that these depend on **NumPy, SciPy and Open3D and nothing else**, so they can
-be copied into another project unchanged — as a **pair**. Copying `ppf/` alone does not work:
+be copied into another project unchanged -- as a **pair**. Copying `ppf/` alone does not work:
 it reaches `_shared/` by relative import.
 
 It is deliberately *not* all of `registration/`. `ppf_saliency/` imports `geometry` and
 `registration.ppf.bench.dataset` by design and cannot travel alone.
 
 Three tests enforce this rather than trusting it: `test_package_imports_nothing_from_this_repository`
-walks the AST of every source file in both directories (a runtime check cannot catch it — the
+walks the AST of every source file in both directories (a runtime check cannot catch it -- the
 repo is always on `sys.path` during the suite),
 `test_third_party_dependencies_are_only_numpy_scipy_open3d` pins the dependency surface, and
 `test_cupy_is_an_optional_dependency_not_a_required_one` asserts every cupy import is indented.
 
 | File | Contents |
 |---|---|
-| `ppf/config.py` | `SensorProfile`, `PPFConfig.derive()` — parameter derivation |
+| `ppf/config.py` | `SensorProfile`, `PPFConfig.derive()` -- parameter derivation |
 | `ppf/model.py` | Feature quantisation, sorted-key lookup table, bucket capping |
 | `ppf/match.py` | Voting, peak extraction, SE(3) pose clustering, verification |
 | `ppf/_geometry.py` | Inlined `model_diameter` / `median_spacing` / `project_to_so3` |
@@ -50,7 +50,7 @@ repo is always on `sys.path` during the suite),
 | `tests/test_ppf.py` | Standalone-ness, recovery, symmetry orbit, derivation, metrics |
 
 `_shared/` exists because `_backend.py` was byte-identical between the two packages and
-`_frames.py` differed only in punctuation — with nothing preventing a real fork.
+`_frames.py` differed only in punctuation -- with nothing preventing a real fork.
 `ppf/_geometry.py` still duplicates three helpers from `geometry/geom_utils.py` on purpose:
 that is the price of the unit being liftable, and the one that must not drift is
 `model_diameter`, because every part-relative tolerance is normalised against it.
@@ -83,10 +83,10 @@ python -m registration.ppf.bench.run --all \
     --models-info mesh_raw/tless/models_info.json
 ```
 
-It reads a directory format (`<root>/<part>/scene_*/`), not this repo's output tree — point
+It reads a directory format (`<root>/<part>/scene_*/`), not this repo's output tree -- point
 it anywhere with `--scenes-root` or `PPF_SCENES_ROOT`. Scene *generation* is the other half
 and stays in the repo (`bench/generate_scenes.py`), because producing those directories needs
-MuJoCo, the sensor simulator and the segmentation stage — a far heavier dependency set than
+MuJoCo, the sensor simulator and the segmentation stage -- a far heavier dependency set than
 the matcher itself.
 
 MSSD / ADD / ADI and the BOP symmetry group are implemented directly rather than by importing
@@ -96,8 +96,8 @@ checks them element-by-element against the reference wherever it happens to be i
 ## Design commitments
 
 **Zero per-part tunables.** Everything derives from the model cloud plus a one-time
-`SensorProfile`. Two *application* policies remain — `model_target_points` (a compute budget)
-and `accept_score` — and both are shared across every part. A part whose smallest feature
+`SensorProfile`. Two *application* policies remain -- `model_target_points` (a compute budget)
+and `accept_score` -- and both are shared across every part. A part whose smallest feature
 falls below what the sensor can resolve is reported as `UNDER-RESOLVED` in `cfg.provenance`
 rather than silently mis-configured.
 
@@ -119,18 +119,18 @@ Vanilla `ppf/`, coarse matching only, no ICP refinement. 9 T-LESS parts x 2 synt
 scenes plus the in-house `25333MB000`, **1702 instances**, scored with
 `python -m registration.ppf.bench.run --all`:
 
-| part | class | n | BOP (MSSD<0.2D) | @5mm/10° | @2mm/5° | MSSD p50 | s/inst |
+| part | class | n | BOP (MSSD<0.2D) | @5mm/10deg | @2mm/5deg | MSSD p50 | s/inst |
 |---|---|---|---|---|---|---|---|
-| obj_000019 | discrete | 108 | 0.954 ±0.040 | 0.907 | 0.565 | 3.66 mm | 0.157 |
-| obj_000017 | continuous | 31 | 0.935 ±0.086 | 0.935 | 0.774 | 2.60 mm | 0.215 |
-| 25333MB000 | unknown | 541 | 0.906 ±0.025 | 0.867 | 0.553 | 3.58 mm | 0.148 |
-| obj_000021 | asymmetric | 97 | 0.845 ±0.072 | 0.825 | 0.660 | 3.01 mm | 0.195 |
-| obj_000022 | asymmetric | 97 | 0.845 ±0.072 | 0.835 | 0.629 | 3.02 mm | 0.194 |
-| obj_000018 | asymmetric | 38 | 0.789 ±0.130 | 0.579 | 0.263 | 8.13 mm | 0.247 |
-| obj_000027 | discrete | 29 | 0.724 ±0.163 | 0.552 | 0.241 | 10.01 mm | 0.300 |
-| obj_000005 | discrete | 85 | 0.471 ±0.106 | 0.471 | 0.376 | 78.52 mm | 0.165 |
-| obj_000013 | continuous | 352 | 0.389 ±0.051 | 0.276 | 0.190 | 24.33 mm | 0.166 |
-| obj_000001 | continuous | 324 | 0.148 ±0.039 | 0.108 | 0.086 | 25.52 mm | 0.210 |
+| obj_000019 | discrete | 108 | 0.954 +/-0.040 | 0.907 | 0.565 | 3.66 mm | 0.157 |
+| obj_000017 | continuous | 31 | 0.935 +/-0.086 | 0.935 | 0.774 | 2.60 mm | 0.215 |
+| 25333MB000 | unknown | 541 | 0.906 +/-0.025 | 0.867 | 0.553 | 3.58 mm | 0.148 |
+| obj_000021 | asymmetric | 97 | 0.845 +/-0.072 | 0.825 | 0.660 | 3.01 mm | 0.195 |
+| obj_000022 | asymmetric | 97 | 0.845 +/-0.072 | 0.835 | 0.629 | 3.02 mm | 0.194 |
+| obj_000018 | asymmetric | 38 | 0.789 +/-0.130 | 0.579 | 0.263 | 8.13 mm | 0.247 |
+| obj_000027 | discrete | 29 | 0.724 +/-0.163 | 0.552 | 0.241 | 10.01 mm | 0.300 |
+| obj_000005 | discrete | 85 | 0.471 +/-0.106 | 0.471 | 0.376 | 78.52 mm | 0.165 |
+| obj_000013 | continuous | 352 | 0.389 +/-0.051 | 0.276 | 0.190 | 24.33 mm | 0.166 |
+| obj_000001 | continuous | 324 | 0.148 +/-0.039 | 0.108 | 0.086 | 25.52 mm | 0.210 |
 | **ALL** | | **1702** | **0.624** | 0.568 | 0.384 | 15.93 mm | 0.176 |
 | | asymmetric | 232 | 0.836 | 0.789 | 0.582 | 3.86 mm | 0.203 |
 | | discrete | 222 | 0.739 | 0.694 | 0.450 | 33.15 mm | 0.179 |
@@ -148,16 +148,16 @@ reaches 0.935; the failures are `obj_000001` (0.148) and `obj_000013` (0.389), w
 two *smallest* parts (63.5 mm and 58.1 mm) and yield ~1800 scene points per instance against
 `obj_000017`'s ~9300.
 
-Occlusion is **not** the driver either — checked rather than assumed. Per-instance visibility
+Occlusion is **not** the driver either -- checked rather than assumed. Per-instance visibility
 is comparable across the whole set (overlap p50 0.21-0.34), and `obj_000019` has the *lowest*
 visibility of any part (0.207) together with the *highest* recall (0.954).
 
 `obj_000005` fails differently and is worth separating: MSSD p50 of 78.5 mm against a 108.7 mm
 diameter is most of a part length, so those are systematic flips into a pose BOP's single
-discrete symmetry does not cover — not near-misses. A tighter verification stage would attack
+discrete symmetry does not cover -- not near-misses. A tighter verification stage would attack
 that; more points would not.
 
-The `@2mm/5°` column needs a fine-refinement stage, which is not built yet. At 0.050
+The `@2mm/5deg` column needs a fine-refinement stage, which is not built yet. At 0.050
 s/instance threaded, a 50-instance bin now takes ~2.5 s, which is at the edge of the 2-4 s
 per-bin production budget rather than far outside it.
 
@@ -168,7 +168,7 @@ per-bin production budget rather than far outside it.
 matching went **0.389 -> 0.050 s/instance (7.7x)** over the same 1702 instances, with every
 accuracy figure unchanged.
 
-**Threads, not processes.** The hot loop is NumPy — sort, bincount, searchsorted, gathers —
+**Threads, not processes.** The hot loop is NumPy -- sort, bincount, searchsorted, gathers --
 all of which release the GIL, and threads share the ~40 MB trained table instead of copying
 it. Processes measured *worse than serial* on Windows, where the absence of `fork` makes
 every worker respawn the interpreter and retrain:
@@ -193,13 +193,13 @@ they use scipy). Measured on an RTX 5090, per instance:
 | obj_000001 | 0.195 | **0.054** | 0.055 | 0.057 |
 | obj_000021 | 0.195 | **0.058** | 0.055 | 0.085 |
 
-So the GPU is worth roughly what 8 CPU threads are worth, and combining them gains nothing —
+So the GPU is worth roughly what 8 CPU threads are worth, and combining them gains nothing --
 one host thread already saturates the device, so `match_many` defaults to `workers=1` on the
 CuPy backend. Use the GPU for single-instance *latency*; use threads for bin *throughput*.
 
 CuPy is an **optional** dependency, never imported at module scope (a test enforces that), so
 the package still imports and runs on a machine with no CUDA build. Asking for a GPU that is
-not there falls back to NumPy rather than failing — but never silently: `MatchResult.backend`
+not there falls back to NumPy rather than failing -- but never silently: `MatchResult.backend`
 records what actually ran, so a benchmark cannot report CPU timings as GPU ones. An unknown
 backend name still raises.
 
@@ -211,7 +211,7 @@ than the CPU on one part and 4x faster on another. Warm the kernels before timin
 
 `PPFConfig.derive` (0.02-0.19 s) and `PPFModel.train` (0.9-1.7 s) run **once per part**, and
 scene loading (PLY + normal estimation, ~0.2 s) once per scene; only `match` is per instance.
-Across 351 instances that is 6.2 s of fixed cost against 111.6 s of matching — training per
+Across 351 instances that is 6.2 s of fixed cost against 111.6 s of matching -- training per
 instance instead would add ~405 s.
 
 Three train-time/vectorisation fixes took matching from **0.389 to 0.176 s/instance (2.21x)**
@@ -253,13 +253,13 @@ python -m pytest registration/tests -q
 ## Why the saliency knee excludes the zero-score atom
 
 The ambiguity heat map is not a smooth distribution. A large share of points are explained
-*exactly* by some ambiguity transform and score a hard 0.0 — measured at 41.5% on T-LESS
+*exactly* by some ambiguity transform and score a hard 0.0 -- measured at 41.5% on T-LESS
 `obj_000018`. That spike is a vertical jump in the CDF at its left edge, and therefore by far
 the furthest point from the chord, so `find_cdf_knee` lands *on* the atom, the threshold comes
 back as 0.0, and `v >= 0` keeps every point.
 
 The pruning arm then silently becomes a copy of the baseline, and the ablation reports that
-pruning is harmless — because pruning never happened. Those zero-scoring points are exactly
+pruning is harmless -- because pruning never happened. Those zero-scoring points are exactly
 what the arm means to drop, so `arms.py` removes them first and fits the knee to the rest.
 
 ## Implementation details that were each got wrong once
@@ -268,26 +268,26 @@ what the arm means to drop, so `arms.py` removes them first and fits the knee to
 that each silently change the symmetry group, and the direct implementation in
 `ppf/bench/metrics.py` reproduces all three:
 
-- `max_sym_disc_step` is **a fraction of the diameter, not an angle** — the step count is
+- `max_sym_disc_step` is **a fraction of the diameter, not an angle** -- the step count is
   `ceil(pi/step)`, not `ceil(2*pi/step)`.
 - The discretised continuous set **includes the identity** (`i` runs from 0).
 - When a continuous axis exists the output is **only** the composed transforms; appending the
   bare discrete ones duplicates every one of them.
 
-Also `adi` runs ground-truth → estimated, and nearest-neighbour is asymmetric: reversing it
+Also `adi` runs ground-truth -> estimated, and nearest-neighbour is asymmetric: reversing it
 gives 29.4 mm instead of 25.2 mm on the same pose.
 
 **`tau` is bisected on the real downsampled point count**, never from a surface-area formula.
-`tau = sqrt(SA/M)` with `SA ~ N*s^2` is wrong by ~4.5x on randomly sampled clouds — a Poisson
+`tau = sqrt(SA/M)` with `SA ~ N*s^2` is wrong by ~4.5x on randomly sampled clouds -- a Poisson
 process has median nearest-neighbour distance `0.4697/sqrt(density)`, not `1/sqrt(density)`.
 Model point count goes as `tau^-2` and work as its square, so a 2x error in `tau` is a ~20x
 error in runtime.
 
 **`PPFModel.lookup` indexes, it does not search.** The key space is a dense integer range, so
 bin boundaries are tabulated once at train time as CSR offsets. Two `searchsorted` passes over
-the ~2 M-entry key array were 42% of match time; the table is **19–35x faster** for ~5–7 MB per
+the ~2 M-entry key array were 42% of match time; the table is **19-35x faster** for ~5-7 MB per
 part. It falls back to binary search above `MAX_KEY_INDEX` (8 M elements) because the key space
-grows as `n_angle^3` — at `n_angle=180` it would want 616 MB to index 2 M pairs. Both paths
+grows as `n_angle^3` -- at `n_angle=180` it would want 616 MB to index 2 M pairs. Both paths
 return identical ranges, including on empty bins, which are most of the key space and where an
 off-by-one would return a neighbour's entries.
 

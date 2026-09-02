@@ -1,4 +1,4 @@
-"""tuning_stage.py — wrap the MechVision Optuna tuner into the Open3D wizard.
+"""tuning_stage.py -- wrap the MechVision Optuna tuner into the Open3D wizard.
 
 The last stage of the pipeline. For the part currently loaded in the wizard
 (``app.mesh_basename``) it lets the operator:
@@ -16,7 +16,7 @@ The stage is headless-drivable like the other worker stages: every GUI touch is
 guarded by ``self.app.headless`` / ``app.main_thread`` (which itself no-ops headless),
 so ``worker()`` runs the full study whether triggered by a button or ``_run_worker()``.
 
-The heavy imports (optuna, mm_adapter, mesh_analysis, …) are kept local to the methods
+The heavy imports (optuna, mm_adapter, mesh_analysis, ...) are kept local to the methods
 that use them so importing this stage stays cheap and cannot break app startup.
 """
 
@@ -41,7 +41,7 @@ from stages.stage_base import BaseStage
 from geometry.file_utils import list_scene_dirs, list_sample_plys
 from geometry.geom_utils import pose_to_matrix, golden_hue_color
 
-# ── repo-root paths (kept off the import chain so the pure helpers stay testable) ──
+# -- repo-root paths (kept off the import chain so the pure helpers stay testable) --
 _STAGES_DIR  = os.path.dirname(os.path.abspath(__file__))
 _ROOT        = os.path.abspath(os.path.join(_STAGES_DIR, ".."))
 if _ROOT not in sys.path:
@@ -60,14 +60,14 @@ DASH_URL  = f"http://{DASH_HOST}:{DASH_PORT}/"
 SAMPLER_DEFAULT = SC.SAMPLER_DEFAULT
 SAMPLER_CHOICES = SC.SAMPLER_CHOICES
 
-_SCENE_VOXEL = 0.002   # m — downsample the ~34 MB scene cloud for a light preview
-_REF_VOXEL   = 0.004   # m — downsample the reference cloud placed at each match
+_SCENE_VOXEL = 0.002   # m -- downsample the ~34 MB scene cloud for a light preview
+_REF_VOXEL   = 0.004   # m -- downsample the reference cloud placed at each match
 
 
-# ── Windows: tie the dashboard subprocess to a Job Object so it is killed when this
-# app process dies (even on a hard kill) — otherwise a killed session orphans the
+# -- Windows: tie the dashboard subprocess to a Job Object so it is killed when this
+# app process dies (even on a hard kill) -- otherwise a killed session orphans the
 # dashboard, which keeps a lock on the study .db and blocks deletion. Pure ctypes,
-# no pywin32. All calls are guarded and degrade to no-op on non-Windows / failure. ──
+# no pywin32. All calls are guarded and degrade to no-op on non-Windows / failure. --
 
 def _make_kill_on_close_job():
     """Create a Job Object that kills its member processes when its last handle
@@ -153,7 +153,7 @@ def _close_handle(handle):
 
 
 def instance_color(i):
-    """One colour per instance — golden-ratio hue walk at RenderStage's HSV tone
+    """One colour per instance -- golden-ratio hue walk at RenderStage's HSV tone
     (saturation 0.4, value 0.9) so the overlay matches the segmented-scene look."""
     return golden_hue_color(i, 0.4, 0.9)
 
@@ -165,9 +165,9 @@ class TuningStage(BaseStage):
 
     def __init__(self, app):
         self.name = Stage.TUNING.name
-        # Config — set BEFORE super().__init__() (it calls build_panel(), which reads them).
+        # Config -- set BEFORE super().__init__() (it calls build_panel(), which reads them).
         self.sampler  = SAMPLER_DEFAULT
-        self.n_trials = None    # None → SC default; the Run button fills these from the sliders
+        self.n_trials = None    # None -> SC default; the Run button fills these from the sliders
         self.n_rounds = None
         # Deliberate override for the model-frame guard (see _frames_agree). Off by default:
         # the check costs seconds and the run it protects costs hours.
@@ -184,13 +184,13 @@ class TuningStage(BaseStage):
         self._update_pending = False # coalesce live-overlay GUI posts
         self._total_trials = 1
         self._resume_mode  = "extend"  # "restart" (fresh) | "extend" (add slider trials); headless default
-        self._stop_requested = False   # Stop button → study.stop() from _on_trial_complete
+        self._stop_requested = False   # Stop button -> study.stop() from _on_trial_complete
         self._tuning_active  = False   # True only during the tuning study worker (gates Stop)
         super().__init__(app)
 
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
     # Part / path helpers (GUI-free, headless-safe, unit-tested)
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
 
     def _part(self):
         return self.app.mesh_basename
@@ -248,9 +248,9 @@ class TuningStage(BaseStage):
                 time.sleep(0.3)          # give the OS a moment to release the file handle
         return remaining
 
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
     # Overlay / Pareto helpers (GUI-free, unit-tested)
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
 
     def _load_scene_clouds(self, scene_dir):
         """Return (scene_pcd, ref_pcd), downsampled and cached per scene_dir."""
@@ -266,8 +266,8 @@ class TuningStage(BaseStage):
         return scene_pcd, ref_pcd
 
     def _build_overlay(self, scene_dir, fine_poses, gt_poses=None):
-        """Assemble [(name, geom, rgb), …]: grey scene cloud + one reference copy placed
-        at each matched pose. Pure geometry — no SceneWidget calls (tested headlessly)."""
+        """Assemble [(name, geom, rgb), ...]: grey scene cloud + one reference copy placed
+        at each matched pose. Pure geometry -- no SceneWidget calls (tested headlessly)."""
         scene_pcd, ref_pcd = self._load_scene_clouds(scene_dir)
         geoms = [("tuning_scene", o3d.geometry.PointCloud(scene_pcd), (0.55, 0.55, 0.55))]
         for i, pose in enumerate(fine_poses):
@@ -277,7 +277,7 @@ class TuningStage(BaseStage):
         return geoms
 
     def pareto_options(self):
-        """[(label, coarse, fine), …] from the finished study ([] if none)."""
+        """[(label, coarse, fine), ...] from the finished study ([] if none)."""
         if self._optimizer is None:
             return []
         opts = []
@@ -287,7 +287,7 @@ class TuningStage(BaseStage):
         return opts
 
     def _trial_progress(self, study, trial):
-        """(fraction, label) for the progress bar. Pure — no GUI (tested headlessly)."""
+        """(fraction, label) for the progress bar. Pure -- no GUI (tested headlessly)."""
         import optuna
         done = sum(1 for t in study.trials
                    if t.state != optuna.trial.TrialState.WAITING)
@@ -311,7 +311,7 @@ class TuningStage(BaseStage):
     @staticmethod
     def _eval_detail(fine_poses, gt_poses):
         """Progress-detail string for the current eval: mean translation (mm) and rotation
-        (deg) over matched instances. Pure — reuses the optimizer's matcher."""
+        (deg) over matched instances. Pure -- reuses the optimizer's matcher."""
         from MM_Optimizer.mv_evaluator import match_poses_to_gt
         matched = match_poses_to_gt(list(fine_poses), list(gt_poses))
         pos = [p for p, _ in matched if p is not None]
@@ -319,7 +319,7 @@ class TuningStage(BaseStage):
         n_gt = len(gt_poses)
         if not pos:
             return f"no match  (0/{n_gt})"
-        return (f"avg trans {np.mean(pos) * 1e3:.1f}mm  rot {np.mean(ang):.1f}°  "
+        return (f"avg trans {np.mean(pos) * 1e3:.1f}mm  rot {np.mean(ang):.1f}deg  "
                 f"matched {len(pos)}/{n_gt}")
 
     @staticmethod
@@ -333,9 +333,9 @@ class TuningStage(BaseStage):
         if prev and prev in items:
             combo.selected_text = prev
 
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
     # GUI panel
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
 
     def build_panel(self):
         if self.app.headless:
@@ -438,7 +438,7 @@ class TuningStage(BaseStage):
         self.enable_widgets()
 
     def on_clear(self):
-        # Non-destructive runtime teardown — runs on every state clear (restart, etc.).
+        # Non-destructive runtime teardown -- runs on every state clear (restart, etc.).
         # NEVER deletes the DB/cache; only reset() (the button) does that.
         self._teardown_runtime()
         self._scene_cache = {}
@@ -465,15 +465,15 @@ class TuningStage(BaseStage):
                 "\n\nClose the Optuna dashboard browser tab and any other process "
                 "using the DB, then click Clear Tuning Result again.",
                 on_ok=lambda: None)
-        super().reset()                        # clear_state_from → clear_downstream → on_clear; then _refresh_ui
+        super().reset()                        # clear_state_from -> clear_downstream -> on_clear; then _refresh_ui
 
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
     # Scene preview / management callbacks
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
 
     def on_enter(self):
         # On entering the stage, preview the selected (or first) on-disk scene so the 3D view
-        # isn't blank/stale — important when SCENE/RENDER were skipped. Entry-only, so it never
+        # isn't blank/stale -- important when SCENE/RENDER were skipped. Entry-only, so it never
         # clobbers a live-run / tuning overlay (those go through _refresh_ui, not on_enter).
         if self.app.headless or self._running:
             return
@@ -525,9 +525,9 @@ class TuningStage(BaseStage):
                                      self._scene_cache.pop(scene_dir, None),
                                      self._refresh()))
 
-    # ─────────────────────────────────────────────────────────────────────
-    # Tuning run (heavy work — off the GUI thread)
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
+    # Tuning run (heavy work -- off the GUI thread)
+    # ---------------------------------------------------------------------
 
     def _on_run_or_stop(self):
         # The Run button doubles as Stop while a study is active.
@@ -565,14 +565,14 @@ class TuningStage(BaseStage):
                  ("Restart (fresh)",   lambda: self._launch_tuning("restart"))],
                 title="Resume tuning")
         else:
-            self._launch_tuning("restart")   # nothing prior → fresh (nothing to delete)
+            self._launch_tuning("restart")   # nothing prior -> fresh (nothing to delete)
 
     def _launch_tuning(self, mode):
         self._resume_mode    = mode
         self._running        = True
         self._tuning_active  = True
         self._stop_requested = False
-        self.start()             # BaseStage → daemon thread → worker()
+        self.start()             # BaseStage -> daemon thread -> worker()
         # Re-evaluate predicates now that we're running: everything but Stop/Dashboard disables.
         self.enable_widgets()
 
@@ -605,7 +605,7 @@ class TuningStage(BaseStage):
         A tuning run is hours of MechVision calls scored against each scene's `T_gt`, and
         `T_gt` is only meaningful against the model frame the scene was generated in. If the
         bundle has since been re-exported into a different frame, every pose is scored
-        against the wrong reference and the study optimises toward a fiction — with no error,
+        against the wrong reference and the study optimises toward a fiction -- with no error,
         because a stale scene still loads and still has a pose.
 
         The model frame is only reproducible while both the mesh and the sampling settings
@@ -670,7 +670,7 @@ class TuningStage(BaseStage):
         model_path = os.path.join(_REFPCD_ROOT, part, f"{part}_surface", f"{part}_surface.ply")
         if not os.path.exists(model_path):
             print(f"[TUNING] Reference model not found: {model_path} "
-                  f"— run the sampling pipeline first.")
+                  f"-- run the sampling pipeline first.")
             return
 
         if not self._frames_agree(part, model_path):
@@ -684,10 +684,10 @@ class TuningStage(BaseStage):
 
         os.makedirs(RESULTS_DIR, exist_ok=True)
         if self._resume_mode == "restart":
-            self._delete_tuning_artifacts()   # DB + eval cache → fresh study
+            self._delete_tuning_artifacts()   # DB + eval cache -> fresh study
 
         # Pre-create/load the study so the dashboard has a schema immediately, and to read the
-        # prior trial count (0 after a restart) — needed for the extend budget and the progress
+        # prior trial count (0 after a restart) -- needed for the extend budget and the progress
         # total. run() attaches to the same study via load_if_exists=True.
         n_prior = 0
         try:
@@ -770,9 +770,9 @@ class TuningStage(BaseStage):
                 self.enable_widgets()
             self.app.main_thread(fill)
 
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
     # Live overlay + trial progress (fired from the optimizer thread)
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
 
     def _on_scene_eval(self, scene_dir, coarse, fine, fine_poses, gt_poses):
         if self.app.headless:
@@ -810,12 +810,12 @@ class TuningStage(BaseStage):
 
     def _on_stop(self):
         self._stop_requested = True
-        self.app.update_progress(text="Stopping after current trial…")
-        self.enable_widgets()   # re-label the toggle to "Stopping…" and disable it
+        self.app.update_progress(text="Stopping after current trial...")
+        self.enable_widgets()   # re-label the toggle to "Stopping..." and disable it
 
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
     # Pareto live run (selected scene only)
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
 
     def _on_live_run(self):
         if self.app.headless or self._running:
@@ -864,9 +864,9 @@ class TuningStage(BaseStage):
         if not self.app.headless:
             self.app.main_thread(lambda: setattr(self.lbl_result, "text", text))
 
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
     # Optuna dashboard subprocess
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
 
     def _dashboard_exe(self):
         d = os.path.dirname(sys.executable)
@@ -912,9 +912,9 @@ class TuningStage(BaseStage):
         import webbrowser
         webbrowser.open(DASH_URL)
 
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
     # Lifecycle helpers
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
 
     def _teardown_runtime(self):
         """Terminate the dashboard subprocess + close the MechVision client. Idempotent."""
@@ -937,7 +937,7 @@ class TuningStage(BaseStage):
     def _release_db_lockers(self):
         """Best-effort release of whatever holds the study DB: our own dashboard, plus
         orphaned optuna-dashboard processes left by a killed prior session (which a fresh
-        app instance has no handle to). On Windows the orphan is killed by image name —
+        app instance has no handle to). On Windows the orphan is killed by image name --
         safe here because the stage runs at most one dashboard (fixed port)."""
         self._teardown_runtime()
         if sys.platform == "win32":
@@ -967,5 +967,5 @@ class TuningStage(BaseStage):
         return mat
 
     def _confirm(self, message, on_ok):
-        """Modal OK/Cancel confirm — delegates to the shared app dialog."""
+        """Modal OK/Cancel confirm -- delegates to the shared app dialog."""
         self.app.confirm_dialog(message, on_ok)

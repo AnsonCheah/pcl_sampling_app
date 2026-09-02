@@ -139,7 +139,7 @@ class BaseStage(ABC):
 
     def request_next(self, proceed):
         """Called by app._go_next before advancing to the next stage. Default: advance
-        immediately. Stages override to intercept — e.g. show a confirm dialog and call
+        immediately. Stages override to intercept -- e.g. show a confirm dialog and call
         `proceed()` only on OK (used to confirm skipping a stage)."""
         proceed()
 

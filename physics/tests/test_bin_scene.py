@@ -43,18 +43,18 @@ PRIMITIVE_SHAPES = ["cube", "cube_big", "cuboid_long", "rod_long", "cuboid_flat"
 def generate_test_mesh(shape: str, bin_dim=(0.76, 0.585, 0.25, 0.005)):
     """
     Return (part_mesh: trimesh.Trimesh, convex_meshes: list[o3d.TriangleMesh])
-    for a synthetic box shape — no STL file required.
+    for a synthetic box shape -- no STL file required.
 
     Dimensions are expressed as multiples of bin_dim so shapes stay proportionate
     to whatever bin is configured.  Default bin_dim matches MujocoBinScene default.
 
     Shapes (see PRIMITIVE_SHAPES):
-      cube        — small cube; max extent < bin_height → exercises spherical code path
-      cube_big    — large cube near bin height; blocky (AR ~1) but big
-      cuboid_long — longest dim > bin_height → exercises constrained tilt
-      rod_long    — long thin rod, high AR (worst case for packing/placement)
-      cuboid_flat — wide and flat; stable pose is almost always floor-facing
-      plate_big   — large flat plate, high AR
+      cube        -- small cube; max extent < bin_height -> exercises spherical code path
+      cube_big    -- large cube near bin height; blocky (AR ~1) but big
+      cuboid_long -- longest dim > bin_height -> exercises constrained tilt
+      rod_long    -- long thin rod, high AR (worst case for packing/placement)
+      cuboid_flat -- wide and flat; stable pose is almost always floor-facing
+      plate_big   -- large flat plate, high AR
     """
     bw, bl, bh = bin_dim[0], bin_dim[1], bin_dim[2]
     shapes = {
@@ -82,7 +82,7 @@ def realistic_part_count(part_mesh, requested: int, bin_dim=(0.76, 0.585, 0.25, 
     """
     Cap a requested part count to a physically realistic fill for the part/bin, mirroring the
     shape-aware packing heuristic in SceneStage._auto_part_count. This keeps the big-part
-    drop test from pathologically over-filling the bin (e.g. 10 large cubes → unstable tower
+    drop test from pathologically over-filling the bin (e.g. 10 large cubes -> unstable tower
     that spills), while leaving room for many thin parts. Returns min(requested, auto_count).
     """
     bw, bl, bh, _ = bin_dim
@@ -121,7 +121,7 @@ def _check_no_bin_intersection(scene, scene_state):
 
 
 def _pose_to_T(data):
-    """MuJoCo scene_state entry (position + wxyz quaternion) → 4x4 homogeneous transform."""
+    """MuJoCo scene_state entry (position + wxyz quaternion) -> 4x4 homogeneous transform."""
     T = np.eye(4)
     T[:3, :3] = R.from_quat(data["quaternion"], scalar_first=True).as_matrix()
     T[:3, 3]  = data["position"]
@@ -136,7 +136,7 @@ def _check_no_penetration(scene, scene_state, max_depth: float = 0.003):
     a part merely resting on the floor / on another part reports ~0 mm penetration, whereas a
     tunneled part reports a large depth. The bin is added as a collision object so deep
     floor/wall sinking is caught by the same metric. The 3 mm default tolerates the sub-mm
-    resting overlap the constraint solver allows while still catching gross interpenetration —
+    resting overlap the constraint solver allows while still catching gross interpenetration --
     the core regression for high-velocity drops of big parts.
     """
     cm = CollisionManager()
@@ -162,8 +162,8 @@ def _check_no_penetration(scene, scene_state, max_depth: float = 0.003):
 
 def _check_bounded_height(scene, margin_layers: int = 3):
     """
-    Assert no settled part centre rose far above the bin — guards the old 'spawned meters
-    high' creep regression. Allowance = bin height + margin_layers × worst-case tilted part
+    Assert no settled part centre rose far above the bin -- guards the old 'spawned meters
+    high' creep regression. Allowance = bin height + margin_layers x worst-case tilted part
     height (so a legitimately tall pile still passes, but a runaway does not).
     """
     body_ids = scene._body_ids if scene._body_ids else list(range(1, scene.model.nbody))
@@ -172,7 +172,7 @@ def _check_bounded_height(scene, margin_layers: int = 3):
     z_allow  = 2 * scene.hh + margin_layers * h_layer
     assert z_max <= z_allow, (
         f"settled part too high: max centre z={z_max:.3f} m > allowed {z_allow:.3f} m "
-        f"(bin height {2 * scene.hh:.3f} + {margin_layers}×h_layer {h_layer:.3f})"
+        f"(bin height {2 * scene.hh:.3f} + {margin_layers}xh_layer {h_layer:.3f})"
     )
     rp(f"  Bounded height OK (max part z={z_max:.3f} m <= {z_allow:.3f} m)")
 

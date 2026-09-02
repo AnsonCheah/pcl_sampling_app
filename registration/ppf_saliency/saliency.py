@@ -7,12 +7,12 @@ Two independent weight sources, because they fail in different places.
 the model?".  It is the sharper signal when it exists, but it is derived purely from the
 recovered ambiguity axes, so on a part where none are found it is uniformly 1.0 and carries
 no information at all.  Measured on the Stanford bunny: zero axes, every point scored 1.000.
-It also saturates the other way — ``test_part.stl`` scores ``discriminative_fraction=0.015``,
+It also saturates the other way -- ``test_part.stl`` scores ``discriminative_fraction=0.015``,
 meaning 98.5% of its surface is explained by *some* ambiguity transform, so a hard threshold
 there would keep ~2% of the cloud.
 
-**PPF saliency** (``ppf_saliency``) asks a narrower question — "do this point's pairs look
-like everybody else's?" — and is always defined, needs no symmetry to have been found, and
+**PPF saliency** (``ppf_saliency``) asks a narrower question -- "do this point's pairs look
+like everybody else's?" -- and is always defined, needs no symmetry to have been found, and
 costs nothing because it reads the table the matcher already built.  It is the
 descriptor-specific analogue of keypoint saliency: Salti et al. (ICCV 2015) argued detectors
 should score points by whether *a given descriptor* can match them rather than by generic
@@ -42,13 +42,13 @@ def ppf_saliency(model, normalise: str = "rank", eps: float = 1e-12) -> np.ndarr
 
     This is exactly the quantity that collapses on the geometry PPF is known to fail on.  A
     planar patch puts a huge share of its pairs in a handful of bins, so every point on it
-    scores low — which is the same failure Hinterstoisser's vote deduplication attacks from
+    scores low -- which is the same failure Hinterstoisser's vote deduplication attacks from
     the other end, and Vidal's normal-aware clustering attacks from a third.
 
     Parameters
     ----------
     normalise : ``"rank"`` maps scores to their within-model quantiles, giving a weight
-        distribution that does not depend on the part's absolute feature entropy — the point
+        distribution that does not depend on the part's absolute feature entropy -- the point
         being that a weight of 0.5 should mean "median for this part" for every part, since
         anything else reintroduces per-part calibration.  ``"minmax"`` keeps the raw shape.
     """
@@ -94,7 +94,7 @@ def combine(*weights: np.ndarray, floor: float = 0.05) -> np.ndarray:
     """Multiply weight sources, holding the result off zero.
 
     The floor matters more than it looks.  A weight of exactly zero does not down-rank a
-    model point, it deletes it — and deleting points is the pruning strategy the evidence
+    model point, it deletes it -- and deleting points is the pruning strategy the evidence
     argues against, since PPF builds all O(N^2) pairs and losing a point costs its whole row.
     Keeping a small floor means a weighted arm stays a *weighting* arm rather than quietly
     turning into a pruning arm at the low end.
