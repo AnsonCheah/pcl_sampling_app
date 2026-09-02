@@ -330,7 +330,10 @@ class MujocoBinScene:
         self.spec.option.iterations = 200
         self.spec.option.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST  # stable for stiff multi-contact
         self.spec.option.cone = mujoco.mjtCone.mjCONE_ELLIPTIC                  # pile stability
-        self.spec.option.enableflags |= mujoco.mjtEnableBit.mjENBL_MULTICCD     # multi-point mesh contacts
+        # Multi-point mesh contacts. Opt-in via mjENBL_MULTICCD up to MuJoCo 3.5; from 3.12 the
+        # flag moved to the DISABLE set (mjDSBL_MULTICCD) and multi-CCD is on by default, so
+        # setting nothing here preserves the old behaviour. Left explicit because pile
+        # stability for flat-faced parts depends on it.
         # Sleeping islands (mjENBL_SLEEP, MuJoCo >= 3.4). OFF by default: measured on a 48-part
         # random scene it gave NO speedup (27.3 s vs 28.0 s) and left zero trees asleep, because
         # the batched release keeps the pile moving and simulate() exits as soon as is_settled()
@@ -340,7 +343,12 @@ class MujocoBinScene:
         # partition/tray running the full settle_time) may still benefit; re-run
         # physics/tests/test_sleep_equivalence.py as the gate before enabling it.
         self.enable_sleep = enable_sleep
-        if enable_sleep:
+        # Structured scenes pre-seat every part, so the whole run may sleep. Random must NOT:
+        # its batched release parks later waves at PARKING_Z, and a parked body that falls
+        # asleep is never released — is_settled() then reads the sleeping tree as at-rest and
+        # ends the run with parts frozen metres above the bin. simulate() therefore arms
+        # sleeping at runtime, only once the last wave has landed.
+        if enable_sleep and arrangement == "structured":
             self.spec.option.enableflags |= mujoco.mjtEnableBit.mjENBL_SLEEP
         self.spec.memory = 3000*1024*1024
         default = self.spec.default.geom
@@ -1196,6 +1204,18 @@ class MujocoBinScene:
             self.viewer.cam.elevation = -30
             self.viewer.cam.lookat[:] = [0, 0, self.hh * 0.5]  # centre of bin interior
 
+    def _set_sleep_enabled(self, on: bool):
+        """Toggle sleeping islands on the COMPILED model.
+
+        Only legal after at least one mj_step — enabling between mj_makeData and the first step
+        is documented as undefined behaviour. Clearing the flag wakes every sleeping tree on the
+        next step, which is how a pile is made to notice the hopper walls being removed.
+        """
+        if on:
+            self.model.opt.enableflags |= mujoco.mjtEnableBit.mjENBL_SLEEP
+        else:
+            self.model.opt.enableflags &= ~int(mujoco.mjtEnableBit.mjENBL_SLEEP)
+
     def _clamp_velocities(self):
         """
         Clamp each free body's LINEAR speed to vel_cap — a cheap per-step anti-tunneling
@@ -1372,8 +1392,20 @@ class MujocoBinScene:
             parked_now = [i for i, b in enumerate(self._batch_of_body) if b > k]
             run(interval_steps, f"batch-{k}", body_subset=released_ids, parked_ids=parked_now, check_settle=False)
 
+        # Every wave has landed, so no parked body remains that could fall asleep at
+        # PARKING_Z. Sleeping is safe from here, and this is where the quiescent tail is:
+        # once the pile stops, contacts drop out and the remaining steps cost almost nothing.
+        if self.enable_sleep:
+            self._set_sleep_enabled(True)
+
         # Final full settle over all released bodies (hopper still active).
         run(int(self.settle_time / self.model.opt.timestep), "phase-1-final", body_subset=None)
+
+        # Wake the pile before the hopper goes away: a sleeping island does not notice the
+        # walls it leans on being removed, so phase 2 would be a no-op for exactly the parts
+        # it exists to let fall flat. Sleeping stays off for the whole of phase 2.
+        if self.enable_sleep:
+            self._set_sleep_enabled(False)
 
         # Disable hopper extensions so parts leaning on them can fall flat.
         for name in self._hopper_geom_names:

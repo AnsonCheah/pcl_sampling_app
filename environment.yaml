@@ -15,7 +15,7 @@ dependencies:
       - scikit-learn==1.8.0
       - matplotlib==3.10.8
       - trimesh==4.11.0
-      - mujoco==3.5.0
+      - mujoco==3.12.0
       - mujoco-python-viewer==0.1.4
       - python-fcl==0.7.0.10
       - vhacdx==0.0.10
