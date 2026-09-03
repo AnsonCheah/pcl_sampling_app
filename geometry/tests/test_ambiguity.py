@@ -32,6 +32,7 @@ from geometry.ambiguity import (
     AmbiguityConfig,
     AmbiguityProfile,
     _explains,
+    _fit_fold,
     _rotation_about,
     ambiguity_geometries,
     analyse_ambiguity,
@@ -144,6 +145,80 @@ def test_box_reports_exactly_three_global_axes():
     dirs = np.abs(np.array([ax.direction for ax in globals_]))
     assert np.allclose(dirs.max(axis=1), 1.0, atol=0.02)
     assert np.allclose(np.sort(dirs.argmax(axis=1)), [0, 1, 2])
+
+
+# -----------------------------------------------------------------------------
+# 1b. Partial (majority) fold detection -- _fit_fold in isolation
+#
+# Exercises _fit_fold directly with synthetic boolean probes rather than a raycasted
+# mesh: it is exactly the function AmbiguityConfig.fold_pass_fraction changed, and a
+# fake probe pins the accept rule without depending on geometry/sampling specifics.
+# -----------------------------------------------------------------------------
+
+def _near(angle_deg: float, targets: set, tol: float) -> bool:
+    return any(abs((angle_deg - a + 180.0) % 360.0 - 180.0) < tol for a in targets)
+
+
+def test_fit_fold_accepts_a_majority_not_all():
+    """The motivating case: 25333MB000's disc axis explains 90/270 well but not 180.
+
+    A candidate order is accepted once a majority of its wanted angles pass, not all --
+    see AmbiguityConfig.fold_pass_fraction. The old all-pass rule reported this as
+    fold=1 (MechVision's angleStep=360, i.e. "off"), leaving a real, exploitable
+    90-degree ambiguity unsearched.
+    """
+    cfg = AmbiguityConfig()
+    passing = {90.0, 270.0}
+    fold, wanted = _fit_fold([90.0, 270.0], cfg,
+                             lambda a: _near(a, passing, cfg.theta_bin_deg))
+    assert fold == 4
+    assert wanted == pytest.approx([90.0, 180.0, 270.0])
+
+
+def test_fit_fold_prefers_the_coarser_consistent_order():
+    """One marginal angle outside n=4's grid must not promote the result to a finer fold.
+
+    n=12's wanted set includes 30/60/.../330; passing only {90, 270, 30} gives n=12 a
+    1/11 hit rate (not a majority) while n=4 gets 2/3 -- fold must still land on 4, not
+    the needlessly fine 12.
+    """
+    cfg = AmbiguityConfig()
+    passing = {90.0, 270.0, 30.0}
+    fold, _ = _fit_fold([90.0, 270.0, 30.0], cfg,
+                        lambda a: _near(a, passing, cfg.theta_bin_deg))
+    assert fold == 4
+
+
+def test_fit_fold_full_pass_is_unaffected():
+    """Majority is a strict relaxation of all-pass: a genuinely global fold (every wanted
+    angle passing, e.g. a hex prism) must still be recovered exactly as before."""
+    cfg = AmbiguityConfig()
+    passing = {60.0, 120.0, 180.0, 240.0, 300.0}
+    fold, wanted = _fit_fold(sorted(passing), cfg,
+                             lambda a: _near(a, passing, cfg.theta_bin_deg))
+    assert fold == 6
+    assert wanted == pytest.approx([60.0, 120.0, 180.0, 240.0, 300.0])
+
+
+def test_fit_fold_no_passes_falls_back_to_fold_one():
+    """Nothing passes the probe AND the voted angle sits on no candidate's grid (137 is
+    >6deg from every multiple of 360/n for n in fold_candidates, bar 135, which alone is
+    1/7 of n=8's wanted set) -- so neither loop finds a majority and fold is 1."""
+    cfg = AmbiguityConfig()
+    fold, wanted = _fit_fold([137.0], cfg, lambda a: False)
+    assert fold == 1
+    assert wanted == pytest.approx([137.0])
+
+
+def test_fit_fold_loose_fallback_is_also_majority_gated():
+    """When the geometry probe never passes, the loose fallback -- which asks whether a
+    candidate angle was actually voted for in stage B -- applies the same majority rule
+    rather than requiring every wanted angle to have a nearby vote."""
+    cfg = AmbiguityConfig()
+    voted_angles = [90.0, 270.0]   # no vote landed near 180
+    fold, wanted = _fit_fold(voted_angles, cfg, lambda a: False)
+    assert fold == 4
+    assert wanted == pytest.approx([90.0, 180.0, 270.0])
 
 
 # -----------------------------------------------------------------------------

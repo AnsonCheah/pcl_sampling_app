@@ -154,6 +154,17 @@ class AmbiguityConfig:
     axis_pt_tol_frac: float = 0.03
     fold_candidates: Tuple[int, ...] = (2, 3, 4, 6, 8, 12)
     continuous_probes: int = 5
+    # A candidate fold order is accepted once a STRICT MAJORITY of its non-trivial wanted
+    # angles pass the explains-probe, not all of them. A part can have a genuine,
+    # exploitable periodicity (e.g. 3 of 4 quadrants around a feature carrying an
+    # identical flat plane) without being a true global symmetry -- requiring every angle
+    # to pass reports those as fold 1 / angleStep 360, which is MechVision's "off" and
+    # leaves the real ambiguity unsearched. Calibrated on 25333MB000's disc axis: 90/270
+    # explain 0.489/0.481 against a bar of 0.440 while 180 explains only 0.317 -- 2 of 3
+    # passing is enough to justify a 90-degree search step even though the axis is not
+    # globally 4-fold symmetric. This is a strict relaxation of the old all-pass rule, so
+    # every case that already passed strictly (hex prism, box, ...) is unaffected.
+    fold_pass_fraction: float = 0.5
     # An axis is "significant" if it affects enough viewpoints to matter. This is a
     # frequency test on view_fraction, deliberately independent of the ranking score, so
     # retuning the exponent below cannot silently change how many axes a part is said to
@@ -703,26 +714,45 @@ def _fit_fold(angles: List[float], cfg: AmbiguityConfig,
     resulting MechVision ``angleStep`` of 180 would leave two thirds of the ambiguity
     unmitigated.
 
-    Continuous is tested by requiring several *arbitrary* angles to pass, not just the ones
-    the vote happened to find -- otherwise an axis is called continuous whenever the vote
-    was thorough rather than whenever the geometry is.
+    A candidate order is accepted on a **strict majority** of its wanted angles passing
+    (``cfg.fold_pass_fraction``), not all of them.  An axis need not be a true global
+    symmetry to be worth searching: 3 of 4 quadrants around a feature can carry an
+    identical flat plane while the 4th does not, which makes exactly the angles that skip
+    the odd quadrant (here 90/270, not 180) genuinely ambiguous without the whole model
+    being 4-fold symmetric.  Requiring every angle to pass reports that as fold 1 --
+    MechVision's angleStep 360, i.e. "off" -- and leaves the real ambiguity unsearched.
+    Majority is a strict relaxation of the old all-pass rule (all-pass implies majority),
+    so a genuinely global axis (hex prism, box, ...) is completely unaffected; the only
+    cases this changes are ones that used to fall through to fold 1.
+
+    Continuous (fold 0) stays on the old all-pass rule, deliberately not relaxed:
+    misreporting a partially-ambiguous axis as continuous would tell MechVision to skip
+    orientation scoring on it entirely, which is worse than under-reporting its fold.  It
+    is tested by requiring several *arbitrary* angles to pass, not just the ones the vote
+    happened to find -- otherwise an axis is called continuous whenever the vote was
+    thorough rather than whenever the geometry is.
     """
     rng = np.random.default_rng(0)
     if all(probe(float(x)) for x in rng.uniform(5.0, 175.0, cfg.continuous_probes)):
         return 0, []
 
-    # Highest fold first, so the *smallest* angle step that still fully explains the axis
-    # wins: a hex prism must come back C6 (step 60), not C2 (step 180), even though 180
-    # also passes.
+    def majority(results) -> bool:
+        results = list(results)
+        return sum(results) > cfg.fold_pass_fraction * len(results)
+
+    # Highest fold first, so the *smallest* angle step that still explains a majority of
+    # the axis wins: a hex prism must come back C6 (step 60), not C2 (step 180), even
+    # though 180 also passes.
     for n in sorted(cfg.fold_candidates, reverse=True):
         wanted = [360.0 * k / n for k in range(1, n)]
-        if all(probe(w) for w in wanted):
+        if majority(probe(w) for w in wanted):
             return n, wanted
 
     tol = cfg.theta_bin_deg
     for n in sorted(cfg.fold_candidates, reverse=True):
         wanted = [360.0 * k / n for k in range(1, n)]
-        if all(any(abs((w - a + 180.0) % 360.0 - 180.0) < tol for a in angles) for w in wanted):
+        if majority(any(abs((w - a + 180.0) % 360.0 - 180.0) < tol for a in angles)
+                    for w in wanted):
             return n, wanted
     return 1, sorted(angles)
 
@@ -801,6 +831,11 @@ def analyse_ambiguity(mesh: o3d.geometry.TriangleMesh,
       * three sample densities (6000 / 7000 / 9000 points, n_views=100) gave dominant folds
         C4 / C1 / C2, the third on an axis 45 degrees away from the other two;
       * the same cloud at n_views=200 gave C4 / C3 / C3 across seeds 0 / 1 / 2.
+
+    Both sweeps predate `cfg.fold_pass_fraction` and have not been re-measured against it;
+    the *fold* spread in particular should narrow, since the majority rule no longer drops an
+    order to C1 over a single failing angle. Which axis wins is unaffected -- `rank_axes`
+    scores on view/area fraction, and fold only breaks ties among global axes.
 
     Two consequences, neither of them fixed here. `fold` bounds an angleStep *search range*
     (360/fold down to a ~5 degree floor) rather than fixing an answer, so its instability

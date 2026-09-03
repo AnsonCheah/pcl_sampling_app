@@ -129,6 +129,21 @@ by inlier fraction will return. Calibrated on 25333MB000: 300 random rotations r
 best-per-view explained fraction of p50 0.033, p99 0.273, max 0.315, and none reach 0.60;
 the genuine ambiguity axes reach 0.709-0.735. Requiring 60% explained sits in that gap.
 
+**Fold acceptance** (`fold_pass_fraction = 0.5`). A candidate fold order is accepted on a
+*strict majority* of its wanted angles passing the explains-probe, not all of them. An axis
+does not have to be a global symmetry to be worth searching: where 3 of 4 quadrants around a
+feature carry an identical flat plane and the 4th does not, the rotations that skip the odd
+quadrant are genuinely ambiguous while the rest are not. Measured on 25333MB000's disc axis
+(`area_fraction` 0.497, bar 0.440): 90deg explains 0.489 and 270deg explains 0.481, but
+180deg only 0.317. Under the old all-pass rule that one failure knocked out every order down
+to C2 and the axis was reported C1 -- `angleStep` 360, which is MechVision's *off* (it sweeps
+`minAngle..maxAngle` in `angleStep` increments), so a real ambiguity went unsearched. Majority
+is a strict relaxation of all-pass, so every globally symmetric part is unaffected; the
+regression suite pins cylinder/sphere/cone at 0, box at C2, and the 3/4/6-prisms at their
+exact folds. Continuity (fold 0) deliberately stays on all-pass: calling a partially
+ambiguous axis continuous would disable orientation scoring on it entirely, which is worse
+than under-reporting the fold.
+
 **Ranking exponent** (`rank_area_exponent = 2.0`). `score = view_fraction *
 area_fraction ** k` estimates P(the matcher returns this wrong pose): `view_fraction` is
 how often the ambiguity is geometrically available, `area_fraction` how much of the whole
@@ -160,7 +175,9 @@ magnitude smaller (0.01-0.03, not ~1.0), so an absolute `round(score, 2)` window
 one of them in a single bucket and silently promotes fold to the primary sort key. Measured
 on 25333MB000: six axes scoring 0.0017-0.0172, the highest being the off-centroid disc axis
 at fold 1 -- demoted to rank 2 behind two C2 axes scoring *less*, because 0.0172 and 0.0170
-both round to 0.02 and fold 2 > fold 1. That is exactly the ranking `rank_area_exponent` was
+both round to 0.02 and fold 2 > fold 1. (That measurement predates `fold_pass_fraction`;
+the same axis now fits C4 and leads on score by a wide margin. The tie-break reasoning is
+unchanged -- an absolute window would still collapse view-dependent scores into one bucket.) That is exactly the ranking `rank_area_exponent` was
 calibrated to avoid. Hence the window is a fraction of the leading score, not an absolute
 step, so it means the same thing whether scores sit near 1.0 or near 0.01.
 
