@@ -1,4 +1,4 @@
-"""Tests for geometry.ambiguity — view-dependent and global ambiguity detection.
+"""Tests for geometry.ambiguity -- view-dependent and global ambiguity detection.
 
 Run:  python -m pytest geometry/tests/test_ambiguity.py -q
 
@@ -32,6 +32,7 @@ from geometry.ambiguity import (
     AmbiguityConfig,
     AmbiguityProfile,
     _explains,
+    _fit_fold,
     _rotation_about,
     ambiguity_geometries,
     analyse_ambiguity,
@@ -46,9 +47,9 @@ FAST = dict(n_views=48, res=144)
 N_SAMPLE = 8000
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Fixtures
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _centred(mesh: o3d.geometry.TriangleMesh) -> o3d.geometry.TriangleMesh:
     mesh.translate(-mesh.get_axis_aligned_bounding_box().get_center())
@@ -84,9 +85,9 @@ def _axis_distance(query: np.ndarray, direction: np.ndarray, point: np.ndarray) 
     return float(np.linalg.norm(v - float(v @ d) * d))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. Global-symmetry regression — the anti-overfitting guard
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# 1. Global-symmetry regression -- the anti-overfitting guard
+# -----------------------------------------------------------------------------
 
 @pytest.mark.parametrize("name,make,expected_fold", [
     ("cylinder",     lambda: _centred(o3d.geometry.TriangleMesh.create_cylinder(0.020, 0.080, resolution=64)), 0),
@@ -123,13 +124,13 @@ def test_symmetric_primitive_axes_pass_through_the_centre():
 
 
 def test_sphere_reports_several_independent_axes():
-    """A sphere is only partially mitigable — MechVision can use one axis of many."""
+    """A sphere is only partially mitigable -- MechVision can use one axis of many."""
     profile = _analyse(_centred(o3d.geometry.TriangleMesh.create_sphere(0.030, resolution=30)))
     assert profile.n_significant_axes >= 3
 
 
 def test_box_reports_exactly_three_global_axes():
-    """A cuboid has three global C2 axes — and legitimately more view-dependent ones.
+    """A cuboid has three global C2 axes -- and legitimately more view-dependent ones.
 
     Rotating 180 degrees about a face diagonal is not a symmetry of a 30x20 cross
     section, but it does map one visible face patch onto another, so it is a real
@@ -146,9 +147,83 @@ def test_box_reports_exactly_three_global_axes():
     assert np.allclose(np.sort(dirs.argmax(axis=1)), [0, 1, 2])
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. Off-centroid axis recovery — the capability that motivates the module
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# 1b. Partial (majority) fold detection -- _fit_fold in isolation
+#
+# Exercises _fit_fold directly with synthetic boolean probes rather than a raycasted
+# mesh: it is exactly the function AmbiguityConfig.fold_pass_fraction changed, and a
+# fake probe pins the accept rule without depending on geometry/sampling specifics.
+# -----------------------------------------------------------------------------
+
+def _near(angle_deg: float, targets: set, tol: float) -> bool:
+    return any(abs((angle_deg - a + 180.0) % 360.0 - 180.0) < tol for a in targets)
+
+
+def test_fit_fold_accepts_a_majority_not_all():
+    """The motivating case: 25333MB000's disc axis explains 90/270 well but not 180.
+
+    A candidate order is accepted once a majority of its wanted angles pass, not all --
+    see AmbiguityConfig.fold_pass_fraction. The old all-pass rule reported this as
+    fold=1 (MechVision's angleStep=360, i.e. "off"), leaving a real, exploitable
+    90-degree ambiguity unsearched.
+    """
+    cfg = AmbiguityConfig()
+    passing = {90.0, 270.0}
+    fold, wanted = _fit_fold([90.0, 270.0], cfg,
+                             lambda a: _near(a, passing, cfg.theta_bin_deg))
+    assert fold == 4
+    assert wanted == pytest.approx([90.0, 180.0, 270.0])
+
+
+def test_fit_fold_prefers_the_coarser_consistent_order():
+    """One marginal angle outside n=4's grid must not promote the result to a finer fold.
+
+    n=12's wanted set includes 30/60/.../330; passing only {90, 270, 30} gives n=12 a
+    1/11 hit rate (not a majority) while n=4 gets 2/3 -- fold must still land on 4, not
+    the needlessly fine 12.
+    """
+    cfg = AmbiguityConfig()
+    passing = {90.0, 270.0, 30.0}
+    fold, _ = _fit_fold([90.0, 270.0, 30.0], cfg,
+                        lambda a: _near(a, passing, cfg.theta_bin_deg))
+    assert fold == 4
+
+
+def test_fit_fold_full_pass_is_unaffected():
+    """Majority is a strict relaxation of all-pass: a genuinely global fold (every wanted
+    angle passing, e.g. a hex prism) must still be recovered exactly as before."""
+    cfg = AmbiguityConfig()
+    passing = {60.0, 120.0, 180.0, 240.0, 300.0}
+    fold, wanted = _fit_fold(sorted(passing), cfg,
+                             lambda a: _near(a, passing, cfg.theta_bin_deg))
+    assert fold == 6
+    assert wanted == pytest.approx([60.0, 120.0, 180.0, 240.0, 300.0])
+
+
+def test_fit_fold_no_passes_falls_back_to_fold_one():
+    """Nothing passes the probe AND the voted angle sits on no candidate's grid (137 is
+    >6deg from every multiple of 360/n for n in fold_candidates, bar 135, which alone is
+    1/7 of n=8's wanted set) -- so neither loop finds a majority and fold is 1."""
+    cfg = AmbiguityConfig()
+    fold, wanted = _fit_fold([137.0], cfg, lambda a: False)
+    assert fold == 1
+    assert wanted == pytest.approx([137.0])
+
+
+def test_fit_fold_loose_fallback_is_also_majority_gated():
+    """When the geometry probe never passes, the loose fallback -- which asks whether a
+    candidate angle was actually voted for in stage B -- applies the same majority rule
+    rather than requiring every wanted angle to have a nearby vote."""
+    cfg = AmbiguityConfig()
+    voted_angles = [90.0, 270.0]   # no vote landed near 180
+    fold, wanted = _fit_fold(voted_angles, cfg, lambda a: False)
+    assert fold == 4
+    assert wanted == pytest.approx([90.0, 180.0, 270.0])
+
+
+# -----------------------------------------------------------------------------
+# 2. Off-centroid axis recovery -- the capability that motivates the module
+# -----------------------------------------------------------------------------
 
 def _cylinder_with_offset_mass():
     """Cylinder on +Z through the origin, plus a block that drags the centroid away.
@@ -185,14 +260,14 @@ def test_recovers_axis_that_misses_the_centroid():
     assert match, "the off-centroid axis direction was not recovered"
     best = max(match, key=lambda ax: ax.view_fraction)
     assert _axis_distance(best.point, true_dir, true_pt) < 0.0015, (
-        "axis direction found but its position is wrong — a frame built from this "
+        "axis direction found but its position is wrong -- a frame built from this "
         "would rotate about the wrong line")
     assert best.fold == 0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 3. Negative control and the noise floor
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def test_random_rotations_stay_below_the_survival_threshold():
     """The separation the f_tau default relies on must actually hold.
@@ -235,9 +310,9 @@ def test_random_rotations_stay_below_the_survival_threshold():
         "random rotations reach the survival threshold; f_tau has no margin")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 4. Determinism and scale invariance
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def test_repeated_runs_agree():
     """Determinism is what makes this safe to run unattended over a large catalogue."""
@@ -261,7 +336,7 @@ def test_result_is_translation_invariant(offset_m):
     cloud centred gives 4 axes and the disc axis dominant at 0.496. The frame was then
     built around the wrong axis.
 
-    Every app path centres the mesh first, so only `bench/generate_scenes.py` hit it —
+    Every app path centres the mesh first, so only `bench/generate_scenes.py` hit it --
     which is exactly why relying on callers is not good enough.
     """
     mesh = _cylinder_with_offset_mass()
@@ -280,7 +355,7 @@ def test_result_is_translation_invariant(offset_m):
     match = [ax for ax in profile.axes
              if abs(float(ax.direction @ true_dir)) > np.cos(np.deg2rad(3.0))]
     assert len(match) == 1, (
-        f"expected the axis to form ONE group, got {len(match)} — a split here is how the "
+        f"expected the axis to form ONE group, got {len(match)} -- a split here is how the "
         f"wrong axis wins the ranking")
 
     # The axis point must come back in the CALLER's frame, not the internal centred one.
@@ -300,7 +375,7 @@ def test_result_is_scale_invariant(scale):
     assert profile.dominant is not None
     assert profile.dominant.fold == 6
     assert profile.dominant.view_fraction == pytest.approx(1.0, abs=0.05)
-    # The tolerance tracks the part until the sensor-physics floor takes over — which is
+    # The tolerance tracks the part until the sensor-physics floor takes over -- which is
     # the intended behaviour, not a scale-invariance failure: below the floor the sensor
     # cannot resolve the agreement being asked about.
     cfg = AmbiguityConfig(**FAST)
@@ -314,9 +389,9 @@ def test_angle_step_matches_the_fold():
     assert profile.dominant.angle_step_deg() == pytest.approx(90.0)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 5. Ranking
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #
 # These were originally written against a hand-built sidecar, back when profiles were
 # persisted and `load_ambiguity_profile` re-ranked on read. The persistence layer is gone --
@@ -360,7 +435,7 @@ def test_rank_axes_overrides_a_stale_order():
 
     Ordered by the old `score = view_fraction`, `25333MB000` named the C2 axis dominant.
     `dominant` is what selects MechVision's rotationStrategy and angleStep, so carrying that
-    order forward ships the wrong axis — re-ranking the same numbers puts the disc axis first.
+    order forward ships the wrong axis -- re-ranking the same numbers puts the disc axis first.
     """
     profile = _stale_profile()
     rank_axes(profile, 2.0)
@@ -381,7 +456,7 @@ def test_rank_axes_honours_a_zero_exponent():
 
 
 def test_rank_axes_is_reversible():
-    """Re-ranking needs no re-analysis — that is what makes the exponent cheap to tune."""
+    """Re-ranking needs no re-analysis -- that is what makes the exponent cheap to tune."""
     profile = _stale_profile()
 
     rank_axes(profile, 2.0)
@@ -392,9 +467,9 @@ def test_rank_axes_is_reversible():
     assert np.allclose(np.abs(profile.dominant.direction), [1.0, 0.0, 0.0])
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 6. Visualisation helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def test_heat_colour_is_bounded_and_ordered():
     ramp = heat_colour(np.linspace(0.0, 1.0, 32))

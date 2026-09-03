@@ -1,9 +1,9 @@
 """
-test_scene_disk_preview.py — fast tests for the SceneStage skip + disk-scene mesh preview
+test_scene_disk_preview.py -- fast tests for the SceneStage skip + disk-scene mesh preview
 ------------------------------------------------------------------------------------------
 Run:  python -m pytest stages/tests/test_scene_disk_preview.py -q
 
-Headless, no MuJoCo/physics — temp dirs + tiny meshes + a synthetic scene_state.npz.
+Headless, no MuJoCo/physics -- temp dirs + tiny meshes + a synthetic scene_state.npz.
 (The physics smoke test lives in test_scene_stage.py, which is module-level `slow`.)
 """
 
@@ -24,7 +24,7 @@ def scene(headless_app, box_mesh):
     return headless_app.stages[Stage.SCENE]
 
 
-# ── directory scanning ──────────────────────────────────────────────────────
+# -- directory scanning ------------------------------------------------------
 
 def test_list_scene_dirs_sorted(tmp_path):
     for name in ("scene_00002", "scene_00000", "scene_00001"):
@@ -38,7 +38,7 @@ def test_list_scene_dirs_missing():
     assert list_scene_dirs("/does/not/exist") == []
 
 
-# ── bin reconstruction ──────────────────────────────────────────────────────
+# -- bin reconstruction ------------------------------------------------------
 
 def test_reconstruct_bin_mesh_nonempty():
     mesh = ss._reconstruct_bin_mesh([0.4, 0.3, 0.25, 0.01], np.eye(4))
@@ -46,26 +46,26 @@ def test_reconstruct_bin_mesh_nonempty():
     assert len(mesh.vertices) == 40    # floor + 4 walls, 8 verts each
 
 
-# ── skip via Next ───────────────────────────────────────────────────────────
+# -- skip via Next -----------------------------------------------------------
 
 def test_next_enabled_with_disk_scenes(scene, tmp_path, monkeypatch):
     monkeypatch.setattr(scene, "_synth_dir", lambda: tmp_path)
     assert len(scene.app.o3d_scene) == 0
     assert scene.next_enabled() is False           # nothing generated, nothing on disk
     (tmp_path / "scene_00000").mkdir()
-    assert scene.next_enabled() is True            # on-disk scene → advance allowed
+    assert scene.next_enabled() is True            # on-disk scene -> advance allowed
 
 
 def test_request_next_skip_confirms_and_proceeds(scene, tmp_path, monkeypatch):
     monkeypatch.setattr(scene, "_synth_dir", lambda: tmp_path)
     (tmp_path / "scene_00000").mkdir()
     called = []
-    # headless confirm_dialog runs on_ok immediately → proceed fires.
+    # headless confirm_dialog runs on_ok immediately -> proceed fires.
     scene.request_next(lambda: called.append(1))
     assert called == [1]
 
 
-# ── disk-scene mesh reconstruction ──────────────────────────────────────────
+# -- disk-scene mesh reconstruction ------------------------------------------
 
 def _write_scene_state(scene_dir, translations):
     scene_dir.mkdir(parents=True, exist_ok=True)

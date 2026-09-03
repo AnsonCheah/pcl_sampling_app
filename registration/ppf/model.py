@@ -54,7 +54,7 @@ class PPFModel:
     cfg: PPFConfig
 
     keys: np.ndarray                 # (E,) int64, sorted
-    entry_point: np.ndarray          # (E,) int32 — index into `points` of the pair's FIRST point
+    entry_point: np.ndarray          # (E,) int32 -- index into `points` of the pair's FIRST point
     entry_alpha: np.ndarray          # (E,) float32
     n_dist_bins: int
     n_pairs: int                     # pairs before spreading
@@ -158,7 +158,7 @@ class PPFModel:
         dist, f2, f3, f4 = dist[usable], f2[usable], f3[usable], f4[usable]
         if len(ii) == 0:
             raise ValueError(
-                "no usable model point pairs — tau is probably larger than the part; "
+                "no usable model point pairs -- tau is probably larger than the part; "
                 f"tau={cfg.tau * 1e3:.2f}mm, diameter={cfg.diameter * 1e3:.2f}mm")
 
         alpha = alpha_of(frames[ii], pts[ii], pts[jj])

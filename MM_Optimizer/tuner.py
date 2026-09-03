@@ -1,5 +1,5 @@
 """
-tuner.py — MechVision pose-estimation parameter tuner
+tuner.py -- MechVision pose-estimation parameter tuner
 -----------------------------------------------------
 `Tuner` extends `MVEvaluator` with a multi-objective Optuna study over all 16-18 coarse
 and fine parameters at once. Three samplers share one search space and warm-start seed:
@@ -14,11 +14,15 @@ Non-obvious behaviour
   early-return guard in `_objective`. The guard is what prevents a MechVision blowup;
   the sampler constraint only steers away from that region.
 - Pruning is deliberately minimal: a coverage floor and a FIXED absolute time cap. There
-  is no competitive time pruning — a `best_mean_time × ratio` guard ratchets down after
+  is no competitive time pruning -- a `best_mean_time x ratio` guard ratchets down after
   one fast low-quality trial and then prunes most of the search, biasing away from the
   slow-but-accurate region that matters here.
-- Edge-only params are suggested only when coarse_mode=1, and the samplers use
-  group=True so surface and edge trials form separate joint groups.
+- Coverage counts an instance only when position AND orientation are within tolerance.
+  Scoring it position-only leaves `angleStep` with no upside, so every sampler drives it to
+  360. `ambiguity_fold == 0` (continuous) is the exception and keeps position-only scoring.
+- Edge-only params are suggested only when coarse_mode=1, and `angleStep` only for an
+  ambiguity-aligned N-fold part. The samplers use group=True so those form separate joint
+  groups.
 - SQLite storage gives crash-resume; rounds extend the same study, so the sampler keeps
   its model across them.
 
@@ -42,7 +46,7 @@ import optuna
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-# ── project root on path ──────────────────────────────────────────────────────
+# -- project root on path ------------------------------------------------------
 _DIR  = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.abspath(os.path.join(_DIR, ".."))
 for _p in [_ROOT, _DIR]:
@@ -56,26 +60,49 @@ from MM_Optimizer.mv_evaluator  import (MVEvaluator, EvalResult,
                                         PROJ_NAME, MM_MODEL_ROOT,
                                         RESULTS_DIR, ENABLE_CACHE)
 from MM_Optimizer.optimizer_utils import list_synthetic_scenes
+from MM_Optimizer import model_sync
 import MM_Optimizer.search_config as SC
 
 log = logging.getLogger(__name__)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# suggest_params — all 16/18D params in one function
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# suggest_params -- all 16/18D params in one function
+# -----------------------------------------------------------------------------
+
+def _symmetry_is_searchable(sym_aligned: bool, sym_fold: int) -> bool:
+    """Is seeding fine matching from several orientations worth a search dimension?
+
+    Only for an N-fold part in an ambiguity-ALIGNED bundle. The other cases:
+      * fold 1 (C1)  -- orientation is already unique; extra seeds only cost time.
+      * fold 0       -- continuous; there are no discrete orientations to seed.
+      * not aligned  -- frame Z is an arbitrary PCA axis, so rotating about it moves the model
+                       off the pose coarse matching found. Worse than not sweeping at all.
+    """
+    return bool(sym_aligned) and sym_fold >= 2
+
+
+def _angular_threshold(sym_fold: int) -> float:
+    """Angular tolerance coverage is scored at, given the part's symmetry class."""
+    if sym_fold == 0:
+        return SC.ANG_THRESH_POSITION_ONLY   # roll about the axis is unrecoverable
+    return SC.ANG_THRESH_TIGHT
+
 
 def suggest_params(
     trial: optuna.Trial,
     regime: dict,
     pairs_candidates: List[int],
     voxel_bounds: Tuple[float, float, float, float],
+    sym_aligned: bool,
+    sym_fold: int,
 ) -> dict:
     """Suggest all coarse + fine params jointly.
 
-    Conditional edge-only params (filterCandidatePoseByAxis, angleThreshold) are only
-    suggested when coarse_mode=1. group=True in the sampler ensures surface and edge
-    trials form separate joint groups, preventing missing-value noise.
+    Conditional params are only suggested when they can matter -- edge-only
+    (filterCandidatePoseByAxis, angleThreshold) when coarse_mode=1, and angleStep only for an
+    aligned N-fold part. group=True in the sampler ensures those form separate joint groups,
+    preventing missing-value noise.
 
     Returns flat dict suitable for splitting into coarse/fine via _split_params().
     """
@@ -86,7 +113,7 @@ def suggest_params(
     rlo            = SC.REFSTEP_BOUNDS[0]   # lower = 1
     olo, ohi       = SC.OUTPUTNUM_BOUNDS
 
-    # ── Coarse params ─────────────────────────────────────────────────────────
+    # -- Coarse params ---------------------------------------------------------
     coarse_mode         = regime["coarse_mode"]   # fixed by Phase 1; not a free param
 
     refStep             = trial.suggest_int(  "refStep",  lo_ref, hi_ref)
@@ -100,7 +127,7 @@ def suggest_params(
     min_vox             = trial.suggest_float("minVoxelLength_mm", min_lo, min_hi)
     vox_w               = trial.suggest_float("voxel_width_mm",    width_lo, width_hi)
 
-    # Edge-only params — conditionally suggested so TPE models them in a separate group
+    # Edge-only params -- conditionally suggested so TPE models them in a separate group
     atlo, athi = SC.ANGLETHRESH_BOUNDS
     if coarse_mode == 1.0:
         filter_by_axis = trial.suggest_categorical("filterByAxis", [True, False])
@@ -112,7 +139,7 @@ def suggest_params(
         filter_by_axis = True   # surface mode: MechVision ignores these
         angle_thresh   = 135
 
-    # ── Fine params ───────────────────────────────────────────────────────────
+    # -- Fine params -----------------------------------------------------------
     fine_mode  = regime["fine_mode"]   # fixed by Phase 1
     oplo, ophi = SC.OPAPP_BOUNDS
     dvlo, dvhi = SC.DEVCAP_BOUNDS
@@ -121,8 +148,16 @@ def suggest_params(
     visibleSurf = trial.suggest_categorical("visibleSurf", [True, False])
     normalAng   = trial.suggest_categorical("normalAng",   [True, False])
 
+    # Suggested by index into the ladder, not by value: the ladder is an ordered set of 360's
+    # divisors, and an index keeps that order legible to TPE/GP.
+    if _symmetry_is_searchable(sym_aligned, sym_fold):
+        step_i    = trial.suggest_int("angleStep_idx", 0, len(SC.ANGLE_STEP_LADDER) - 1)
+        angleStep = SC.ANGLE_STEP_LADDER[step_i]
+    else:
+        angleStep = SC.ANGLE_STEP_NONE
+
     return {
-        # ── coarse ─────────────────────────────────────────────────────────
+        # -- coarse ---------------------------------------------------------
         "coarse_mode":         coarse_mode,
         "refStep":             refStep,
         "distQuantification":  distQ,
@@ -139,17 +174,18 @@ def suggest_params(
         "maxVoxelLength":      min_vox + vox_w,
         "filterCandidatePoseByAxis": filter_by_axis,
         "angleThreshold":      angle_thresh,
-        # ── fine ───────────────────────────────────────────────────────────
+        # -- fine -----------------------------------------------------------
         "fine_mode":           fine_mode,
         "operationApproach":   float(opApproach),
         "deviationCorrectionCapacity": float(devCap),
         "onlyConsiderVisibleSurfaceOfModel": visibleSurf,
         "considerErrorofNormalAngles":       normalAng,
+        "angleStep":           angleStep,
     }
 
 
 def _split_params(p: dict) -> Tuple[dict, dict]:
-    """Convert flat joint param dict → (coarse_dict, fine_dict)."""
+    """Convert flat joint param dict -> (coarse_dict, fine_dict)."""
     coarse_mode = p["coarse_mode"]
     fine_mode   = p["fine_mode"]
     coarse = {
@@ -178,6 +214,16 @@ def _split_params(p: dict) -> Tuple[dict, dict]:
         "scoreLevel":                        0.0,
         "confidenceThreshold":               0.1,
         "candidateTopNum":                   1,
+        # All four travel together -- a step with no axis and no range does nothing. Z is set
+        # unconditionally so the config never inherits mm_adapter's Y default; when angleStep
+        # is 360 (MechVision's "off") the axis is moot anyway.
+        "rotationStrategy":                  SC.ROTATION_STRATEGY_Z,
+        # Defaulted, not required: a caller assembling a params dict by hand (the GUI, a
+        # stored config) gets the symmetry search OFF rather than a KeyError. The key is
+        # still always emitted, so nothing is silently dropped on the way to MechVision.
+        "angleStep":                         float(p.get("angleStep", SC.ANGLE_STEP_NONE)),
+        "minAngle":                          -180.0,
+        "maxAngle":                          180.0,
     }
     return coarse, fine
 
@@ -186,6 +232,8 @@ def _expand_winner_params(
     trial_params: dict,
     regime: dict,
     pairs_candidates: List[int],
+    sym_aligned: bool,
+    sym_fold: int,
 ) -> dict:
     """Reconstruct the full expanded param dict from winner.params (short trial-level names).
 
@@ -205,6 +253,11 @@ def _expand_winner_params(
     else:
         filter_by_axis = True
         angle_thresh   = 135
+
+    if _symmetry_is_searchable(sym_aligned, sym_fold):
+        angleStep = SC.ANGLE_STEP_LADDER[p["angleStep_idx"]]
+    else:
+        angleStep = SC.ANGLE_STEP_NONE
 
     return {
         "coarse_mode":         coarse_mode,
@@ -228,12 +281,13 @@ def _expand_winner_params(
         "deviationCorrectionCapacity": float(p["devCap"]),
         "onlyConsiderVisibleSurfaceOfModel": p["visibleSurf"],
         "considerErrorofNormalAngles":       p["normalAng"],
+        "angleStep":           angleStep,
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Warm-start builders
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _build_warm(
     coarse_dict: dict,
@@ -241,8 +295,10 @@ def _build_warm(
     regime: dict,
     pairs_candidates: List[int],
     voxel_bounds: Tuple[float, float, float, float],
+    sym_aligned: bool,
+    sym_fold: int,
 ) -> dict:
-    """Convert a full (coarse, fine) config dict → flat joint trial params for enqueue.
+    """Convert a full (coarse, fine) config dict -> flat joint trial params for enqueue.
 
     Snaps pairs and angleQ to nearest valid categorical value. Clamps continuous params to bounds.
     Clamps referredStep to refStep so the enqueued trial is valid (external dict may violate this).
@@ -251,7 +307,7 @@ def _build_warm(
     vlo, vhi       = SC.VOTERATIO_BOUNDS
     olo, ohi       = SC.OUTPUTNUM_BOUNDS
     lo_ref, hi_ref = SC.REFSTEP_BOUNDS
-    rlo, rhi       = SC.REFSTEP_BOUNDS   # same as REFSTEP_BOUNDS (1–20)
+    rlo, rhi       = SC.REFSTEP_BOUNDS   # same as REFSTEP_BOUNDS (1-20)
     dlo, dhi       = SC.DISTQ_BOUNDS
 
     # Snap angleQ to nearest valid categorical value
@@ -279,7 +335,7 @@ def _build_warm(
 
     ref_val      = int(np.clip(coarse_dict.get("refStep", 10), lo_ref, hi_ref))
     referred_val = int(np.clip(coarse_dict.get("referredStep", 1), rlo, rhi))
-    referred_val = min(referred_val, ref_val)   # enforce referredStep ≤ refStep
+    referred_val = min(referred_val, ref_val)   # enforce referredStep <= refStep
 
     p: dict = {
         "refStep":              ref_val,
@@ -301,12 +357,19 @@ def _build_warm(
         atlo, athi = SC.ANGLETHRESH_BOUNDS
         p["filterByAxis"]   = bool(coarse_dict.get("filterCandidatePoseByAxis", True))
         p["angleThreshold"] = int(np.clip(coarse_dict.get("angleThreshold", 135), atlo, athi))
+
+    # The enqueued dict must name exactly the dimensions the space has, so it can only carry
+    # angleStep_idx when suggest_params would actually suggest one. Snap to the nearest rung.
+    if _symmetry_is_searchable(sym_aligned, sym_fold):
+        step_val = fine_dict.get("angleStep", SC.ANGLE_STEP_NONE)
+        p["angleStep_idx"] = min(range(len(SC.ANGLE_STEP_LADDER)),
+                                 key=lambda i: abs(SC.ANGLE_STEP_LADDER[i] - step_val))
     return p
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # NSGA-II constraint function
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _referredstep_constraint(trial: optuna.trial.FrozenTrial) -> List[float]:
     """NSGA-II constraints_func: returns [violation] where >0 means infeasible.
@@ -318,9 +381,9 @@ def _referredstep_constraint(trial: optuna.trial.FrozenTrial) -> List[float]:
     return [float(trial.user_attrs.get("constraint_violation", 0.0))]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Budget audit callback
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _budget_audit_callback(
     study: optuna.Study,
@@ -348,9 +411,9 @@ def _budget_audit_callback(
                  f"{best_str}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Pareto front winner selection
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _select_pareto_winner(study: optuna.Study) -> optuna.trial.FrozenTrial:
     """Select winner from Pareto front: max coverage first, then min time."""
@@ -361,20 +424,20 @@ def _select_pareto_winner(study: optuna.Study) -> optuna.trial.FrozenTrial:
         complete = [t for t in study.trials
                     if t.state == optuna.trial.TrialState.COMPLETE]
         if not complete:
-            raise RuntimeError("No complete trials in study — all were pruned.")
+            raise RuntimeError("No complete trials in study -- all were pruned.")
         feasible = [t for t in complete
                     if t.user_attrs.get("constraint_violation", 0.0) <= 0.0]
         pool = feasible if feasible else complete
-        log.warning(f"Pareto front empty — fallback (feasible={len(feasible)}/{len(complete)})")
+        log.warning(f"Pareto front empty -- fallback (feasible={len(feasible)}/{len(complete)})")
         return max(pool,
                    key=lambda t: t.values[0] - t.values[1] / SC.SCORE_TIME_NORM)
     # values = (coverage, mean_time); sort by coverage first (higher=better), then time
     return max(pareto, key=lambda t: (t.values[0], -t.values[1]))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Tuner
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 SAMPLER_CHOICES = SC.SAMPLER_CHOICES
 SAMPLER_DEFAULT = SC.SAMPLER_DEFAULT
@@ -383,7 +446,7 @@ SAMPLER_DEFAULT = SC.SAMPLER_DEFAULT
 class Tuner(MVEvaluator):
     """Fully joint Optuna optimizer for MechVision pose estimation.
 
-    Replaces Phases 2–3–5–6 of the hierarchical coordinate descent with a
+    Replaces Phases 2-3-5-6 of the hierarchical coordinate descent with a
     single joint multi-objective study. Phases 0, 1, and 4 are unchanged.
 
     Parameters
@@ -391,7 +454,7 @@ class Tuner(MVEvaluator):
     part_name      : Part identifier (matches model dir and scene dir names).
     client         : Connected MechVisionClient, or None for dry_run.
     project_id     : Integer project ID for PROJ_NAME.
-    scene_groups   : List[List[str]] — one inner list per scene_MMMMM directory.
+    scene_groups   : List[List[str]] -- one inner list per scene_MMMMM directory.
     warm_start     : WarmStart from mesh_analysis.analyze_mesh().
     cache          : EvalCache instance, or None to disable.
     dry_run        : Build param dicts but do not call MechVision.
@@ -402,14 +465,14 @@ class Tuner(MVEvaluator):
                      (include a trailing separator to keep DBs in a directory).
                      DB created as {prefix}{part}_{sampler}.db.
                      None = in-memory study (no persistence).
-    sampler        : Joint-study sampler — "nsgaii" (default), "tpe", or "gp".
+    sampler        : Joint-study sampler -- "nsgaii" (default), "tpe", or "gp".
                      All three run multi-objective (coverage, mean_time) over the
                      same suggest_params search space and warm-start seed.
-                     "nsgaii" enforces referredStep ≤ refStep via constraints_func;
+                     "nsgaii" enforces referredStep <= refStep via constraints_func;
                      "tpe" uses multivariate=True, group=True to handle the
                      conditional edge-only params;
                      "gp" (Gaussian process) also enforces the referredStep
-                     constraint via constraints_func — strong in the low-trial
+                     constraint via constraints_func -- strong in the low-trial
                      regime but requires torch (CPU build is sufficient).
     """
 
@@ -461,28 +524,54 @@ class Tuner(MVEvaluator):
             max(0.5, ws.maxVoxelLength_mm * 0.1),
             ws.maxVoxelLength_mm * 6.0,
         )
-        # Adaptive study threshold: clip(0.01 × longest_extent, 2mm, 5mm).
+        # Adaptive study threshold: clip(0.01 x longest_extent, 2mm, 5mm).
         # Looser than POS_THRESH_TIGHT during the study so NSGA-II gets a
         # gradient signal on flat/long parts where coarse matching lands
-        # 2–5mm from GT but fine can still converge. Final re-eval always
+        # 2-5mm from GT but fine can still converge. Final re-eval always
         # uses POS_THRESH_TIGHT (2mm).
         self._pos_thresh_study: float = (
             float(np.clip(pos_thresh_k * ws.longest_extent_m,
                           SC.POS_THRESH_TIGHT, SC.POS_THRESH_LOOSE))
             if adaptive_thresh else SC.POS_THRESH_TIGHT
         )
+        self._sym_fold, self._sym_aligned = model_sync.symmetry_metadata(part_name)
+        self._log_symmetry_class()
+
         self._study: Optional[optuna.Study] = None
         # Regime chosen by Phase 1, stored in run() so iter_pareto_configs() can
         # expand Pareto trial params after the study finishes.
         self._best_regime: dict = {}
         # Optional per-trial hook (GUI progress). When set, appended to the study
         # callbacks; Optuna calls it (study, trial) after each trial. Default None
-        # → CLI unchanged.
+        # -> CLI unchanged.
         self.on_trial_complete = None
 
-    # ─────────────────────────────────────────────────────────────────────
+    def _log_symmetry_class(self) -> None:
+        """Say which of the three cases this part is, and why angleStep is or isn't explored.
+
+        An asymmetric part and an unaligned symmetric part both pin angleStep=360, so without
+        this they look identical in the log -- but one is nothing to do and the other is
+        accuracy left on the table.
+        """
+        fold, aligned = self._sym_fold, self._sym_aligned
+        if fold == 0:
+            log.info("  symmetry: continuous axis -- angleStep fixed at "
+                     f"{SC.ANGLE_STEP_NONE}, coverage scored position-only")
+        elif fold == 1:
+            log.info(f"  symmetry: none (C1) -- angleStep fixed at {SC.ANGLE_STEP_NONE}")
+        elif aligned:
+            log.info(f"  symmetry: {fold}-fold on an ambiguity-aligned bundle -- "
+                     f"tuning angleStep over {SC.ANGLE_STEP_LADDER}")
+        else:
+            log.warning(
+                f"  symmetry: {fold}-fold detected, but this bundle is NOT ambiguity-aligned. "
+                f"angleStep fixed at {SC.ANGLE_STEP_NONE} -- re-export the part with "
+                "'Recenter to Ambiguity Axis' in the Downsample stage to enable the "
+                "symmetry search.")
+
+    # ---------------------------------------------------------------------
     # Default param helpers
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
 
     def _warm_fine(self, regime: dict) -> dict:
         return {
@@ -518,9 +607,9 @@ class Tuner(MVEvaluator):
             base["angleThreshold"]            = 135
         return base
 
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
     # Study factory
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
 
     def _create_study(self, name: str, storage_suffix: str = "") -> optuna.Study:
         """Build the multi-objective study for `self._sampler`.
@@ -529,16 +618,16 @@ class Tuner(MVEvaluator):
         interchangeable here; they differ in how many trials they need to pay off. Optuna's
         own recommended budgets, against this project's default of ~150-250 trials:
 
-        nsgaii : NSGA-II genetic algorithm. Recommended 100-10,000 trials — this budget is
+        nsgaii : NSGA-II genetic algorithm. Recommended 100-10,000 trials -- this budget is
                  at the very bottom of its range, and Optuna notes it handles float and
                  integer parameters inefficiently, which is most of this search space.
                  Optuna also documents it as NOT supporting dynamic search spaces.
-        tpe    : Tree-structured Parzen Estimator, O(d·n·log n) per trial. Recommended
+        tpe    : Tree-structured Parzen Estimator, O(d*n*log n) per trial. Recommended
                  100-1,000 trials. Plain TPE does support dynamic search spaces, but this
                  study needs `multivariate=True`, and multivariate TPE does not: it cannot
                  reuse trials recorded before a range changed, and without `group=True`
                  conditional params degrade to independent random sampling.
-        gp     : Gaussian-process Bayesian optimization, O(n³) per trial — the most expensive
+        gp     : Gaussian-process Bayesian optimization, O(n^3) per trial -- the most expensive
                  per trial but the most sample-efficient. Recommended up to 500 trials, which
                  fits this budget; the default. It infers its relative search space via
                  `intersection_search_space()` and delegates anything outside it to the
@@ -553,13 +642,13 @@ class Tuner(MVEvaluator):
            construction on every trial. That is why it is NOT written that way: instead
            referredStep takes fixed bounds and the coupling is enforced by
            `_referredstep_constraint` plus the early-return guard in `_objective`. Note the
-           guard is the part that actually prevents the MechVision blowup — `constraints_func`
-           only steers — and it is wired for nsgaii and gp but not tpe, so under tpe the
+           guard is the part that actually prevents the MechVision blowup -- `constraints_func`
+           only steers -- and it is wired for nsgaii and gp but not tpe, so under tpe the
            coupling is enforced solely by the guard.
         2. `_voxel_bounds` and `_pairs_candidates` are derived from the part's warm start,
            and studies resume with `load_if_exists=True` in "extend" mode. Regenerate a
            reference cloud and the bounds move while the DB still holds trials sampled under
-           the old ones — a dynamic value range within one study. GP degrades per-parameter
+           the old ones -- a dynamic value range within one study. GP degrades per-parameter
            there; NSGA-II has no support for it at all.
 
         `deterministic_objective=False` for GP because the objective genuinely is noisy:
@@ -603,10 +692,10 @@ class Tuner(MVEvaluator):
         study.set_metric_names(["coverage", "mean_time"])
         return study
 
-    # ─────────────────────────────────────────────────────────────────────
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
+    # ---------------------------------------------------------------------
     # Objective
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
 
     def _objective(
         self,
@@ -616,23 +705,24 @@ class Tuner(MVEvaluator):
         """Scene-by-scene evaluation returning (coverage, mean_time) for MOO.
 
         Pruning is minimal and non-competitive: (0) referredStep feasibility
-        short-circuit, (1) coverage floor after ≥3 scenes, (2) a fixed absolute
-        time safety cap after ≥3 scenes. No time-ratio pruning — the sampler owns
+        short-circuit, (1) coverage floor after >=3 scenes, (2) a fixed absolute
+        time safety cap after >=3 scenes. No time-ratio pruning -- the sampler owns
         the time/accuracy trade-off via the Pareto front.
         """
         p        = suggest_params(trial, regime, self._pairs_candidates,
-                                        self._voxel_bounds)
+                                        self._voxel_bounds,
+                                        self._sym_aligned, self._sym_fold)
         coarse_p, fine_p = _split_params(p)
 
         # Level 0: referredStep feasibility guard.
-        # NSGA-II uses fixed bounds (1–20) for referredStep, so it can suggest
-        # referredStep > refStep. Guard here prevents MechVision blowup (5–10 min/scene).
+        # NSGA-II uses fixed bounds (1-20) for referredStep, so it can suggest
+        # referredStep > refStep. Guard here prevents MechVision blowup (5-10 min/scene).
         if p["referredStep"] > p["refStep"]:
             trial.set_user_attr("constraint_violation",
                                 float(p["referredStep"] - p["refStep"]))
             return (0.0, SC.TIME_INITIAL_CAP)
 
-        ang        = SC.ANG_THRESH_REGIME_GATE
+        ang        = _angular_threshold(self._sym_fold)
         all_scenes = self._sample_scenes(SC.M_FULL)
         total_cov  = 0.0
         total_time = 0.0
@@ -661,12 +751,12 @@ class Tuner(MVEvaluator):
 
         return (final_cov, final_time)
 
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
     # Main run loop
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
 
     def run(self) -> Optional[EvalResult]:
-        """Execute full optimization: Phase 1 → joint NSGA-II study (multi-round) → Phase 4."""
+        """Execute full optimization: Phase 1 regime gate, then the joint multi-round study."""
         t0 = time.time()
         log.info(f"\n{'='*60}")
         log.info(f"Tuner: part={self.part_name}  "
@@ -676,10 +766,10 @@ class Tuner(MVEvaluator):
                  f"pos_thresh_study={self._pos_thresh_study*1e3:.1f}mm  "
                  f"pos_thresh_final={SC.POS_THRESH_TIGHT*1e3:.1f}mm")
 
-        # ── Phase 1: regime gate ──────────────────────────────────────────
+        # -- Phase 1: regime gate ------------------------------------------
         passing = self.phase1_regime_gate()
         if not passing:
-            log.error("Optimization failed at Phase 1 — no regime passes.")
+            log.error("Optimization failed at Phase 1 -- no regime passes.")
             return None
         best_regime = passing[0]
         self._best_regime = best_regime   # kept for iter_pareto_configs() after run()
@@ -688,25 +778,27 @@ class Tuner(MVEvaluator):
 
         part = self.part_name
 
-        # ── Pre-study look-ahead: geometry coarse → opApproach hint ──────
+        # -- Pre-study look-ahead: geometry coarse -> opApproach hint ------
         log.info("Pre-study look-ahead: evaluating geometry warm-start config...")
         _geom_coarse = self._warm_coarse(best_regime)
         _geom_fine   = self._warm_fine(best_regime)
+        # Position-only on purpose: this measures how far coarse lands from GT in order to
+        # pick an opApproach hint, so filtering by orientation would only shrink the sample.
         _la_result   = self.evaluate_config(
             _geom_coarse, _geom_fine,
             self._sample_scenes(SC.M_FULL),
-            SC.POS_THRESH_TIGHT, SC.ANG_THRESH_REGIME_GATE,
+            SC.POS_THRESH_TIGHT, SC.ANG_THRESH_POSITION_ONLY,
         )
         _pos_errs   = [e for s in _la_result.per_scene
                        for e in s.get("pos_errors", []) if e is not None]
         _median_err = float(np.median(_pos_errs)) if _pos_errs else 0.01
         _op_hint    = SC.approach_candidates(_median_err)[0]
-        log.info(f"  median coarse pos err = {_median_err*1e3:.2f}mm → "
+        log.info(f"  median coarse pos err = {_median_err*1e3:.2f}mm -> "
                  f"opApproach hint = {_op_hint}")
 
-        # ── Joint study ───────────────────────────────────────────────────
+        # -- Joint study ---------------------------------------------------
         log.info("=" * 60)
-        log.info(f"JOINT STUDY — fully joint coarse+fine {self._sampler.upper()} "
+        log.info(f"JOINT STUDY -- fully joint coarse+fine {self._sampler.upper()} "
                  f"(multi-objective)")
 
         self._study = self._create_study(
@@ -716,13 +808,14 @@ class Tuner(MVEvaluator):
             warm_p = _build_warm(
                 _geom_coarse, _geom_fine, best_regime,
                 self._pairs_candidates, self._voxel_bounds,
+                self._sym_aligned, self._sym_fold,
             )
             self._study.enqueue_trial(warm_p)
             log.info("Enqueued geometry warm-start trial (feasible seed for NSGA-II population)")
         else:
             log.info(f"Resumed study: {len(self._study.trials)} prior trials")
 
-        # ── Multi-round loop (same study, extended) ───────────────────────
+        # -- Multi-round loop (same study, extended) -----------------------
         prev_best_score = float("inf")
         for round_idx in range(self.n_rounds):
             n_done = sum(1 for t in self._study.trials
@@ -764,40 +857,37 @@ class Tuner(MVEvaluator):
             if (round_idx > 0
                     and (prev_best_score - round_score) < SC.SCORE_IMPROVE_MIN):
                 log.info(f"  Round {round_idx}: improvement "
-                         f"{prev_best_score - round_score:.4f} < threshold — stopping.")
+                         f"{prev_best_score - round_score:.4f} < threshold -- stopping.")
                 break
             prev_best_score = round_score
 
-        # ── Extract best config ───────────────────────────────────────────
+        # -- Extract best config -------------------------------------------
         winner      = _select_pareto_winner(self._study)
-        expanded    = _expand_winner_params(winner.params, best_regime, self._pairs_candidates)
+        expanded    = _expand_winner_params(winner.params, best_regime,
+                                            self._pairs_candidates,
+                                            self._sym_aligned, self._sym_fold)
         best_coarse, best_fine = _split_params(expanded)
 
         log.info(f"Best config: refStep={best_coarse.get('refStep')}  "
                  f"distQ={best_coarse.get('distQuantification', 0):.2f}  "
                  f"opApproach={best_fine.get('operationApproach')}  "
+                 f"angleStep={best_fine.get('angleStep')}  "
                  f"outputNum={best_coarse.get('outputNum')}")
 
-        # ── Post-study re-eval with tight angular threshold ───────────────
+        # -- Post-study re-eval with tight angular threshold ---------------
         scenes_final = self._sample_scenes(SC.M_FULL)
         best_result  = self.evaluate_config(
             best_coarse, best_fine, scenes_final,
             SC.POS_THRESH_TIGHT, SC.ANG_THRESH_TIGHT,
         )
-        log.info(f"Re-eval (tight ±{SC.POS_THRESH_TIGHT*1e3:.0f}mm "
-                 f"±{SC.ANG_THRESH_TIGHT:.0f}°): "
+        log.info(f"Re-eval (tight +/-{SC.POS_THRESH_TIGHT*1e3:.0f}mm "
+                 f"+/-{SC.ANG_THRESH_TIGHT:.0f}deg): "
                  f"cov={best_result.coverage:.3f}  "
                  f"time={best_result.mean_time:.3f}s")
 
-        # ── Phase 4: symmetry (conditional) ──────────────────────────────
-        if best_result.coverage >= SC.SYMMETRY_COVERAGE_GATE:
-            final_result = self.phase4_symmetry(best_coarse, best_fine, best_result)
-        else:
-            log.info(f"PHASE 4 skipped: coverage {best_result.coverage:.2f} "
-                     f"< gate {SC.SYMMETRY_COVERAGE_GATE}")
-            final_result = best_result
+        final_result = best_result
 
-        # ── Summary ──────────────────────────────────────────────────────
+        # -- Summary ------------------------------------------------------
         elapsed    = time.time() - t0
         n_complete = sum(1 for t in self._study.trials
                          if t.state == optuna.trial.TrialState.COMPLETE)
@@ -821,16 +911,16 @@ class Tuner(MVEvaluator):
         self._log_result_json(final_result)
         return final_result
 
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
     # Pareto front access (for the GUI TUNING stage)
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
 
     def iter_pareto_configs(self) -> List[Tuple[optuna.trial.FrozenTrial, dict, dict]]:
-        """Return the Pareto front as [(trial, coarse, fine), …].
+        """Return the Pareto front as [(trial, coarse, fine), ...].
 
         Each trial's short params are expanded into full coarse/fine config dicts
         (ready for evaluate_config / _run_one_scene) using the Phase-1 regime and
-        pairs candidates. Sorted by coverage desc, then time asc — the same order
+        pairs candidates. Sorted by coverage desc, then time asc -- the same order
         _select_pareto_winner prefers. Empty if no study has run yet.
         """
         if self._study is None or not self._best_regime:
@@ -840,19 +930,20 @@ class Tuner(MVEvaluator):
         out: List[Tuple[optuna.trial.FrozenTrial, dict, dict]] = []
         for t in trials:
             expanded = _expand_winner_params(t.params, self._best_regime,
-                                             self._pairs_candidates)
+                                             self._pairs_candidates,
+                                             self._sym_aligned, self._sym_fold)
             coarse, fine = _split_params(expanded)
             out.append((t, coarse, fine))
         return out
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # CLI entry point
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Tuner — fully joint MechVision tuning "
+        description="Tuner -- fully joint MechVision tuning "
                     "(NSGA-II / TPE / GP samplers)")
     p.add_argument("--part",           required=True)
     p.add_argument("--scenes_dir",     default=None)
@@ -871,7 +962,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Disable adaptive study threshold; use fixed POS_THRESH_TIGHT=2mm.")
     p.set_defaults(adaptive_thresh=True)
     p.add_argument("--pos_thresh_k",   type=float, default=0.01,
-                   help="k for adaptive study threshold: clip(k × longest_OBB_m, 2mm, 5mm). "
+                   help="k for adaptive study threshold: clip(k x longest_OBB_m, 2mm, 5mm). "
                         "Only used when adaptive_thresh is enabled (default: 0.01).")
     p.add_argument("--sampler",        choices=list(SAMPLER_CHOICES), default=SAMPLER_DEFAULT,
                    help="Optuna sampler for the joint study (default: gp)")
@@ -902,7 +993,7 @@ def main() -> None:
     model_path = os.path.join(_ROOT, "output", "reference_pcd", args.part,
                               f"{args.part}_surface", f"{args.part}_surface.ply")
     if not os.path.exists(model_path):
-        log.error(f"Reference model not found: {model_path} — re-run the sampling pipeline to generate it.")
+        log.error(f"Reference model not found: {model_path} -- re-run the sampling pipeline to generate it.")
         sys.exit(1)
     pcd = load_reference_pcd(model_path)
     ws  = analyze_mesh(pcd)

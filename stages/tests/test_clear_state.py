@@ -11,7 +11,7 @@ from enums import Stage
 
 
 # Every app.* attribute owned by some stage, with the default it must reset to.
-# Mirrors the union of all stage `downstream` maps — a parity guard against drift.
+# Mirrors the union of all stage `downstream` maps -- a parity guard against drift.
 OWNED_DEFAULTS = {
     "target_mesh": None,
     "mesh_basename": None,

@@ -1,18 +1,18 @@
-"""Isolated tray-cell diagnostic — sweeps every stable pose of a part.
+"""Isolated tray-cell diagnostic -- sweeps every stable pose of a part.
 
 Runs the geometry/tray_utils.py pocket pipeline for each stable pose and reports where a part would
 be popped out of its cell. For every pose it prints a row of quantitative diagnostics and (unless
 --no-show) visualizes:
 
-  footprint  — a grid of all poses: part mesh silhouette (blue) vs the CONVEX-COLLISION silhouette
+  footprint  -- a grid of all poses: part mesh silhouette (blue) vs the CONVEX-COLLISION silhouette
                (red, what MuJoCo actually collides). A mismatch/incomplete silhouette shrinks the pocket.
-  negative   — per pose: the pocket prism (the cavity) + floor slab.
-  vhacd      — per pose: the wall-frame convex pieces (one colour each) + floor.
-  overlay    — per pose: SEATED part collision pieces (red) inside the tray collision (blue frame +
+  negative   -- per pose: the pocket prism (the cavity) + floor slab.
+  vhacd      -- per pose: the wall-frame convex pieces (one colour each) + floor.
+  overlay    -- per pose: SEATED part collision pieces (red) inside the tray collision (blue frame +
                grey floor). Red poking into a frame piece / below the floor top = initial penetration.
 
 Key numbers per pose: clearance, floor penetration at the seat, and the boolean OVERLAP VOLUME between
-the seated part collision and the tray collision (walls / floor) — nonzero overlap ⇒ the part ejects.
+the seated part collision and the tray collision (walls / floor) -- nonzero overlap => the part ejects.
 
 With --sim, each pose also DROPS the part into one tray cell and settles it under MuJoCo (same solver
 settings as the app): the table gains the settled lateral/vertical drift and a seated/POPPED status, and
@@ -56,7 +56,7 @@ except Exception:
 # ---------------------------------------------------------------------------- part loading
 
 def _synthetic_L():
-    """A concave L prism (a box with a corner notch) — a quick stand-in when no STL is given."""
+    """A concave L prism (a box with a corner notch) -- a quick stand-in when no STL is given."""
     base = trimesh.creation.box(extents=[0.10, 0.10, 0.03])
     notch = trimesh.creation.box(extents=[0.05, 0.05, 0.06])
     notch.apply_translation([0.025, 0.025, 0.0])
@@ -238,7 +238,7 @@ def simulate_cell(cell, convex, R_aligned, settle_time=2.0, view=False):
                 if rem > 0:
                     time.sleep(rem)
             post = data.xpos[pid].copy(); pq = data.xquat[pid].copy()
-            # print("   [viewer] settled — close the window to continue")
+            # print("   [viewer] settled -- close the window to continue")
             # time.sleep(1)
             viewer.close()
             # while viewer.is_running():
@@ -327,7 +327,7 @@ def main():
         for k, (i, prob, c) in enumerate(cells):
             ax = axes.flat[k]; ax.set_visible(True); ax.set_aspect("equal"); ax.grid(True, alpha=0.3)
             ov = c["wall_overlap"] * 1e9
-            ax.set_title(f"pose {i} (p={prob:.2f})  overlap={ov:.0f}mm³",
+            ax.set_title(f"pose {i} (p={prob:.2f})  overlap={ov:.0f}mm^3",
                          color=("red" if ov > 1e-1 else "black"), fontsize=9)
             _plot_poly(ax, c["poly_mesh_raw"], "b-", "mesh" if _HAS_RTREE else "mesh (hull)")
             _plot_poly(ax, c["poly_col_raw"], "r-", "collision")
@@ -348,12 +348,12 @@ def main():
         if args.stage == "negative" and not args.conform:
             prism = trimesh.creation.extrude_polygon(c["poly_col"], height=c["pocket_depth"])
             prism.apply_translation([0, 0, TRAY_BASE])
-            show_3d([_o3d(prism, [0.9, 0.5, 0.2]), _o3d(c["floor"], [0.6, 0.6, 0.6])], f"{tag} — 3D negative")
+            show_3d([_o3d(prism, [0.9, 0.5, 0.2]), _o3d(c["floor"], [0.6, 0.6, 0.6])], f"{tag} -- 3D negative")
         if args.stage == "vhacd" and not args.conform:
             geoms = [_o3d(trimesh.Trimesh(np.asarray(v), np.asarray(f), process=False),
                           list(colorsys.hsv_to_rgb(j / max(len(c["pieces"]), 1), 0.6, 0.9)))
                      for j, (v, f) in enumerate(c["pieces"])]
-            show_3d(geoms + [_o3d(c["floor"], [0.55, 0.55, 0.55])], f"{tag} — VHACD pieces ({len(c['pieces'])})")
+            show_3d(geoms + [_o3d(c["floor"], [0.55, 0.55, 0.55])], f"{tag} -- VHACD pieces ({len(c['pieces'])})")
         if args.stage in ("overlay", "all"):
             if args.conform:   # conforming hfield surface (cradle) instead of VHACD walls + floor
                 tray = [_o3d(c["visual"], [0.3, 0.5, 0.9])]
@@ -366,8 +366,8 @@ def main():
                 extra = f"settled drift={c['sim']['drift_xy']*1e3:.1f}mm  {'POPPED' if c['sim']['escaped'] else 'seated'}"
             else:
                 part = [_o3d(sp, [0.9, 0.2, 0.2]) for sp in c["seated_pieces"]]
-                extra = "conforming pocket" if args.conform else f"overlap={c['wall_overlap']*1e9:.0f}mm³"
-            show_3d(tray + part, f"{tag} — OVERLAY (red part in blue tray)  {extra}")
+                extra = "conforming pocket" if args.conform else f"overlap={c['wall_overlap']*1e9:.0f}mm^3"
+            show_3d(tray + part, f"{tag} -- OVERLAY (red part in blue tray)  {extra}")
 
 
 if __name__ == "__main__":

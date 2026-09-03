@@ -1,21 +1,21 @@
 """
-test_optimizer_utils.py  —  Unit and integration tests for optimizer utilities
+test_optimizer_utils.py  --  Unit and integration tests for optimizer utilities
 -------------------------------------------------------------------------------
 EvalCache tests (no MechVision):
-  test_cache_basic_hit_miss          — get after put returns correct entry
-  test_cache_key_order_independent   — scene list order doesn't affect key
-  test_cache_different_configs       — different configs produce different keys
-  test_cache_persistence             — save/reload round-trip
-  test_cache_disabled                — disabled cache always returns None
+  test_cache_basic_hit_miss          -- get after put returns correct entry
+  test_cache_key_order_independent   -- scene list order doesn't affect key
+  test_cache_different_configs       -- different configs produce different keys
+  test_cache_persistence             -- save/reload round-trip
+  test_cache_disabled                -- disabled cache always returns None
 
 Mesh analysis tests (no MechVision):
-  test_warm_start_values             — analyze_mesh returns sane warm-start values
-  test_n_instances_sets_output_num   — outputNum tracks n_instances argument
-  test_pcd_without_normals           — analyze_mesh doesn't crash on normal-free pcd
+  test_warm_start_values             -- analyze_mesh returns sane warm-start values
+  test_n_instances_sets_output_num   -- outputNum tracks n_instances argument
+  test_pcd_without_normals           -- analyze_mesh doesn't crash on normal-free pcd
 
 evaluate_config integration tests (requires MechVision with CAD_Match project):
-  test_evaluate_structure            — result has correct fields and value ranges
-  test_cache_integration             — second call hits cache, evals count doesn't grow
+  test_evaluate_structure            -- result has correct fields and value ranges
+  test_cache_integration             -- second call hits cache, evals count doesn't grow
 
 Run from project root:
     python MM_Optimizer/tests/test_optimizer_utils.py [--live]
@@ -49,9 +49,9 @@ MODEL_PATH = os.path.join(_ROOT, "output", "reference_pcd", PART,
                           f"{PART}_surface", f"{PART}_surface.ply")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # EvalCache unit tests
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def test_cache_basic_hit_miss():
     """get after put returns the stored entry; stats track hits and misses."""
@@ -161,9 +161,9 @@ def test_cache_disabled():
     log.info("PASS: test_cache_disabled")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Mesh analysis unit tests
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def test_warm_start_values():
     """analyze_mesh returns geometrically sane warm-start values."""
@@ -214,9 +214,9 @@ def test_pcd_without_normals():
     log.info("PASS: test_pcd_without_normals")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # evaluate_config integration tests (live)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def test_evaluate_structure():
     """evaluate_config returns result with correct fields and value ranges."""
@@ -298,7 +298,7 @@ def test_cache_integration():
         assert cache.stats()["hits"] == 1, \
             f"Expected 1 hit after second call, got {cache.stats()}"
         assert r1.score == r2.score, "Cached result score must match original"
-        assert opt._n_evals == 2, f"Expected 2 MV calls (1 eval × 2 scenes), got {opt._n_evals}"
+        assert opt._n_evals == 2, f"Expected 2 MV calls (1 eval x 2 scenes), got {opt._n_evals}"
         log.info(f"  cache stats: {cache.stats()}")
         log.info("PASS: test_cache_integration")
     finally:
@@ -309,9 +309,9 @@ def test_cache_integration():
         os.unlink(cache_path)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Entry point
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -339,6 +339,6 @@ if __name__ == "__main__":
         test_evaluate_structure()
         test_cache_integration()
     else:
-        print("\n(skip live tests — pass --live to enable)")
+        print("\n(skip live tests -- pass --live to enable)")
 
     print("\nAll tests PASSED")

@@ -1,6 +1,6 @@
 """Dynamic bin sizing: settling behaviour in a shrunken bin.
 
-Slow — these compile a MuJoCo model and run a full settle. They are the regression tests for
+Slow -- these compile a MuJoCo model and run a full settle. They are the regression tests for
 the anti-escape audit: several spawn/drop constants are absolute metres that are invisible on
 the 0.76 m max bin and fatal on a 0.15 m one.
 """
@@ -55,7 +55,7 @@ def test_batch0_placement_does_not_mass_demote(cube_part):
     """Batch 0 is rejection-sampled against a collision manager that INCLUDES the hopper walls,
     but its spawn band is inset only by the bin wall thickness. Candidates above wall_top
     therefore overlap the hopper, exhaust the 200-attempt loop, and get demoted to a later
-    wave — silently draining the first wave and adding release waves. Placement only; no
+    wave -- silently draining the first wave and adding release waves. Placement only; no
     settle needed."""
     part, convex = cube_part
     bin_dim, n, _ = solve_bin_dim(part, fill_rate=0.2)
@@ -65,19 +65,19 @@ def test_batch0_placement_does_not_mass_demote(cube_part):
                            settle_time=0.1, render=False)
 
     batch0 = sum(1 for b in scene._batch_of_body if b == 0)
-    # An occasional miss is legitimate — batch 0 rejection-samples up to 10 collision-free poses
+    # An occasional miss is legitimate -- batch 0 rejection-samples up to 10 collision-free poses
     # into a small footprint. The bug was MASS demotion: 6 of 10 before the margin fix.
     assert scene._n_demoted <= max(1, 0.2 * (batch0 + scene._n_demoted)), (
-        f"{scene._n_demoted} part(s) demoted out of batch 0 — spawn band disagrees with the "
+        f"{scene._n_demoted} part(s) demoted out of batch 0 -- spawn band disagrees with the "
         f"hopper-inclusive collision check")
 
 
 @pytest.mark.parametrize("extents,use_max_bin", [
     ((0.02, 0.02, 0.02), False),      # shrunken bin
-    ((0.12, 0.12, 0.12), True),       # clips to the max bin — exercises both ends
+    ((0.12, 0.12, 0.12), True),       # clips to the max bin -- exercises both ends
 ])
 def test_pile_does_not_overspill_rim(make_box_part, extents, use_max_bin):
-    """A crowned pile is expected — BIN_TOP_MARGIN_FRAC reserves headroom and parts stack — but
+    """A crowned pile is expected -- BIN_TOP_MARGIN_FRAC reserves headroom and parts stack -- but
     a pile standing a full effective layer proud of the walls means height was under-provisioned.
     Part centres must also stay within the footprint: the walls are what contain them."""
     part, convex = make_box_part(extents)

@@ -1,5 +1,5 @@
 """Smoke test for RenderStage: run the sensor sim + segmentation over a settled scene.
-Heaviest test in the suite — primarily a no-crash / output-shape guard. Slow."""
+Heaviest test in the suite -- primarily a no-crash / output-shape guard. Slow."""
 
 import numpy as np
 import pytest

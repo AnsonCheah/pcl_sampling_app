@@ -1,7 +1,7 @@
 """Does a dynamically-sized bin model the same stacking as the full-size bin?
 
 This is the empirical check behind dynamic bin sizing. The claim being tested is that stacking
-depth is set by fill rate and part geometry, NOT by bin size — so a smaller bin at the same fill
+depth is set by fill rate and part geometry, NOT by bin size -- so a smaller bin at the same fill
 rate produces the same *kind* of pile with far fewer parts, and the parts removed were only
 widening the pile rather than deepening it.
 

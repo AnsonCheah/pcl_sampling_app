@@ -10,7 +10,8 @@ dependencies:
       - open3d==0.19.0
       - scipy==1.16.3
       - optuna==4.8.0
-      - --extra-index-url https://download.pytorch.org/whl/cpu #PyTorch (CPU build) — backend for Optuna's GPSampler,
+      - optuna-dashboard==0.20.0
+      - --extra-index-url https://download.pytorch.org/whl/cpu #PyTorch (CPU build) -- backend for Optuna's GPSampler,
       - torch==2.13.0+cpu
       - scikit-learn==1.8.0
       - matplotlib==3.10.8
@@ -31,7 +32,7 @@ dependencies:
       # by an unrelated version bump, and the failure would surface as the dataset fetch
       # breaking rather than as the package that actually changed.
       - requests==2.34.2
-      #  — standalone private package (was vendored under mm_adapter/).
+      #  -- standalone private package (was vendored under mm_adapter/).
       - mm-adapter @ git+https://github.com/AnsonCheah/mm-adapter.git@v0.1.0 # MechMind Vision Hub gRPC client
       # ---------------------------------------------------------------------------------
       # OPTIONAL: GPU acceleration. Every consumer falls back to SciPy/NumPy on its own when

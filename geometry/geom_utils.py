@@ -64,7 +64,7 @@ def face_facet_map(tri_mesh):
       facets_normal : (len(facets), 3) float array, one normal per facet.
 
     Merge coincident vertices first (``tri_mesh.merge_vertices()``) so face adjacency is detectable
-    on split-vertex STL meshes — otherwise every face comes back as a singleton.
+    on split-vertex STL meshes -- otherwise every face comes back as a singleton.
     """
     facets = list(tri_mesh.facets)
     facets_normal = np.asarray(tri_mesh.facets_normal, dtype=float).reshape(-1, 3)
@@ -79,14 +79,14 @@ def o3d_display(geometries:list, width:int=1280, height:int=720, dynamic_color:b
 
     Args:
         geometries (list): List of open3d.geometry objects, OR a list of such
-            lists (groups) — e.g. two hull sets being compared side by side.
+            lists (groups) -- e.g. two hull sets being compared side by side.
         width (int): Window width.
         height (int): Window height.
         dynamic_color (bool): Paint every geometry a distinct HSV colour. Each
             group gets its own full [0, 1) hue wheel, so a group painted in a
             single dynamic_color=True call as part of a bigger concatenated
             list would otherwise only get a contiguous *slice* of the wheel
-            (proportional to its size) rather than the full rainbow — and a
+            (proportional to its size) rather than the full rainbow -- and a
             slice landing in the perceptually-compressed blue/magenta region
             reads as "all the same colour" even though every item did get a
             unique hue. Passing groups keeps every group fully distinct
@@ -131,14 +131,14 @@ def trimesh_to_o3d(tri_mesh:trimesh.Trimesh):
 
 # --- Resolution-based mesh decimation ----------------------------------------------------
 # A dense STL (a scanned part, or CAD exported at high chord tolerance) costs time in the
-# Open3D viewport, in VHACD, and in the raycast — with no downstream benefit, because every
+# Open3D viewport, in VHACD, and in the raycast -- with no downstream benefit, because every
 # consumer works at a coarser resolution than the mesh carries.
 #
 # The target is a RESOLUTION (an edge/voxel length), not a triangle budget: a fraction of the
 # part's OBB diagonal so it is scale-invariant, clamped by absolute metric bounds so a tiny
 # part is not decimated into a tetrahedron and a huge one is not left coarser than the render
 # voxel. 0.4% of a 0.15 m-diagonal part is 0.6 mm, which matches VHACD's own effective voxel
-# at resolution=1e6 and sits below the 1 mm render voxel — finer detail is not observable.
+# at resolution=1e6 and sits below the 1 mm render voxel -- finer detail is not observable.
 DECIMATE_DIAG_FRAC      = 0.004    # target voxel = 0.4% of the part's OBB diagonal
 DECIMATE_MIN_VOXEL_M    = 1.0e-4   # 0.1 mm absolute floor (tiny parts)
 DECIMATE_MAX_VOXEL_M    = 2.0e-3   # 2 mm absolute ceiling (huge parts)
@@ -159,7 +159,7 @@ def decimate_mesh_to_resolution(mesh,
     stats: {voxel_size, tri_before, tri_after, volume_err, skipped, reason}
 
     `voxel_m` overrides the diagonal-derived target. Pass it when two variants of the same part
-    must be decimated identically — e.g. ImportMeshStage decimates both the raw mesh and the
+    must be decimated identically -- e.g. ImportMeshStage decimates both the raw mesh and the
     debris-free `cleaned` mesh, and export debris would otherwise inflate the raw mesh's OBB
     diagonal and coarsen its voxel relative to the cleaned one.
 
@@ -168,13 +168,13 @@ def decimate_mesh_to_resolution(mesh,
 
     Uses vertex clustering rather than quadric decimation, deliberately: clustering is natively
     resolution-based (`voxel_size` IS the target edge), whereas driving quadric decimation needs
-    an edge->face-count conversion that assumes near-uniform tessellation — and CAD-exported
+    an edge->face-count conversion that assumes near-uniform tessellation -- and CAD-exported
     STLs are the opposite, pairing huge planar triangles with dense fillet strips. Clustering is
     also a single O(n) pass and cannot fail on the non-watertight, self-intersecting meshes that
     arrive here, where quadric decimation can emit flipped triangles or throw. `Quadric`
     contraction recovers most of the feature retention.
 
-    Input units must be metres — call AFTER any mm->m conversion, or the absolute clamps are
+    Input units must be metres -- call AFTER any mm->m conversion, or the absolute clamps are
     meaningless.
     """
     stats = {"voxel_size": 0.0, "tri_before": 0, "tri_after": 0,
@@ -272,7 +272,7 @@ def pcd_geocenter(pcd, axis=None):
     tf : (4, 4) transform to APPLY to the cloud to put it in this frame. It is the *inverse*
          frame transform, so the translation sits in column 3; see geometry/CLAUDE.md.
 
-    With an ``AmbiguityAxis`` the axis becomes frame **Z** through the origin, always —
+    With an ``AmbiguityAxis`` the axis becomes frame **Z** through the origin, always --
     MechVision's ``rotationStrategy`` can only rotate about a geocenter axis, and a PCA frame
     has no reason to line up with an ambiguity axis. Consequently **the part is not centred
     on the origin, and that is correct**: an ambiguity axis generally misses the centroid, so
@@ -281,7 +281,7 @@ def pcd_geocenter(pcd, axis=None):
     zeroes the along-axis offset without disturbing that.
 
     Pure and deterministic: same cloud in, bitwise-identical matrix out. Which ambiguity axis
-    wins is *not* stable across re-analyses — see ``geometry.ambiguity.analyse_ambiguity``.
+    wins is *not* stable across re-analyses -- see ``geometry.ambiguity.analyse_ambiguity``.
     """
     points = np.asarray(pcd.points)
     center = points.mean(axis=0)
@@ -443,7 +443,7 @@ def extract_edge_points(pcd, voxel_size):
     local tangent plane.  For each point, neighbor vectors are projected onto
     the plane perpendicular to the point's normal; the largest gap between
     consecutive azimuthal angles is the edge score.  The threshold is chosen
-    automatically via CDF knee detection — no per-part tuning required.
+    automatically via CDF knee detection -- no per-part tuning required.
 
     Returns a boolean mask (True = edge) over the input point cloud.
     """
@@ -498,12 +498,12 @@ def orient_normals_using_cameras(pcd, cam_positions):
     pts = np.asarray(pcd.points)
     nrm = np.asarray(pcd.normals)
     
-    view_vecs = pts - cam_positions   # from camera → point
+    view_vecs = pts - cam_positions   # from camera -> point
     view_vecs /= np.linalg.norm(view_vecs, axis=1, keepdims=True)
 
     dots = np.sum(nrm * view_vecs, axis=1)
 
-    # If dot > 0, normal points *away* from camera → flip it
+    # If dot > 0, normal points *away* from camera -> flip it
     flip = dots > 0
     nrm[flip] *= -1.0
     pcd.normals = o3d.utility.Vector3dVector(nrm)
@@ -570,7 +570,7 @@ def model_diameter(obj, max_hull_points: int = 3000) -> float:
 
 
 def median_spacing(obj) -> float:
-    """Median nearest-neighbour distance — the cloud's own resolution.
+    """Median nearest-neighbour distance -- the cloud's own resolution.
 
     This is the floor on any geometric tolerance: agreement asserted below the sampling
     pitch is measuring the sampling, not the geometry.
@@ -628,7 +628,7 @@ def reference_frames_agree(a, b, tol_factor: float = 0.5, sample: int = 4000):
 
     A scene's ``reference_cloud.ply`` and the exported bundle's ``<part>_surface.ply`` are
     written from ``down_pcd`` and ``down_pcd_surface``, which hold identical points in both
-    uniform and adaptive modes — so on a matching pair this is an exact comparison, not an
+    uniform and adaptive modes -- so on a matching pair this is an exact comparison, not an
     approximate one, and the tolerance only absorbs PLY's float32 round trip.
 
     This exists because the model frame is **not reproducible across re-exports**. It is
@@ -636,7 +636,7 @@ def reference_frames_agree(a, b, tol_factor: float = 0.5, sample: int = 4000):
     the view count or the ambiguity config and the winning ambiguity axis can change:
     measured on 25333MB000, three sample densities gave folds C4/C1/C2 with the third
     landing on a different axis 45 degrees away, moving the model frame by 60.6 degrees and
-    28.3 mm. Nothing downstream can detect that from the files alone — a stale scene still
+    28.3 mm. Nothing downstream can detect that from the files alone -- a stale scene still
     loads, still has a T_gt, and simply scores every pose against the wrong frame.
 
     ``bench/generate_scenes.py`` is resumable and tops up parts that already hold scenes, so
@@ -739,19 +739,19 @@ def mat_to_wxyz(T) -> np.ndarray:
 def project_to_so3(R: np.ndarray) -> np.ndarray:
     """Nearest rotation matrix to ``R``. Accepts ``(3,3)`` or a batch ``(..., 3, 3)``.
 
-    Needed wherever rotations are averaged — pose clustering averages the rotations of the
+    Needed wherever rotations are averaged -- pose clustering averages the rotations of the
     hypotheses in a cluster, and the mean of several rotation matrices is not itself one.
     Feeding an unprojected mean downstream produces a transform that quietly scales and
     shears the model, which shows up as a plausible-looking pose that fails verification.
 
-    (This is also the failure OpenCV's ``ppf_match_3d`` ships with — opencv_contrib #3223,
-    an unnormalised quaternion in ``clusterPoses`` — so the same guard is needed whether the
+    (This is also the failure OpenCV's ``ppf_match_3d`` ships with -- opencv_contrib #3223,
+    an unnormalised quaternion in ``clusterPoses`` -- so the same guard is needed whether the
     clustering is ours or theirs.)
 
     Delegates to ``scipy.spatial.transform.Rotation.from_matrix``, which orthogonalises a
     non-proper input via Markley's quaternion method rather than raising. That agrees with a
     hand-written SVD projection to 1.3e-15 over 200 perturbed rotations, so there is nothing
-    to gain from keeping our own — and scipy handles batches and reflections for free.
+    to gain from keeping our own -- and scipy handles batches and reflections for free.
     """
     from scipy.spatial.transform import Rotation
 

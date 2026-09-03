@@ -1,7 +1,7 @@
 """Tests for resolution-based mesh decimation in geometry/geom_utils.py.
 
 The target resolution is a fraction of the part's OBB diagonal, clamped by absolute metric
-bounds — so it is scale-invariant in the middle of its range (part #1 and part #5000 get
+bounds -- so it is scale-invariant in the middle of its range (part #1 and part #5000 get
 comparable triangle density) and deliberately NOT scale-invariant at the clamps.
 
 Run:  python -m pytest geometry/tests/test_decimate.py
@@ -27,7 +27,7 @@ from geometry.geom_utils import (
 
 
 def _sphere(radius, subdivisions=5):
-    """A dense watertight icosphere — stands in for a high-resolution scanned/CAD part."""
+    """A dense watertight icosphere -- stands in for a high-resolution scanned/CAD part."""
     tri = trimesh.creation.icosphere(subdivisions=subdivisions, radius=radius)
     mesh = o3d.geometry.TriangleMesh(
         vertices=o3d.utility.Vector3dVector(tri.vertices),
@@ -70,7 +70,7 @@ def test_scale_invariance():
 
 def test_skips_mesh_already_at_target_resolution():
     """A mesh with plenty of triangles but edges already coarser than the target is returned
-    untouched — the second skip test, independent of the DECIMATE_MIN_TRIANGLES guard."""
+    untouched -- the second skip test, independent of the DECIMATE_MIN_TRIANGLES guard."""
     mesh = _sphere(0.05, subdivisions=4)     # 5120 faces (> min_triangles) at ~3.8 mm edges
     out, stats = decimate_mesh_to_resolution(mesh)
     assert out is mesh
@@ -80,7 +80,7 @@ def test_skips_mesh_already_at_target_resolution():
 
 def test_clamps_break_scale_invariance_by_design():
     """Below/above the clamp range the target voxel stops tracking part size. This is
-    intentional — it stops a tiny part being decimated into a tetrahedron and a huge part
+    intentional -- it stops a tiny part being decimated into a tetrahedron and a huge part
     being left coarser than the render voxel. Documented so nobody "fixes" it."""
     tiny = _sphere(0.0005)     # diag ~1.7 mm -> 0.4% would be ~7 um, below the floor
     huge = _sphere(2.0)        # diag ~6.9 m  -> 0.4% would be ~28 mm, above the ceiling
@@ -105,7 +105,7 @@ def test_reduces_triangle_count():
     """A genuinely over-resolved mesh must be cut down by the SHIPPED defaults.
 
     subdiv 7 is ~328k faces at ~0.47 mm edges against a ~0.69 mm target, so the expected
-    reduction is ~(0.69/0.47)^2 ~ 2x — clustering merges vertices per voxel, so the count falls
+    reduction is ~(0.69/0.47)^2 ~ 2x -- clustering merges vertices per voxel, so the count falls
     with the square of the edge/voxel ratio, not arbitrarily far.
     """
     mesh = _sphere(0.05, subdivisions=7)
@@ -124,7 +124,7 @@ def test_preserves_volume_within_tolerance():
 
 def test_preserves_extents():
     """Bin sizing reads the part's extents, so decimation must not shrink the part materially.
-    Asserted on the AABB, which is exact — trimesh's OBB is unreliable for rounded shapes
+    Asserted on the AABB, which is exact -- trimesh's OBB is unreliable for rounded shapes
     (it reports a box LARGER than the AABB for a sphere)."""
     mesh = _sphere(0.05, subdivisions=7)
     before = np.asarray(mesh.get_axis_aligned_bounding_box().get_extent())
@@ -150,7 +150,7 @@ def test_output_is_vhacd_ready():
 
 
 def test_skips_already_coarse_mesh():
-    """A 12-triangle box is already far coarser than any target voxel — return it untouched,
+    """A 12-triangle box is already far coarser than any target voxel -- return it untouched,
     by identity, so callers and tests can tell nothing happened."""
     tri = trimesh.creation.box(extents=[0.05, 0.05, 0.05])
     mesh = o3d.geometry.TriangleMesh(

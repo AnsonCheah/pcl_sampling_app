@@ -23,30 +23,30 @@ from pathlib import Path
 JITTER_DEG = [3,3,3]
 HOPPER_INWARD_OFFSET = 0.02   # hopper walls inset this far inside the bin wall plane
 HOPPER_TOP_Z = 5            # hopper walls extend to this z; generous upper bound
-MAX_BIN_DIM = (0.76, 0.585, 0.25, 0.005)   # (width, length, height, wall_thickness) m — fixed bin size
+MAX_BIN_DIM = (0.76, 0.585, 0.25, 0.005)   # (width, length, height, wall_thickness) m -- fixed bin size
 
 # Structured-scene fixtures (partition dividers / injection-molded tray). Dimensions in metres.
 PARTITION_THICKNESS = 0.003   # cardboard divider thickness
 TRAY_WALL           = 0.003   # min tray material between a pocket and the cell edge (per side); sets pitch
 TRAY_BASE           = 0.004   # solid tray floor beneath every pocket
-TRAY_SEAT_GAP       = 0.0005  # spawn parts this far above the pocket floor → no initial penetration
+TRAY_SEAT_GAP       = 0.0005  # spawn parts this far above the pocket floor -> no initial penetration
 TRAY_VHACD_MAX_HULLS  = 24    # convex pieces per pocket frame (decomposed once, instanced across the grid)
-TRAY_VHACD_RESOLUTION = 800000  # high VHACD voxel resolution → wall intrusion stays below the clearance
-# Part↔slot running clearance by mode; "loose" resolves to 5% of the footprint diagonal.
+TRAY_VHACD_RESOLUTION = 800000  # high VHACD voxel resolution -> wall intrusion stays below the clearance
+# Part<->slot running clearance by mode; "loose" resolves to 5% of the footprint diagonal.
 _CLEARANCE_M = {"snug": 0.001, "medium": 0.0025, "loose": None}
 
 # Batched-release settling (random arrangement). Parts are released in waves just above the
-# growing pile so none free-falls from a great height (bounds impact velocity → no tunneling).
-PARKING_Z                = 10.0   # m — z of parked (not-yet-released) bodies (collisions off)
-BATCH_DROP_OFFSET        = 0.05   # m — gap between current pile top and a wave's spawn z (max bin)
-BATCH_RELEASE_INTERVAL_S = 0.5   # s — fixed cadence between releases (no per-batch full settle)
+# growing pile so none free-falls from a great height (bounds impact velocity -> no tunneling).
+PARKING_Z                = 10.0   # m -- z of parked (not-yet-released) bodies (collisions off)
+BATCH_DROP_OFFSET        = 0.05   # m -- gap between current pile top and a wave's spawn z (max bin)
+BATCH_RELEASE_INTERVAL_S = 0.5   # s -- fixed cadence between releases (no per-batch full settle)
 MAX_RELEASE_BATCHES      = 8     # cap on release waves; a shrunken footprint fits fewer parts
 #                                  per wave, and each wave costs BATCH_RELEASE_INTERVAL_S of sim
 
 # --- Dynamic bin sizing (random arrangement) ---------------------------------------------
 # The bin is derived from the part, instead of the part count being derived from a fixed bin.
 # A part resting on the floor lands in a stable pose; a part resting on OTHER parts lands in
-# tilted poses only a pile produces — so the sizing criterion is stacked layers, and both the
+# tilted poses only a pile produces -- so the sizing criterion is stacked layers, and both the
 # layer count and the instance count are read off the solved bin (never the reverse).
 #
 # These constants live here rather than in stages/ so solve_bin_dim() is unit-testable without
@@ -59,7 +59,7 @@ MIN_USEFUL_LAYERS     = 2      # below this the scene is a near-monolayer; calle
 MIN_BIN_DIM           = (0.10, 0.077, 0.04, 0.003)  # absolute floor; w/l ratio held to ~1.30
 MIN_WALL_THICKNESS    = 0.003  # 3x o_margin and 4x per-step displacement (vel_cap*dt = 0.75 mm);
 #                                matches PARTITION_THICKNESS/TRAY_WALL, proven in this solver
-MIN_PARTS_PER_LAYER   = 25     # ~5x5 footprint span — lateral support, so interior parts rest
+MIN_PARTS_PER_LAYER   = 25     # ~5x5 footprint span -- lateral support, so interior parts rest
 #                                on neighbours rather than only on walls
 FOOTPRINT_SPAN_FACTOR = 1.5    # spawn band must be at least (r_bs + t) wide
 ESCAPE_TOL_FRAC       = 0.25   # verify_parts_in_bin x/y tolerance, bin-relative
@@ -83,7 +83,7 @@ def obb_packing_factor(part_mesh) -> float:
     """
     # `.primitive.extents`, NOT `.extents`: bounding_box_oriented returns a trimesh Box whose
     # inherited `.extents` is the AXIS-ALIGNED bounds of the (rotated) box mesh, not the OBB's
-    # own side lengths — so it inflates toward the box diagonal for any non-axis-aligned OBB.
+    # own side lengths -- so it inflates toward the box diagonal for any non-axis-aligned OBB.
     # Reading it made a rotated rod measure AR ~4.8 instead of 20, handing elongated parts too
     # high a packing factor and over-counting them: precisely what this taper exists to prevent.
     ext = np.sort(part_mesh.bounding_box_oriented.primitive.extents)[::-1]   # e1 >= e2 >= e3
@@ -95,7 +95,7 @@ def hopper_inward_offset(bin_dim) -> float:
     """Hopper wall inset, scaled to the bin's short half-extent.
 
     HOPPER_INWARD_OFFSET is an absolute 20 mm, which is invisible on the 0.585 m max bin but
-    throttles a shrunken bin's opening below the part footprint — parts then jam above the rim
+    throttles a shrunken bin's opening below the part footprint -- parts then jam above the rim
     instead of entering. Returns exactly HOPPER_INWARD_OFFSET at the max bin.
     """
     hy = bin_dim[1] / 2.0
@@ -106,9 +106,9 @@ def hopper_inward_offset(bin_dim) -> float:
 def stable_layer_heights(part_mesh) -> tuple:
     """(layer_h, lz_min) in metres.
 
-    layer_h — z-extent under the MOST PROBABLE stable pose: the thickness one settled layer of
+    layer_h -- z-extent under the MOST PROBABLE stable pose: the thickness one settled layer of
               this part contributes to pile height.
-    lz_min  — the shallowest z-extent over all stable poses; a bin below lz_min/0.9 admits no
+    lz_min  -- the shallowest z-extent over all stable poses; a bin below lz_min/0.9 admits no
               pose at all (see _compute_valid_stable_poses).
     """
     verts = np.asarray(part_mesh.vertices)
@@ -125,7 +125,7 @@ def solve_bin_dim(part_mesh, fill_rate: float, packing_factor: float = None,
 
     Returns (bin_dim, n_parts, layers_at_fill).
 
-    The bin is solved FIRST and is authoritative — every lower bound is expressed as a bin
+    The bin is solved FIRST and is authoritative -- every lower bound is expressed as a bin
     dimension, so the largest one simply wins, and the instance count is then read off the
     final bin with the unchanged fill formula. Stacking depth is `fill_rate * LAYERS_AT_FULL_FILL`
     (capped by the max bin), which is why shrinking the bin costs no realism: the parts removed
@@ -139,7 +139,7 @@ def solve_bin_dim(part_mesh, fill_rate: float, packing_factor: float = None,
 
     # Effective layer height: parts tilt and bridge in a random pile, so one part occupies more
     # vertical extent than its flat stable-pose thickness. In-plane voids (below) and vertical
-    # bridging are different effects — only the vertical one divides by packing.
+    # bridging are different effects -- only the vertical one divides by packing.
     h_eff = layer_h / packing
 
     # Height: LAYERS_AT_FULL_FILL effective layers at 100% fill, plus spill headroom.
@@ -185,7 +185,7 @@ class _SimProfile:
     """Phase timings, periodic contact samples, and a static model census.
 
     MuJoCo's own per-step timers (mjTIMER_*) are only populated when a timer callback is
-    installed — WITHOUT set_mjcb_time() every mjData.timer entry reads zero, which would make a
+    installed -- WITHOUT set_mjcb_time() every mjData.timer entry reads zero, which would make a
     profiling run silently report that everything is free. There is no mj_resetTimer; the
     accumulators are zeroed in place so sim state is preserved (unlike mj_resetData).
     """
@@ -267,7 +267,7 @@ class MujocoBinScene:
         self.avel_threshold = 0.5
         self.stable_duration = 0.5
         self._stable_count = 0
-        self.vel_cap = 1.5            # m/s — per-step linear-velocity clamp (safeguard);
+        self.vel_cap = 1.5            # m/s -- per-step linear-velocity clamp (safeguard);
         #                               at this cap v*dt = 0.75 mm < o_margin (1 mm).
         self.verbose = True
         self.stable_steps = int(self.stable_duration / self.timestep)
@@ -308,7 +308,7 @@ class MujocoBinScene:
         self.bin_body = None        # MjSpec bin body; partition/tray geoms are added to it (set in _build_bin)
         self._clearance_m = _CLEARANCE_M.get(clearance_mode, 0.0025) or 0.0025  # resolved per footprint in grid
 
-        # Batched-release state (random arrangement) — populated by _generate_random_scene /
+        # Batched-release state (random arrangement) -- populated by _generate_random_scene /
         # _cache_body_topology; see release_batch() and simulate().
         self._batch_of_body = []              # per-part batch index
         self._body_ids = []                   # MuJoCo body id per part (compile order)
@@ -337,7 +337,7 @@ class MujocoBinScene:
         # Sleeping islands (mjENBL_SLEEP, MuJoCo >= 3.4). OFF by default: measured on a 48-part
         # random scene it gave NO speedup (27.3 s vs 28.0 s) and left zero trees asleep, because
         # the batched release keeps the pile moving and simulate() exits as soon as is_settled()
-        # trips — there is no long quiescent tail for sleeping to exploit. It did perturb settled
+        # trips -- there is no long quiescent tail for sleeping to exploit. It did perturb settled
         # positions by ~4.5 mm on a 20 mm part, so it costs pose fidelity for nothing here.
         # Kept as an option because a scene that steps long after settling (e.g. structured
         # partition/tray running the full settle_time) may still benefit; re-run
@@ -345,7 +345,7 @@ class MujocoBinScene:
         self.enable_sleep = enable_sleep
         # Structured scenes pre-seat every part, so the whole run may sleep. Random must NOT:
         # its batched release parks later waves at PARKING_Z, and a parked body that falls
-        # asleep is never released — is_settled() then reads the sleeping tree as at-rest and
+        # asleep is never released -- is_settled() then reads the sleeping tree as at-rest and
         # ends the run with parts frozen metres above the bin. simulate() therefore arms
         # sleeping at runtime, only once the last wave has landed.
         if enable_sleep and arrangement == "structured":
@@ -378,7 +378,7 @@ class MujocoBinScene:
         self.generate_scene()
 
     def _phase(self, name):
-        """Profiling phase timer — a shared nullcontext when profiling is off."""
+        """Profiling phase timer -- a shared nullcontext when profiling is off."""
         return self.profile.phase(name) if self.profile is not None else _NULL_CTX
 
     def profile_report(self):
@@ -474,7 +474,7 @@ class MujocoBinScene:
             hgeom.rgba  = [0.0, 0.0, 0.0, 0.0]  # invisible
             self._hopper_geom_names.append(name)
 
-        # Infinite safety floor — catches parts that escape the bin during physics.
+        # Infinite safety floor -- catches parts that escape the bin during physics.
         # Placed one camera_distance below the bin floor so it never interferes with
         # normal in-bin contact, but stops runaway parts from falling to infinity.
         sf = bin_body.add_geom()
@@ -499,8 +499,8 @@ class MujocoBinScene:
         Probability is proportional to the face area (larger face = more stable).
 
         Filtering:
-          min_face_area_frac — skip faces with < this fraction of total hull area (sliver filter).
-          angular_tol_deg    — cluster poses whose resting "up" direction in part frame
+          min_face_area_frac -- skip faces with < this fraction of total hull area (sliver filter).
+          angular_tol_deg    -- cluster poses whose resting "up" direction in part frame
                                differs by < angular_tol_deg; keep the highest-probability
                                representative.  Collapses near-parallel faces on faceted
                                parts that would otherwise produce near-identical scenes.
@@ -565,8 +565,8 @@ class MujocoBinScene:
 
     def _compute_valid_stable_poses(self) -> list:
         """
-        Filter stable poses to those whose z-extent fits within 0.9 × bin_height.
-        Returns list of (R_3x3, prob, lz) — private 3-tuple.
+        Filter stable poses to those whose z-extent fits within 0.9 x bin_height.
+        Returns list of (R_3x3, prob, lz) -- private 3-tuple.
         Falls back to the minimum-lz pose if all exceed the threshold.
         """
         bin_height = 2 * self.hh
@@ -621,13 +621,13 @@ class MujocoBinScene:
     def _sample_constrained_rotation(self, valid_poses: list) -> np.ndarray:
         """
         Sample a random rotation constrained so the part z-extent stays within
-        0.9 × bin_height.  Decomposed as: unrestricted yaw around world-Z, then
+        0.9 x bin_height.  Decomposed as: unrestricted yaw around world-Z, then
         a tilt of at most theta_max away from world-Z (cone sampling).
 
         theta_max derivation (conservative):
-            lz + diag·sin(θ) ≤ 0.9·bin_height
-            θ_max = arcsin(clip((clearance − lz) / diag, 0, 1))
-        where diag = sqrt(lx² + ly²) is the AABB footprint diagonal.
+            lz + diag*sin(theta) <= 0.9*bin_height
+            theta_max = arcsin(clip((clearance - lz) / diag, 0, 1))
+        where diag = sqrt(lx^2 + ly^2) is the AABB footprint diagonal.
         """
         probs = np.array([p for _, p, _ in valid_poses], dtype=float)
         probs /= probs.sum()
@@ -642,7 +642,7 @@ class MujocoBinScene:
         clearance = 0.9 * 2 * self.hh
 
         if max(lx, ly, lz) <= clearance:
-            theta_max = np.pi / 2          # any orientation fits — full hemisphere
+            theta_max = np.pi / 2          # any orientation fits -- full hemisphere
         else:
             diag      = np.sqrt(lx ** 2 + ly ** 2)
             theta_max = np.arcsin(np.clip((clearance - lz) / diag, 0.0, 1.0))
@@ -691,9 +691,9 @@ class MujocoBinScene:
         # Per-pose part height (z-extent) drives divider height, pocket depth, and tray seat z.
         part_h = float(maxs[2] - mins[2])
 
-        # Running clearance from the mode (snug 1mm / medium 2.5mm / loose 5%·diag). The cell pitch
-        # is exactly footprint + fixture + 2·clearance, so the actual part-to-wall gap equals the
-        # setting — no arbitrary looseness. "none" has no fixture, so the clearance is pure spacing.
+        # Running clearance from the mode (snug 1mm / medium 2.5mm / loose 5%*diag). The cell pitch
+        # is exactly footprint + fixture + 2*clearance, so the actual part-to-wall gap equals the
+        # setting -- no arbitrary looseness. "none" has no fixture, so the clearance is pure spacing.
         clearance = self._resolve_clearance(float(np.hypot(fp_x, fp_y)))
         self._clearance_m = clearance
         if self.structure_type == "partition":
@@ -703,10 +703,10 @@ class MujocoBinScene:
         else:
             extra = 2 * clearance
 
-        # Spawn tilt is scaled to — and bounded by — the clearance: a part leans until it just
+        # Spawn tilt is scaled to -- and bounded by -- the clearance: a part leans until it just
         # reaches the cell wall, so snug barely tilts, loose tilts more, and the tilted part never
         # exceeds its cell. Bound: the chord of the farthest vertex about the body-origin tilt axis
-        # (2·r_max·sin(θ/2)) must stay within the clearance, so NO vertex crosses its cell wall. This
+        # (2*r_max*sin(theta/2)) must stay within the clearance, so NO vertex crosses its cell wall. This
         # naturally lets tall-narrow parts lean more than wide-flat ones. Tray holds the exact pose.
         theta_max = 0.0 if self.structure_type == "tray" else float(
             2.0 * np.arcsin(np.clip(clearance / (2.0 * max(r_max, 1e-9)), 0.0, 1.0)))
@@ -733,7 +733,7 @@ class MujocoBinScene:
             if fp_y > fp_x:
                 apply_yaw90 = True
         else:
-            # Both orientations fit — pick whichever packs more slots
+            # Both orientations fit -- pick whichever packs more slots
             if _slot_count(fp_y, fp_x) > _slot_count(fp_x, fp_y):
                 apply_yaw90 = True
 
@@ -771,7 +771,7 @@ class MujocoBinScene:
         # Body origins now sit at xs/ys but each part's FOOTPRINT centre sits at xs+cx / ys+cy.
         # _build_partitions needs this offset to place dividers midway between footprints (not
         # between body origins); otherwise asymmetric footprints (cx/cy != 0, common for a
-        # user-picked face-up) put the part hard against — or into — a divider.
+        # user-picked face-up) put the part hard against -- or into -- a divider.
         self._grid_fp_offset = (cx, cy)
 
         rp(f"[STRUCTURED] footprint {fp_x:.3f}x{fp_y:.3f} m  pitch {pitch_x:.3f}x{pitch_y:.3f} m  grid {nx}x{ny}"
@@ -809,7 +809,7 @@ class MujocoBinScene:
             ([t, self.hy, self.hh],        [-self.hx + t,   0,              self.hh - t]),
             ([self.hx, t, self.hh],        [ 0,             self.hy - t,    self.hh - t]),
             ([self.hx, t, self.hh],        [ 0,            -self.hy + t,    self.hh - t]),
-            # hopper extension walls (inset by self.hopper_offset to match the MuJoCo geoms —
+            # hopper extension walls (inset by self.hopper_offset to match the MuJoCo geoms --
             # the two MUST agree or the spawn collision check disagrees with the simulation)
             ([t, self.hy, hopper_half_h],  [ self.hx - t - self.hopper_offset,   0,              hopper_center_z]),
             ([t, self.hy, hopper_half_h],  [-self.hx + t + self.hopper_offset,   0,              hopper_center_z]),
@@ -831,7 +831,7 @@ class MujocoBinScene:
         wave starts low). Every later batch is parked at PARKING_Z with collisions disabled
         (set in _cache_body_topology) and is teleported just above the growing pile by
         release_batch() during simulate(). This bounds every part's fall distance to ~one
-        layer regardless of part size or count — eliminating the old layer-stacking height
+        layer regardless of part size or count -- eliminating the old layer-stacking height
         creep that drove big parts to high-velocity, penetrating impacts.
         """
         bin_ct = self._build_bin_collision_trimesh()
@@ -843,15 +843,15 @@ class MujocoBinScene:
         # spawn at the bin centre and pile into a central tower.
         # Above wall_top the opening is bounded by the HOPPER walls, which are inset a further
         # hopper_offset. Sampling there against the bin-wall inset put candidates inside a
-        # hopper wall — the collision manager below includes those walls — so the 200-attempt
+        # hopper wall -- the collision manager below includes those walls -- so the 200-attempt
         # loop exhausted and the part was demoted to a later wave. Use the matching inset for
         # whichever wall actually bounds the sampled height.
         margin_lo = radius + self.bin_dim[3]
         margin_hi = margin_lo + self.hopper_offset
         wall_top  = 2 * self.hh - self.bin_dim[3]
         cells = int((2 * self.hx) // (2 * radius)) * int((2 * self.hy) // (2 * radius))
-        # A shrunken footprint fits fewer parts per wave; without a floor the wave count — and
-        # with it the fixed BATCH_RELEASE_INTERVAL_S paid per wave — grows without bound.
+        # A shrunken footprint fits fewer parts per wave; without a floor the wave count -- and
+        # with it the fixed BATCH_RELEASE_INTERVAL_S paid per wave -- grows without bound.
         batch_size = max(1, int(np.ceil(self.n_parts / MAX_RELEASE_BATCHES)), min(10, cells))
         n_batches  = int(np.ceil(self.n_parts / batch_size))
 
@@ -890,7 +890,7 @@ class MujocoBinScene:
                     placed_active = True
                     break
                 if not placed_active:
-                    # Could not fit in batch 0 — demote to the last batch; release_batch()
+                    # Could not fit in batch 0 -- demote to the last batch; release_batch()
                     # will drop it onto the pile later.
                     self._batch_of_body[i] = max(1, n_batches - 1)
                     self._n_demoted += 1
@@ -923,7 +923,7 @@ class MujocoBinScene:
         # pocket; partition/none seat just above the bin floor with the usual orientation jitter.
         structured_static = (self.structure_type == "none")
 
-        # Tray: build the conforming height-field pocket first — it sets the seat height parts spawn at
+        # Tray: build the conforming height-field pocket first -- it sets the seat height parts spawn at
         # (lowest point `clearance` above the cradle). partition/none seat just above the bin floor.
         tray_hf = None
         if self.structure_type == "tray":
@@ -977,9 +977,9 @@ class MujocoBinScene:
         inner_hx, inner_hy = self.hx - t, self.hy - t
         h = max(1e-3, self.structure_height_frac * part_h)
         half = PARTITION_THICKNESS / 2.0
-        # Divider planes at EVERY cell boundary (footprint centres ± half-pitch), incl. the outer
+        # Divider planes at EVERY cell boundary (footprint centres +/- half-pitch), incl. the outer
         # ring. xs/ys are body-origin positions; the footprint centres sit at xs+off_x / ys+off_y
-        # (_grid_fp_offset), so add the offset back — else a plane lands off-centre and clips an
+        # (_grid_fp_offset), so add the offset back -- else a plane lands off-centre and clips an
         # asymmetric part. Planes that would poke through the bin wall are dropped (wall bounds it).
         off_x, off_y = getattr(self, "_grid_fp_offset", (0.0, 0.0))
 
@@ -1026,7 +1026,7 @@ class MujocoBinScene:
         the walls rise to the cell top outside the footprint; the part seats `clearance` above and
         settles into a uniform-clearance cradle. Returns the hfield dict (+ registered asset name); the
         per-slot geoms and visual tiles are added by _instance_tray_hfield once body positions are known.
-        Replaces the old flat VHACD pocket — an exact 2.5D surface, no convex decomposition (so no hull
+        Replaces the old flat VHACD pocket -- an exact 2.5D surface, no convex decomposition (so no hull
         bridging the cavity), one geom per cell."""
         from geometry.tray_utils import build_tray_conforming_hfield
         pocket_depth = max(1e-3, self.structure_height_frac * part_h)
@@ -1112,7 +1112,7 @@ class MujocoBinScene:
         Enable collisions for batch k and teleport its parts just above the pile, zeroing
         their velocity. drop_z is measured from SETTLED parts only (linear speed below
         threshold), so still-falling parts from the previous wave cannot inflate the spawn
-        height — this is what keeps the pipelined release from re-introducing height creep.
+        height -- this is what keeps the pipelined release from re-introducing height creep.
         """
         batch_indices = [i for i, b in enumerate(self._batch_of_body) if b == k]
         if not batch_indices:
@@ -1141,7 +1141,7 @@ class MujocoBinScene:
         cells = max(1, int((2 * self.hx) // (2 * radius)) * int((2 * self.hy) // (2 * radius)))
 
         # Place batch members collision-free w.r.t. each other (like batch 0): parts in the same
-        # batch share one drop band, so without this small parts — which pack up to 10 per batch —
+        # batch share one drop band, so without this small parts -- which pack up to 10 per batch --
         # spawn already interpenetrating. Rejection-sample each pose against the ones already
         # accepted this batch; fall back to the last candidate if a crowded batch leaves no gap.
         cm = CollisionManager()
@@ -1164,7 +1164,7 @@ class MujocoBinScene:
                     continue
                 x, y, z, R_mat = cx, cy, cz, R_cand
                 break
-            if R_mat is None:           # crowded — accept the last candidate unchecked (rare)
+            if R_mat is None:           # crowded -- accept the last candidate unchecked (rare)
                 x, y, z, R_mat = cx, cy, cz, R_cand
             cm.add_object(f"b{k}_{i}", self.part_mesh, transform=T)
             quat = mat_to_wxyz(R_mat)
@@ -1207,7 +1207,7 @@ class MujocoBinScene:
     def _set_sleep_enabled(self, on: bool):
         """Toggle sleeping islands on the COMPILED model.
 
-        Only legal after at least one mj_step — enabling between mj_makeData and the first step
+        Only legal after at least one mj_step -- enabling between mj_makeData and the first step
         is documented as undefined behaviour. Clearing the flag wakes every sleeping tree on the
         next step, which is how a pile is made to notice the hopper walls being removed.
         """
@@ -1218,7 +1218,7 @@ class MujocoBinScene:
 
     def _clamp_velocities(self):
         """
-        Clamp each free body's LINEAR speed to vel_cap — a cheap per-step anti-tunneling
+        Clamp each free body's LINEAR speed to vel_cap -- a cheap per-step anti-tunneling
         safeguard. Angular velocity is left untouched. No-op for parked bodies, whose qvel
         is held at zero each step.
 
@@ -1259,7 +1259,7 @@ class MujocoBinScene:
 
     def _settle_structured(self, on_step=None, preview_interval_s: float = 0.05):
         """Clean settle for structured partition/tray, mirroring tray_cell_debug.simulate_cell: parts
-        are pre-seated in their cells/pockets, so just step until settled — no hopper, no batched
+        are pre-seated in their cells/pockets, so just step until settled -- no hopper, no batched
         release, no phases. The per-step linear-velocity clamp is kept as a cheap anti-tunneling
         safeguard (a no-op for already-seated parts); the GUI preview hook is honored each interval."""
         # The hopper extension walls are a random-drop aid; disable them so each part settles in a
@@ -1318,7 +1318,7 @@ class MujocoBinScene:
                 print("[INFO] Structured/none arrangement: skipping simulation and settling")
                 return  # poses are final; mj_forward already called in generate_scene
             # # Partition/tray: parts are pre-seated in their cells/pockets, so run a dedicated CLEAN
-            # # settle (no hopper, no batched release) — mirrors the verified tray_cell_debug.simulate_cell.
+            # # settle (no hopper, no batched release) -- mirrors the verified tray_cell_debug.simulate_cell.
             self._settle_structured(on_step, preview_interval_s)
             return
 
@@ -1377,11 +1377,11 @@ class MujocoBinScene:
         interval_steps = int(BATCH_RELEASE_INTERVAL_S / self.model.opt.timestep)
         released_ids = [self._body_ids[i] for i, b in enumerate(self._batch_of_body) if b == 0]
 
-        # Batch 0 is already near the floor — step the fixed interval to let it begin settling.
+        # Batch 0 is already near the floor -- step the fixed interval to let it begin settling.
         parked_now = [i for i, b in enumerate(self._batch_of_body) if b > 0]
         run(interval_steps, "batch-0", body_subset=released_ids, parked_ids=parked_now, check_settle=False)
 
-        # Pipelined release: drop each wave just above the pile and step a fixed interval — do
+        # Pipelined release: drop each wave just above the pile and step a fixed interval -- do
         # NOT wait for full settle between waves (the speed fix). drop_z tracks only settled
         # parts (see release_batch) so fall height stays bounded even while the pile is moving.
         for k in range(1, n_batches):
@@ -1449,7 +1449,7 @@ class MujocoBinScene:
         y_limit = self.hy + min(r_part, ESCAPE_TOL_FRAC * self.hy)
         # z: bin floor at z=0, walls to z=2*hh=0.25 m; parts may stack above the rim.
         # Flag escape only when a part goes more than one bin-height BELOW the floor
-        # (e.g. fell through due to tunneling) — bin_tz(0) - 2*hh(0.125) = -0.25.
+        # (e.g. fell through due to tunneling) -- bin_tz(0) - 2*hh(0.125) = -0.25.
         z_escape = bin_tz - 2 * self.hh
 
         in_bin, out_of_bin = [], []

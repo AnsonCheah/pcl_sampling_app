@@ -1,12 +1,12 @@
 """Import-time mesh validation and repair.
 
 Conventional hygiene checks applied to every imported CAD/STL mesh before it reaches VHACD,
-MuJoCo, or the raycaster. Pure geometry — no GUI, no local imports beyond numpy/open3d, so it
+MuJoCo, or the raycaster. Pure geometry -- no GUI, no local imports beyond numpy/open3d, so it
 stays in the base layer of the dependency graph.
 
 The motivating failure: a CAD export can carry a stray 2-triangle sliver a metre away from the
 part. It contributes nothing visually but inflates the axis-aligned bounding box, which then
-drives the mm->m unit heuristic, the camera framing, and — via the convex hulls — the partition
+drives the mm->m unit heuristic, the camera framing, and -- via the convex hulls -- the partition
 / tray cell sizing in `physics.mujoco_bin_scene._compute_structured_grid`. One speck is enough
 to generate a fixture larger than the bin.
 
@@ -163,7 +163,7 @@ def analyze_mesh(mesh, bin_limit: Optional[Sequence[float]] = None):
 
     Non-destructive: `mesh` is not modified. Returns `(cleaned_mesh, report)` where
     `cleaned_mesh` is a new TriangleMesh with topology hygiene applied and any debris removed.
-    Neither the returned mesh nor the original has `unit_scale` applied — the caller applies
+    Neither the returned mesh nor the original has `unit_scale` applied -- the caller applies
     `report.unit_scale` to whichever variant it decides to keep, so the operator's debris
     choice can never change the resulting scale.
 

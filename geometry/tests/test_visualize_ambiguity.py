@@ -1,7 +1,7 @@
 """Mesh/cloud pairing guard for the ambiguity viewer.
 
 The viewer resolves a mesh and a cloud from two different places on disk. If they are not
-the same part in the same model frame, nothing errors — ``_visibility_masks`` raycasts the
+the same part in the same model frame, nothing errors -- ``_visibility_masks`` raycasts the
 mesh, fails to snap the hits onto the cloud, and the analysis proceeds against a few
 hundred accidental points, reporting axes that have nothing to do with the part.
 
@@ -65,7 +65,7 @@ def test_rejection_does_not_need_a_large_misalignment(angle_deg):
 
 def test_tolerance_scales_with_the_cloud_not_the_part():
     """A sparse cloud of a big part and a dense cloud of a small one must be judged the
-    same way — the tolerance is a multiple of the cloud's own spacing."""
+    same way -- the tolerance is a multiple of the cloud's own spacing."""
     for scale, n in ((0.02, 800), (0.5, 40000)):
         mesh = o3d.geometry.TriangleMesh.create_box(scale, scale * 0.3, scale * 0.2)
         mesh.compute_vertex_normals()

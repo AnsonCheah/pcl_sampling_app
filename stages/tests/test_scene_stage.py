@@ -26,7 +26,7 @@ def _scene_stage(headless_app):
 
 @pytest.fixture
 def small_part():
-    """20 mm cube — small enough that dynamic sizing shrinks the bin on every axis it can."""
+    """20 mm cube -- small enough that dynamic sizing shrinks the bin on every axis it can."""
     return trimesh.creation.box(extents=[0.02, 0.02, 0.02])
 
 
@@ -51,7 +51,7 @@ def test_dynamic_bin_checkbox_off_uses_max_bin(headless_app, small_part):
 
 
 def test_override_count_uses_max_bin(headless_app, small_part):
-    """Override Count is a manual escape hatch — exact count, full bin, no dynamic sizing."""
+    """Override Count is a manual escape hatch -- exact count, full bin, no dynamic sizing."""
     stage = _scene_stage(headless_app)
     stage.generate_mode = "count"
     stage.num_targets = 7

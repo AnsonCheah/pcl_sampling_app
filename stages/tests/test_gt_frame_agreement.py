@@ -6,7 +6,7 @@ pose against `read_gt_pose_from_ply(sample_i.ply)` and matches it with
 different frame from the reference cloud, every trial is scored against a fiction: coverage and
 pose error come out wrong, no error is raised, and the study happily optimises toward it.
 
-`reference_frames_agree` (geometry/geom_utils.py) already guards the *other* half of this — that
+`reference_frames_agree` (geometry/geom_utils.py) already guards the *other* half of this -- that
 the bundle and each scene's `reference_cloud.ply` are the same cloud in the same frame. It never
 touches `T_gt`, so the hop that actually bakes the GT was uncovered.
 
@@ -47,9 +47,9 @@ from geometry.geom_utils import O3DSceneObject, trimesh_to_o3d
 SURFACE_ATOL_M = 1e-5
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Fixtures
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @pytest.fixture(scope="session")
 def l_mesh_factory():
@@ -81,9 +81,9 @@ def l_mesh(l_mesh_factory):
     return l_mesh_factory()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _aabb_center(mesh):
     return np.asarray(mesh.get_axis_aligned_bounding_box().get_center())
@@ -154,9 +154,9 @@ def _downsample_and_recenter(app, mesh, frame_mode, n_points=20000):
     return stage
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Fake physics layer — lets the frame algebra be checked without running MuJoCo
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Fake physics layer -- lets the frame algebra be checked without running MuJoCo
+# -----------------------------------------------------------------------------
 
 class _FakeMjScene:
     """Stand-in for `MujocoBinScene` that records what `SceneStage` handed the physics layer.
@@ -220,9 +220,9 @@ def _run_scene_with_fake_physics(app, monkeypatch, n_parts=2):
     return _FakeMjScene.last
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Fast tests — the physics-recentring remap, in both model frames
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Fast tests -- the physics-recentring remap, in both model frames
+# -----------------------------------------------------------------------------
 
 @pytest.mark.parametrize("frame_mode", ["pca", "ambiguity"])
 def test_exported_T_gt_undoes_the_physics_recentring(headless_app, l_mesh, monkeypatch,
@@ -252,7 +252,7 @@ def test_exported_T_gt_undoes_the_physics_recentring(headless_app, l_mesh, monke
 
     for name, (pos, quat) in list(_FakeMjScene.POSES.items())[:2]:
         obj = app.o3d_scene[name]
-        # The exported geom is the original mesh, untouched — not the centred physics copy.
+        # The exported geom is the original mesh, untouched -- not the centred physics copy.
         assert np.allclose(np.asarray(obj.geom.vertices), verts_original, atol=1e-12)
         world_from_export = _apply(obj.T_gt, verts_original)
         world_from_physics = _apply(_pose_matrix(pos, quat), verts_physics)
@@ -268,7 +268,7 @@ def test_reference_cloud_lands_on_the_simulated_part(headless_app, l_mesh, monke
     check it lands on the part the simulator settled.
 
     Measured against the physics geometry (centred mesh at its raw body pose), which is
-    derived without touching the exported `T_gt` — so this cannot pass by construction.
+    derived without touching the exported `T_gt` -- so this cannot pass by construction.
 
     Tolerance-free: point-to-surface distance is a rigid invariant, so the numbers must match
     the model-frame baseline exactly. A frame disagreement would not merely inflate them, it
@@ -320,15 +320,15 @@ def test_collision_hulls_are_shifted_with_the_part_mesh(headless_app, l_mesh, mo
     assert np.allclose(np.asarray(app.convex_meshes[0].vertices), hull_verts, atol=1e-12)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# scene_state.npz — the scene-level GT must be in the same frame as the per-sample GT
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# scene_state.npz -- the scene-level GT must be in the same frame as the per-sample GT
+# -----------------------------------------------------------------------------
 
 def _bare_scene(body_offset):
     """A `MujocoBinScene` with only the attributes `export_scene_state` reads.
 
     Built with `object.__new__` and a stubbed `extract_scene_state` so the frame arithmetic can
-    be tested without compiling a MuJoCo model — the offset composition is pure bookkeeping and
+    be tested without compiling a MuJoCo model -- the offset composition is pure bookkeeping and
     has nothing to do with physics.
     """
     from physics.mujoco_bin_scene import MujocoBinScene
@@ -394,9 +394,9 @@ def test_scene_stage_hands_the_centring_offset_to_the_physics_layer(headless_app
         "SceneStage must pass the centring offset through to MujocoBinScene"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# End-to-end — real MuJoCo, and the PLY the tuner actually reads
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# End-to-end -- real MuJoCo, and the PLY the tuner actually reads
+# -----------------------------------------------------------------------------
 
 @pytest.mark.slow
 @pytest.mark.parametrize("frame_mode", ["pca", "ambiguity"])

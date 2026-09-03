@@ -2,7 +2,7 @@
 
 The filter mirrors the real Mask2Former post-filter: an instance is kept only if its
 2D-mask elongation and image-area fraction both fall inside the auto-derived per-part
-ranges. No scene/sim needed — pure function, so this stays out of the `slow` suite."""
+ranges. No scene/sim needed -- pure function, so this stays out of the `slow` suite."""
 
 from stages.render_stage import _passes_2d_filter
 

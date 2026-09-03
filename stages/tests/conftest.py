@@ -23,7 +23,7 @@ from enums import Stage
 @pytest.fixture(scope="session")
 def make_box_mesh():
     """Factory: a watertight box o3d mesh with vertex normals. `extents` are in the mesh's
-    own units — pass values in [5, 5000] to exercise the import mm->m auto-conversion."""
+    own units -- pass values in [5, 5000] to exercise the import mm->m auto-conversion."""
     def _make(extents=(0.05, 0.05, 0.05)):
         tri = trimesh.creation.box(extents=list(extents))
         mesh = o3d.geometry.TriangleMesh(

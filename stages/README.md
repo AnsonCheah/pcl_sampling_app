@@ -1,6 +1,6 @@
 # stages
 
-GUI panels and pipeline orchestration. Calls into `sensor/`, `physics/`, and `geometry/` — implements none of their domain logic.
+GUI panels and pipeline orchestration. Calls into `sensor/`, `physics/`, and `geometry/` -- implements none of their domain logic.
 
 ## Pipeline
 
@@ -14,7 +14,7 @@ Stages run in sequence. All share `app` as their only communication channel.
 | `DOWNSAMPLE` | `DownsampleStage` | Uniform or adaptive voxel downsampling |
 | `SAVE` | `SaveStage` | PLY export with geocenter + GT pose comments |
 | `DECOMPOSE` | `DecomposeStage` | VHACD convex decomposition for sim collision |
-| `SCENE` | `SceneStage` | MuJoCo bin arrangement/settle (random, or structured ± partition/tray) |
+| `SCENE` | `SceneStage` | MuJoCo bin arrangement/settle (random, or structured +/- partition/tray) |
 | `RENDER` | `RenderStage` | Structured-light noise chain + instance segmentation + export |
 
 ## `BaseStage`
@@ -45,7 +45,7 @@ Running a worker: `stage._run_worker()` spawns `worker()` in a background thread
 ## Automatic downstream clearing
 
 Each stage declares the `app.*` attributes it owns in a `downstream` class dict mapping
-attr name → a zero-arg default factory. `BaseStage.clear_downstream()` resets them (and runs
+attr name -> a zero-arg default factory. `BaseStage.clear_downstream()` resets them (and runs
 `on_clear()`); `app.clear_state_from(stage, inclusive=True)` resets a stage's own state plus
 every later stage's, by strict `Stage` enum order. This is the single source of truth:
 `app._restart()` and each worker's start-of-run wipe both go through it, so adding a stage or
@@ -56,7 +56,7 @@ each stage's `on_clear()`.
 
 ## `app` state attributes
 
-The complete set, generated from the stages' `downstream` class dicts — which are the source
+The complete set, generated from the stages' `downstream` class dicts -- which are the source
 of truth, not this table. A stage's `downstream` entry declares both the reset default and
 ownership for clearing; `MeshSamplingApp.__init__` replays those factories to seed every
 attribute *before* any stage is constructed, because `build_panel()` reads them.
@@ -65,14 +65,14 @@ attribute *before* any stage is constructed, because `build_panel()` reads them.
 |---|---|---|---|
 | `IMPORT_MESH` | `target_mesh` | `None` | the loaded, unit-normalised mesh |
 | `IMPORT_MESH` | `mesh_basename` | `None` | part name; keys every output directory |
-| `IMPORT_MESH` | `geocenter` | identity 4×4 | **written by DOWNSAMPLE** — see below |
+| `IMPORT_MESH` | `geocenter` | identity 4x4 | **written by DOWNSAMPLE** -- see below |
 | `RAYCAST` | `raw_pcd` | `None` | multi-view canonical cloud |
 | `RAYCAST` | `cropped_pcd` | `None` | survives `CropStage.reset()`, restored from `raw_pcd` |
 | `RAYCAST` | `point_count_mean` | `None` | per-view stats, read by the headless summary |
 | `RAYCAST` | `point_count_range` | `None` | |
 | `RAYCAST` | `aspect_ratio_range` | `None` | 2D candidate filter bounds, read by `RENDER` |
 | `RAYCAST` | `area_ratio_range` | `None` | |
-| `RAYCAST` | `ref_cam_distance` | `None` | area_ratio scales as 1/d², so `RENDER` rescales by this |
+| `RAYCAST` | `ref_cam_distance` | `None` | area_ratio scales as 1/d^2, so `RENDER` rescales by this |
 | `DOWNSAMPLE` | `down_pcd` | `None` | the active downsampled cloud |
 | `DOWNSAMPLE` | `down_pcd_surface` | `None` | surface regime cloud |
 | `DOWNSAMPLE` | `down_pcd_edge` | `None` | edge regime cloud |
@@ -81,8 +81,8 @@ attribute *before* any stage is constructed, because `build_panel()` reads them.
 | `DOWNSAMPLE` | `ambiguity_profile` | `None` | drives the ambiguity frame and the heat-map preview |
 | `SAVE` | `output_pcd_path` | `None` | provenance of the last export |
 | `DECOMPOSE` | `convex_meshes` | `[]` | VHACD hulls for physics collision |
-| `SCENE` | `o3d_scene` | `{}` | `SCENE` → `RENDER`: meshes + GT poses |
-| `SCENE` | `mj_scene` | `None` | `SCENE` → `RENDER`: the `MujocoBinScene` |
+| `SCENE` | `o3d_scene` | `{}` | `SCENE` -> `RENDER`: meshes + GT poses |
+| `SCENE` | `mj_scene` | `None` | `SCENE` -> `RENDER`: the `MujocoBinScene` |
 | `SCENE` | `scene_mesh` | `None` | GUI preview of the settled scene |
 | `RENDER` | `synthetic_targets` | `{}` | per-instance segmented clouds |
 | `RENDER` | `synthetic_scenes` | `{}` | whole-scene cloud incl. `bin_pcd` |
@@ -97,7 +97,7 @@ declares it in its `downstream` dict, so it is cleared only when a new mesh is l
 The recentre transforms `target_mesh`, `raw_pcd` and `cropped_pcd` in place, and
 `clear_state_from(DOWNSAMPLE)` cannot undo that. If DOWNSAMPLE owned the record, re-running
 Downsample after a recentre would reset `geocenter` to identity while the geometry stayed
-moved — and the `geocenter_*` PLY comments, which are the exported provenance of the model
+moved -- and the `geocenter_*` PLY comments, which are the exported provenance of the model
 frame, would silently be wrong. Loading a new mesh resets geometry and record together,
 which is the only point at which they are consistent.
 
@@ -115,7 +115,7 @@ app.stages[Stage.RENDER]._run_worker()   # sensor sim + segmentation -> app.synt
 ```
 
 For a structured scene with fixtures, set on `SceneStage` before the worker: `arrangement="structured"`,
-`structure_type` (`"none"|"partition"|"tray"`), `structure_height_pct` (50–100), `clearance_mode`
+`structure_type` (`"none"|"partition"|"tray"`), `structure_height_pct` (50-100), `clearance_mode`
 (`"snug"|"medium"|"loose"`), and `stable_pose_R` (one scene per stable pose).
 
 ## Threading rules
@@ -126,4 +126,4 @@ For a structured scene with fixtures, set on `SceneStage` before the worker: `ar
 ## Constraints
 
 - **Stages orchestrate, never implement**: domain logic (sensor physics, MuJoCo setup, geometry math) belongs in `sensor/`, `physics/`, `geometry/`. If domain logic appears in a stage file, it is in the wrong place.
-- **`SceneStage` and `RenderStage` are the integration points**: `SceneStage` calls `physics/`, `RenderStage` calls `sensor/`. The noise call sequence in `RenderStage` is intentional — do not reorder.
+- **`SceneStage` and `RenderStage` are the integration points**: `SceneStage` calls `physics/`, `RenderStage` calls `sensor/`. The noise call sequence in `RenderStage` is intentional -- do not reorder.

@@ -5,16 +5,16 @@ Run::
     python bench/fetch_dataset.py --dataset tless
     python bench/fetch_dataset.py --dataset tless --list
 
-Why T-LESS rather than Siléane
-    Siléane is the better-motivated bin-picking dataset on paper — it was built around
-    symmetry groups — but its meshes sit inside 7-zip archives in a *Google Drive folder*
+Why T-LESS rather than Sileane
+    Sileane is the better-motivated bin-picking dataset on paper -- it was built around
+    symmetry groups -- but its meshes sit inside 7-zip archives in a *Google Drive folder*
     with no direct file URLs, which needs ``gdown`` plus ``py7zr`` (neither installed) and
     still hits Drive's interstitial on large files.  T-LESS is one plain 33 MB zip over
     HTTPS, is **CC BY 4.0** rather than non-commercial, and carries 30 industrial objects
-    against Siléane's ~10 — which matters directly, because the breadth pass wants many
+    against Sileane's ~10 -- which matters directly, because the breadth pass wants many
     parts more than it wants many scenes per part.
 
-    Siléane is still worth adding later for its published symmetry-group formalism; it just
+    Sileane is still worth adding later for its published symmetry-group formalism; it just
     is not the thing to block the first sweep on.
 
 What arrives
@@ -26,7 +26,7 @@ What arrives
 ``models_info.json`` is the quiet prize here: it carries per-object ``symmetries_discrete``
 and ``symmetries_continuous``, which is published ground truth for symmetry.  That gives the
 benchmark a symmetry-aware metric without hand-rolling one, and gives
-``geometry/ambiguity.py`` its first external validation set — until now it has only been
+``geometry/ambiguity.py`` its first external validation set -- until now it has only been
 checked against primitives whose answers we wrote ourselves.
 """
 
@@ -52,7 +52,7 @@ DATASETS = {
         "attribution": (
             "T-LESS: An RGB-D Dataset for 6D Pose Estimation of Texture-less Objects.\n"
             "Hodan, Haluza, Obdrzalek, Matas, Lourakis, Zabulis. WACV 2017.\n"
-            "https://cmp.felk.cvut.cz/t-less/  —  Licensed CC BY 4.0.\n"
+            "https://cmp.felk.cvut.cz/t-less/  --  Licensed CC BY 4.0.\n"
             "Obtained via the BOP benchmark: https://bop.felk.cvut.cz/datasets/\n"
         ),
         # BOP ships several model variants; the reconstructed ones are scans and the
@@ -125,7 +125,7 @@ def _summarise(out_dir: str, plys) -> None:
     """Report sizes and the published symmetry annotations, if present."""
     info_path = os.path.join(out_dir, "models_info.json")
     if not os.path.exists(info_path):
-        print("  (no models_info.json — no published symmetry annotations)")
+        print("  (no models_info.json -- no published symmetry annotations)")
         return
     with open(info_path) as f:
         info = json.load(f)

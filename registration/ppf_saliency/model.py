@@ -16,8 +16,8 @@ Two implementation choices worth stating, because both are easy to get wrong:
   ~100 instances in a bin; doing it on the scene would multiply every lookup instead.
 
 The alpha angle is stored as a float, not pre-binned.  Binning it here would throw away
-precision before the only place it is needed — the difference ``alpha_model - alpha_scene``
-— and that difference is what sets the recovered rotation.
+precision before the only place it is needed -- the difference ``alpha_model - alpha_scene``
+-- and that difference is what sets the recovered rotation.
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ class PPFModel:
     cfg: PPFConfig
 
     keys: np.ndarray                 # (E,) int64, sorted
-    entry_point: np.ndarray          # (E,) int32 — index into `points` of the pair's FIRST point
+    entry_point: np.ndarray          # (E,) int32 -- index into `points` of the pair's FIRST point
     # The pair's SECOND point. Not needed to build a pose (the accumulator axis is the first
     # point), but the `product` / `geometric_mean` weight modes weight a pair by both of its
     # endpoints, so the ablation cannot run without it. 4 bytes/entry.
@@ -180,7 +180,7 @@ class PPFModel:
         dist, f2, f3, f4 = dist[usable], f2[usable], f3[usable], f4[usable]
         if len(ii) == 0:
             raise ValueError(
-                "no usable model point pairs — tau is probably larger than the part; "
+                "no usable model point pairs -- tau is probably larger than the part; "
                 f"tau={cfg.tau * 1e3:.2f}mm, diameter={cfg.diameter * 1e3:.2f}mm")
 
         alpha = alpha_of(frames[ii], pts[ii], pts[jj])
@@ -293,7 +293,7 @@ def _bucket_cap_mask(sorted_keys: np.ndarray, cap: int) -> Optional[np.ndarray]:
 
     Strided rather than truncated.  Entries within a bin arrive grouped by model point (the
     pair enumeration is ordered), so keeping the *first* ``cap`` would retain only the
-    lowest-indexed model points — one contiguous patch of the part — and every pose voted
+    lowest-indexed model points -- one contiguous patch of the part -- and every pose voted
     from that bin would be biased toward it.  Striding keeps the survivors spread across the
     model points and alpha values the bin actually contains.
     """
@@ -336,7 +336,7 @@ def _usable_pairs(dist: np.ndarray, nrm: np.ndarray, ii: np.ndarray, jj: np.ndar
     the accumulator with votes that constrain nothing.
 
     But Hinterstoisser (ECCV 2016) observed that the short pairs whose normals *do* diverge
-    are the opposite — they straddle an edge or a crease and are among the most
+    are the opposite -- they straddle an edge or a crease and are among the most
     discriminative pairs on the part.  Those are re-admitted.
     """
     ok = dist <= cfg.max_pair_dist

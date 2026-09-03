@@ -1,5 +1,5 @@
 """
-test_tuner_nsga.py — the NSGA-II arm of Tuner and the referredStep constraint
+test_tuner_nsga.py -- the NSGA-II arm of Tuner and the referredStep constraint
 ------------------------------------------------------------------------------
 Run from project root:
     python -m pytest MM_Optimizer/tests/test_tuner_nsga.py -q
@@ -11,11 +11,11 @@ apparent overlap in Pareto / dry-run / multi-round tests is per-sampler
 coverage, not duplication.
 
 Unit tests (no MechVision, no disk files):
-  test_suggest_params_fixed_referredstep_bounds  — referredStep spans the full [1,20]
-  test_constraint_func_feasible / _violated      — _referredstep_constraint sign
-  test_constraint_guard_returns_worst_case       — guard fires, no MV call, sentinel returned
-  test_build_warm_clamps_referredstep            — warm start clamps referredStep <= refStep
-  test_pareto_winner_nsga                        — max coverage, then min time
+  test_suggest_params_fixed_referredstep_bounds  -- referredStep spans the full [1,20]
+  test_constraint_func_feasible / _violated      -- _referredstep_constraint sign
+  test_constraint_guard_returns_worst_case       -- guard fires, no MV call, sentinel returned
+  test_build_warm_clamps_referredstep            -- warm start clamps referredStep <= refStep
+  test_pareto_winner_nsga                        -- max coverage, then min time
 """
 
 import logging
@@ -59,9 +59,9 @@ _VOXEL_BOUNDS = (0.14, 4.2, 0.28, 16.8)   # (min_lo, min_hi, width_lo, width_hi)
 _REGIME_A     = {"coarse_mode": 0.0, "fine_mode": 0.0, "needs_edge": False, "id": "A"}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _make_study_multi():
     return optuna.create_study(
@@ -74,7 +74,8 @@ def _ask(regime, study=None):
     if study is None:
         study = _make_study_multi()
     trial = study.ask()
-    p = suggest_params(trial, regime, _PAIRS, _VOXEL_BOUNDS)
+    p = suggest_params(trial, regime, _PAIRS, _VOXEL_BOUNDS,
+                       sym_aligned=False, sym_fold=1)
     return p, trial, study
 
 
@@ -96,13 +97,13 @@ def _make_frozen_trial(values, user_attrs=None):
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Unit tests
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def test_suggest_params_fixed_referredstep_bounds():
     """With fixed bounds, referredStep is sampled from the full [1,20] range and
-    can legitimately exceed refStep — proving the dynamic bound was removed."""
+    can legitimately exceed refStep -- proving the dynamic bound was removed."""
     lo, hi = SC.REFSTEP_BOUNDS   # (1, 20)
     study = _make_study_multi()
     found_violation = False
@@ -118,8 +119,8 @@ def test_suggest_params_fixed_referredstep_bounds():
         if p["referredStep"] > p["refStep"]:
             found_violation = True
 
-    # With 100 random trials over a 20×20 integer grid, probability of never seeing
-    # referredStep > refStep is negligible — this assertion catches a regression to
+    # With 100 random trials over a 20x20 integer grid, probability of never seeing
+    # referredStep > refStep is negligible -- this assertion catches a regression to
     # the old dynamic upper-bound suggest.
     assert found_violation, (
         "100 random trials produced no referredStep > refStep. "
@@ -133,7 +134,7 @@ def test_constraint_func_feasible():
     trial = _make_frozen_trial(values=[0.1, 0.5])   # no user_attrs
     result = _referredstep_constraint(trial)
     assert len(result) == 1
-    assert result[0] <= 0.0, f"Feasible trial must have ≤0 constraint, got {result[0]}"
+    assert result[0] <= 0.0, f"Feasible trial must have <=0 constraint, got {result[0]}"
     log.info("PASS: test_constraint_func_feasible")
 
 
@@ -141,7 +142,7 @@ def test_constraint_func_violated():
     """_referredstep_constraint returns [violation > 0] when constraint_violation is set."""
     trial = _make_frozen_trial(
         values=[0.0, SC.TIME_INITIAL_CAP],   # worst-case for maximize coverage
-        user_attrs={"constraint_violation": 4.0},   # referredStep=9, refStep=5 → 9-5=4
+        user_attrs={"constraint_violation": 4.0},   # referredStep=9, refStep=5 -> 9-5=4
     )
     result = _referredstep_constraint(trial)
     assert len(result) == 1
@@ -153,7 +154,7 @@ def test_constraint_guard_returns_worst_case():
     """When referredStep > refStep, _objective returns the worst-case sentinel
     (1.0, TIME_INITIAL_CAP) without calling MechVision, and sets constraint_violation."""
     if not os.path.exists(MODEL_PATH):
-        log.warning(f"SKIP test_constraint_guard_returns_worst_case — model not found")
+        log.warning(f"SKIP test_constraint_guard_returns_worst_case -- model not found")
         return
     groups = list_synthetic_scenes(SCENES_DIR) if os.path.isdir(SCENES_DIR) else [[]]
 
@@ -227,7 +228,7 @@ def test_constraint_guard_returns_worst_case():
 
 
 def test_build_warm_clamps_referredstep():
-    """_build_warm still clamps referredStep ≤ refStep so warm-start is always feasible."""
+    """_build_warm still clamps referredStep <= refStep so warm-start is always feasible."""
     coarse = {
         "refStep": 5, "distQuantification": 1.0, "angleQuantification": 90,
         "maxNumOfPointPairsPerFeature": 5000, "maxVoteRatio": 0.5,
@@ -240,10 +241,11 @@ def test_build_warm_clamps_referredstep():
         "onlyConsiderVisibleSurfaceOfModel": False,
         "considerErrorofNormalAngles": False,
     }
-    p = _build_warm(coarse, fine, _REGIME_A, _PAIRS, _VOXEL_BOUNDS)
+    p = _build_warm(coarse, fine, _REGIME_A, _PAIRS, _VOXEL_BOUNDS,
+                    sym_aligned=False, sym_fold=1)
 
     assert p["referredStep"] <= p["refStep"], (
-        f"_build_warm must clamp referredStep ≤ refStep, "
+        f"_build_warm must clamp referredStep <= refStep, "
         f"got referredStep={p['referredStep']} refStep={p['refStep']}"
     )
     assert p["referredStep"] == 5, \
@@ -252,12 +254,12 @@ def test_build_warm_clamps_referredstep():
 
 
 def test_pareto_winner_nsga():
-    """_select_pareto_winner picks max coverage first, then min time — logic unchanged."""
+    """_select_pareto_winner picks max coverage first, then min time -- logic unchanged."""
     study = _make_study_multi()
     configs = [
         (0.95, 1.0),   # 95% cov, 1.0s
-        (0.95, 0.5),   # 95% cov, 0.5s  ← should win (max cov, min time tiebreaker)
-        (0.90, 0.3),   # 90% cov, 0.3s  ← Pareto non-dominated
+        (0.95, 0.5),   # 95% cov, 0.5s  <- should win (max cov, min time tiebreaker)
+        (0.90, 0.3),   # 90% cov, 0.3s  <- Pareto non-dominated
         (0.80, 0.2),
     ]
     for cov, t in configs:
@@ -271,18 +273,18 @@ def test_pareto_winner_nsga():
     log.info("PASS: test_pareto_winner_nsga")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Dry-run integration tests
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def test_dry_run_nsga_study():
     """NSGA-II study runs in dry_run: n_evals=0, result not None, study populated."""
     if not os.path.exists(MODEL_PATH):
-        log.warning(f"SKIP test_dry_run_nsga_study — model not found: {MODEL_PATH}")
+        log.warning(f"SKIP test_dry_run_nsga_study -- model not found: {MODEL_PATH}")
         return
     groups = list_synthetic_scenes(SCENES_DIR)
     if not groups:
-        log.warning(f"SKIP test_dry_run_nsga_study — no scenes under: {SCENES_DIR}")
+        log.warning(f"SKIP test_dry_run_nsga_study -- no scenes under: {SCENES_DIR}")
         return
 
     pcd = load_reference_pcd(MODEL_PATH)
@@ -314,7 +316,7 @@ def test_dry_run_nsga_study():
 
         n_complete = sum(1 for t in opt._study.trials
                          if t.state == optuna.trial.TrialState.COMPLETE)
-        assert n_complete >= 1, f"Study must have ≥1 complete trial, got {n_complete}"
+        assert n_complete >= 1, f"Study must have >=1 complete trial, got {n_complete}"
 
         log.info(f"  NSGA-II dry run: complete={n_complete}  cov={result.coverage:.2f}  "
                  f"time={result.mean_time:.3f}s")
@@ -328,11 +330,11 @@ def test_nsga_no_blowup_trials():
     """After dry run, every complete trial with referredStep > refStep must have been caught
     by the constraint guard (sentinel values + constraint_violation attr), never MechVision."""
     if not os.path.exists(MODEL_PATH):
-        log.warning(f"SKIP test_nsga_no_blowup_trials — model not found: {MODEL_PATH}")
+        log.warning(f"SKIP test_nsga_no_blowup_trials -- model not found: {MODEL_PATH}")
         return
     groups = list_synthetic_scenes(SCENES_DIR)
     if not groups:
-        log.warning(f"SKIP test_nsga_no_blowup_trials — no scenes under: {SCENES_DIR}")
+        log.warning(f"SKIP test_nsga_no_blowup_trials -- no scenes under: {SCENES_DIR}")
         return
 
     pcd = load_reference_pcd(MODEL_PATH)
@@ -370,7 +372,7 @@ def test_nsga_no_blowup_trials():
                 # Guard must have intercepted: sentinel values + violation attr
                 assert t.values == [0.0, SC.TIME_INITIAL_CAP], (
                     f"Trial {t.number}: referredStep={rref} > refStep={rs} "
-                    f"but values={t.values} — expected sentinel (0.0, {SC.TIME_INITIAL_CAP})"
+                    f"but values={t.values} -- expected sentinel (0.0, {SC.TIME_INITIAL_CAP})"
                 )
                 assert "constraint_violation" in t.user_attrs, (
                     f"Trial {t.number}: referredStep > refStep but no constraint_violation attr"
@@ -386,11 +388,11 @@ def test_nsga_no_blowup_trials():
 def test_multi_round_nsga():
     """2-round NSGA-II study: round 1 fires; early-stop when improvement < threshold."""
     if not os.path.exists(MODEL_PATH):
-        log.warning(f"SKIP test_multi_round_nsga — model not found: {MODEL_PATH}")
+        log.warning(f"SKIP test_multi_round_nsga -- model not found: {MODEL_PATH}")
         return
     groups = list_synthetic_scenes(SCENES_DIR)
     if not groups:
-        log.warning(f"SKIP test_multi_round_nsga — no scenes under: {SCENES_DIR}")
+        log.warning(f"SKIP test_multi_round_nsga -- no scenes under: {SCENES_DIR}")
         return
 
     pcd = load_reference_pcd(MODEL_PATH)
@@ -420,7 +422,7 @@ def test_multi_round_nsga():
 
         n_complete = sum(1 for t in opt._study.trials
                          if t.state == optuna.trial.TrialState.COMPLETE)
-        assert n_complete >= 1, f"Study must have ≥1 complete trial, got {n_complete}"
+        assert n_complete >= 1, f"Study must have >=1 complete trial, got {n_complete}"
 
         log.info(f"  multi-round NSGA-II: complete={n_complete}  cov={result.coverage:.2f}")
         log.info("PASS: test_multi_round_nsga")
@@ -430,9 +432,9 @@ def test_multi_round_nsga():
         opt.cleanup()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Entry point
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import argparse

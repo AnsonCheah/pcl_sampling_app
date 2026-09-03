@@ -14,7 +14,7 @@ What you are looking at
                   model and contribute nothing.  A part that is mostly cool is a part the
                   matcher can flip.
     Rods          the ranked ambiguity axes, hottest = rank 0 = most viewpoints affected.
-    Knobs         each rod's closest point to the part centre — i.e. where the axis
+    Knobs         each rod's closest point to the part centre -- i.e. where the axis
                   actually sits.
     White sphere  the cloud centroid.        Blue sphere  the AABB centre.
 
@@ -90,7 +90,7 @@ def _mesh_candidates(ply_path: str, stem: str):
     cloud; everything after it is a guess and has to survive ``pairing_error``.
     """
     d = os.path.dirname(os.path.abspath(ply_path))
-    return [os.path.join(os.path.dirname(d), f"{stem}.stl"),   # bundle root — exported together
+    return [os.path.join(os.path.dirname(d), f"{stem}.stl"),   # bundle root -- exported together
             os.path.join(d, f"{stem}.stl"),
             os.path.join(REF_ROOT, stem, f"{stem}.stl"),
             os.path.join(REPO, f"{stem}.STL"),
@@ -102,7 +102,7 @@ def _resolve(target: str):
 
     ``REF_ROOT`` is searched before ``MM_ROOT``: the reference bundle is the source of
     truth and carries its own STL, whereas the MechVision resource folder is a deployed
-    *copy* with no mesh beside it, so its cloud can only ever be paired by guessing — and
+    *copy* with no mesh beside it, so its cloud can only ever be paired by guessing -- and
     it goes stale the moment a part is re-exported into a new model frame.  It is still
     searched last, but the pairing check is what actually decides.
     """
@@ -196,7 +196,7 @@ def _report(profile, legend):
     worst = max(legend, key=lambda r: r["offset_from_centroid_mm"])
     if worst["offset_from_centroid_mm"] > 1.0:
         print(f"\n  Axis {worst['rank']} sits {worst['offset_from_centroid_mm']:.2f} mm off the "
-              f"centroid — a centroid/OBB-based analysis cannot represent it.")
+              f"centroid -- a centroid/OBB-based analysis cannot represent it.")
 
 
 def _rank_sweep(profile, exponents=(0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0)):

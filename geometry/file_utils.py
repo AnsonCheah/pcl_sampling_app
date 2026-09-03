@@ -35,6 +35,35 @@ def open_source_folder_dialog():
     path = filedialog.askdirectory(initialdir=Path.cwd(), title="Select source folder (STL files)")
     return Path(path) if path else None
 
+def read_ply_comments(ply_path):
+    """`comment <key> <value>` header lines as a dict of raw strings.
+
+    The reader for the protocol `pointcloud_to_ply` writes: model-frame provenance
+    (`geocenter_*`) and ambiguity metadata (`ambiguity_fold`, `ambiguity_aligned`). Values stay
+    strings because the keys have different types; callers coerce.
+
+    Returns `{}` for a missing file, so a bundle exported before a key existed reads as
+    "unknown" rather than raising.
+    """
+    ply_path = str(ply_path)
+    if not os.path.isfile(ply_path):
+        return {}
+
+    out = {}
+    with open(ply_path, "rb") as f:
+        for raw in f:
+            # Stop at end_header: the vertex payload is binary float32 and a byte run can
+            # spell "comment ..." by chance, quite apart from failing to decode as ASCII.
+            line = raw.decode("ascii", errors="ignore").strip()
+            if line == "end_header":
+                break
+            if line.startswith("comment "):
+                parts = line.split(None, 2)
+                if len(parts) == 3:
+                    out[parts[1]] = parts[2]
+    return out
+
+
 def pointcloud_to_ply(pcd, ply_path, comments=[]):
     points = np.asarray(pcd.points, dtype=np.float32)
     normals = np.asarray(pcd.normals, dtype=np.float32)

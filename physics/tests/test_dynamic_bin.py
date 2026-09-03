@@ -1,6 +1,6 @@
 """Dynamic bin sizing: pure-function tests for solve_bin_dim() / obb_packing_factor().
 
-Fast — no MuJoCo model is compiled and no physics is stepped. Boxes are used throughout
+Fast -- no MuJoCo model is compiled and no physics is stepped. Boxes are used throughout
 because their OBB volume, footprint and stable-pose height are exact, so every expected bin
 dimension below is a closed-form value rather than a fitted one.
 
@@ -59,7 +59,7 @@ def test_obb_packing_factor_matches_formula(make_box_part):
 def test_packing_factor_uses_obb_side_lengths_not_aabb_of_rotated_box(make_box_part):
     """Regression: `bounding_box_oriented.extents` is the AXIS-ALIGNED bounds of the rotated
     OBB box mesh, not the OBB's side lengths (trimesh #871, #1865). Reading it inflates every
-    extent toward the box diagonal, collapsing the measured aspect ratio — so elongated parts
+    extent toward the box diagonal, collapsing the measured aspect ratio -- so elongated parts
     looked blockier than they are and got too high a packing factor, over-counting them.
 
     A rotated rod is the sharp case: true AR 25, but the wrong property reads far lower.
@@ -93,7 +93,7 @@ def test_packing_factor_is_rotation_invariant(make_box_part):
 
 
 def test_large_part_keeps_max_bin(make_box_part):
-    """A part that clips on every axis returns MAX_BIN_DIM — today's behaviour, unchanged.
+    """A part that clips on every axis returns MAX_BIN_DIM -- today's behaviour, unchanged.
 
     A 120 mm cube exceeds both the height requirement (h_eff*X/(1-margin) > H0) and the
     footprint requirement (A_parts > W0*L0), so every clamp binds.
@@ -122,7 +122,7 @@ def test_small_part_shrinks_bin(cube_part):
 def test_bin_floor_takes_priority(make_box_part):
     """MIN_BIN_DIM is a hard floor; the parts-per-layer target yields to it, and the
     instance count is then whatever that floored bin produces."""
-    part, _ = make_box_part((0.002, 0.002, 0.002))     # 2 mm cube — floors on every axis
+    part, _ = make_box_part((0.002, 0.002, 0.002))     # 2 mm cube -- floors on every axis
     bin_dim, n, layers = solve_bin_dim(part, fill_rate=0.2)
     w, l, h, t = bin_dim
 

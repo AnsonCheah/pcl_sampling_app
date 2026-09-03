@@ -1,4 +1,4 @@
-"""Tests for registration.ppf — the standalone vanilla PPF + Hough matcher.
+"""Tests for registration.ppf -- the standalone vanilla PPF + Hough matcher.
 
 Run:  python -m pytest registration/tests/test_ppf.py -q
 
@@ -7,7 +7,7 @@ result the matcher produces:
 
 1. **The package is standalone.**  Its whole reason for existing is that it can be lifted
    out of this repository unchanged, so an accidental ``from geometry import ...`` is a
-   correctness bug, not a style one — and it would not otherwise be caught, because the repo
+   correctness bug, not a style one -- and it would not otherwise be caught, because the repo
    is always on ``sys.path`` when the suite runs.
 2. **The frame convention round-trips.**  PPF encodes a pose as (model point, alpha); train,
    match and pose reconstruction must share one convention.  A sign error there still
@@ -56,7 +56,7 @@ _REGISTRATION_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # The copyable unit: the vanilla matcher plus the code it shares with ppf_saliency. Copying
 # it into another project means copying BOTH directories. It is deliberately not all of
-# ``registration/`` — ``ppf_saliency`` imports ``geometry`` and ``registration.ppf.bench``
+# ``registration/`` -- ``ppf_saliency`` imports ``geometry`` and ``registration.ppf.bench``
 # absolutely, by design, and so cannot travel alone.
 _PKG_DIRS = [os.path.join(_REGISTRATION_DIR, "ppf"),
              os.path.join(_REGISTRATION_DIR, "_shared")]
@@ -75,9 +75,9 @@ def _package_sources():
                   for f in glob.glob(os.path.join(d, "**", "*.py"), recursive=True))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Fixtures
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _centred(mesh):
     mesh.translate(-mesh.get_axis_aligned_bounding_box().get_center())
@@ -96,7 +96,7 @@ def _box():
 
 
 def _bumpy():
-    """A box with an off-centre boss — asymmetric, so it has a unique correct pose.
+    """A box with an off-centre boss -- asymmetric, so it has a unique correct pose.
 
     A bare primitive is a bad correctness fixture precisely because it is symmetric: any of
     several poses is right, so a test on one of them cannot distinguish a working matcher
@@ -126,7 +126,7 @@ def _pose_error(T_est, T_gt):
 
 
 def _orbit_error(T_est, T_gt, sym_rotations):
-    """Smallest pose error over a symmetry group — the only meaningful score for a
+    """Smallest pose error over a symmetry group -- the only meaningful score for a
     symmetric part, since every group element names the same physical placement."""
     best = (1e9, 1e9)
     for S in sym_rotations:
@@ -143,9 +143,9 @@ def _box_c2_group():
     return [np.eye(3)] + [Rot.from_rotvec(np.pi * np.eye(3)[k]).as_matrix() for k in range(3)]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 0. The package is standalone
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def test_package_imports_nothing_from_this_repository():
     """The extraction claim, asserted statically over every import in the copyable unit.
@@ -162,7 +162,7 @@ def test_package_imports_nothing_from_this_repository():
             if isinstance(node, ast.Import):
                 names = [a.name for a in node.names]
             elif isinstance(node, ast.ImportFrom):
-                # level > 0 is a relative import — within the package, which is fine.
+                # level > 0 is a relative import -- within the package, which is fine.
                 names = [] if node.level else [node.module or ""]
             else:
                 continue
@@ -199,7 +199,7 @@ def test_cupy_is_an_optional_dependency_not_a_required_one():
     """CuPy must never be imported at module scope anywhere in the copyable unit.
 
     A top-level ``import cupy`` would make the whole package fail to import on any machine
-    without a CUDA build — turning an optional accelerator into a hard requirement, which is
+    without a CUDA build -- turning an optional accelerator into a hard requirement, which is
     exactly the portability the standalone split exists to protect. It is therefore confined
     to one guarded call inside ``_backend.py``.
     """
@@ -220,12 +220,12 @@ def test_cupy_is_an_optional_dependency_not_a_required_one():
     assert not offenders, "cupy must stay optional:\n" + "\n".join(offenders)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 1. The local-frame convention
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def test_frames_map_normals_onto_x_including_the_degenerate_ones():
-    """The ±x normals have no unique rotation axis, so the generic Rodrigues formula
+    """The +/-x normals have no unique rotation axis, so the generic Rodrigues formula
     divides by zero there. Both are exercised explicitly."""
     rng = np.random.default_rng(0)
     n = rng.normal(size=(200, 3))
@@ -263,9 +263,9 @@ def test_alpha_and_pose_reconstruction_are_inverse():
     assert np.allclose(rec, T, atol=1e-9)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 2. Recovery
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def test_identity_recovery_on_an_asymmetric_part():
     model, pts, nrm = _build(_bumpy())
@@ -282,7 +282,7 @@ def test_known_transform_recovery_on_an_asymmetric_part(seed):
     """The core claim: an arbitrary rigid placement is recovered to coarse-match tolerance.
 
     5 mm / 10 deg is the repo's LOOSE gate. Coarse PPF is not expected to reach the
-    2 mm / 5 deg TIGHT gate unaided — that is what a fine refinement stage is for — so
+    2 mm / 5 deg TIGHT gate unaided -- that is what a fine refinement stage is for -- so
     asserting the tight gate here would encode a false expectation of the algorithm.
     """
     model, pts, nrm = _build(_bumpy())
@@ -301,7 +301,7 @@ def test_symmetric_part_lands_in_the_symmetry_orbit():
     """A cuboid's C2 axes make four rotations physically identical.
 
     Scored against one nominated ground truth this fails ~75% of the time for reasons that
-    say nothing about the matcher — which is exactly why a benchmark must quotient pose error
+    say nothing about the matcher -- which is exactly why a benchmark must quotient pose error
     by the symmetry group instead of switching angular scoring off.
     """
     model, pts, nrm = _build(_box())
@@ -335,7 +335,7 @@ def test_noisy_scene_is_still_matched():
     """Depth noise is the operating condition, not an edge case.
 
     Perturbing at the sensor's own 1-sigma checks that the derived angular binning really is
-    wide enough to keep a correct correspondence inside its own bin — the thing
+    wide enough to keep a correct correspondence inside its own bin -- the thing
     ``PPFConfig.derive`` claims when it converts depth noise into a bin width.
     """
     model, pts, nrm = _build(_bumpy())
@@ -353,9 +353,9 @@ def test_noisy_scene_is_still_matched():
     assert pos < 5e-3 and ang < 10.0, f"noisy: {pos * 1e3:.2f} mm / {ang:.2f} deg"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 3. The weighting API is gone, not merely unused
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def test_vote_weighting_api_is_absent():
     """Vanilla means the weighting machinery is not reachable from here.
@@ -377,7 +377,7 @@ def test_vote_weighting_api_is_absent():
 
 
 def test_the_saliency_package_still_exists_and_is_separate():
-    """The extension was moved, not deleted — it is the only way to re-test the weighting
+    """The extension was moved, not deleted -- it is the only way to re-test the weighting
     question on a new part catalogue, which is why it was kept at all."""
     from registration.ppf_saliency import PPFModel as WeightedModel
     from registration.ppf_saliency.saliency import ppf_saliency
@@ -386,9 +386,9 @@ def test_the_saliency_package_still_exists_and_is_separate():
     assert callable(ppf_saliency)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 4. Parameter derivation
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @pytest.mark.parametrize("scale", [0.25, 1.0, 4.0])
 def test_derived_config_is_scale_invariant(scale):
@@ -425,7 +425,7 @@ def test_tau_hits_the_requested_point_budget():
 
 
 def test_provenance_records_which_bound_bound():
-    """"Why is tau 4.6 mm" must have an answer without re-deriving it by hand — that is the
+    """"Why is tau 4.6 mm" must have an answer without re-deriving it by hand -- that is the
     whole point of deriving parameters instead of tuning them."""
     pts, _ = _cloud(_bumpy())
     cfg = PPFConfig.derive(pts, **FAST)
@@ -436,7 +436,7 @@ def test_provenance_records_which_bound_bound():
 
 def test_under_resolved_parts_are_reported_not_silently_accepted():
     """When the smallest feature is finer than the sensor can see, the honest answer is to
-    clamp to the sensor floor *and say so* — that is a real answer to "will this part work",
+    clamp to the sensor floor *and say so* -- that is a real answer to "will this part work",
     which nothing else in the pipeline currently provides."""
     pts, _ = _cloud(_bumpy())
     cfg = PPFConfig.derive(pts, min_feature_size=1e-6, sensor=SensorProfile())
@@ -444,7 +444,7 @@ def test_under_resolved_parts_are_reported_not_silently_accepted():
 
 
 def test_bucket_cap_bounds_a_degenerate_part():
-    """A cuboid collapses onto six distinct normals, so its feature bins are enormous —
+    """A cuboid collapses onto six distinct normals, so its feature bins are enormous --
     12 000 entries before capping, which expands to ~1.8e9 votes for a single instance.
 
     Deduplication does not help here: it runs after expansion, so it fixes the vote *bias*
@@ -457,7 +457,7 @@ def test_bucket_cap_bounds_a_degenerate_part():
 
 def test_key_index_agrees_with_binary_search():
     """The direct index is a cache of what ``searchsorted`` would return, so it must agree
-    exactly — including on keys whose bin is *empty*, where ``lo == hi``.
+    exactly -- including on keys whose bin is *empty*, where ``lo == hi``.
 
     Empty bins are the interesting case and the easy one to get wrong: they are the majority
     of the key space, they never appear in ``model.keys``, and a scene pair landing in one
@@ -493,7 +493,7 @@ def test_matching_is_unaffected_by_whether_the_index_was_built():
     """The index is an optimisation, so it must not be observable in the result.
 
     Asserted on the pose rather than on the ranges, because that is the property anyone
-    actually depends on — a lookup bug that shifted entries by one would still produce
+    actually depends on -- a lookup bug that shifted entries by one would still produce
     plausible ranges and silently wrong poses.
     """
     model, pts, nrm = _build(_bumpy())
@@ -548,7 +548,7 @@ def test_unknown_backend_is_rejected_but_a_missing_gpu_is_not():
 def test_cupy_backend_agrees_with_numpy():
     """The GPU path must be a pure reimplementation, not a different algorithm.
 
-    Votes and pose counts are asserted exactly — the vote stage is integer bookkeeping and
+    Votes and pose counts are asserted exactly -- the vote stage is integer bookkeeping and
     must match to the last vote. Pose values get a small tolerance: the GPU reduces in a
     different order, so the accumulator's float sums can differ in the last bits, which can
     move a cluster mean by ~1e-12.
@@ -576,7 +576,7 @@ def test_cupy_backend_agrees_with_numpy():
 def test_match_many_matches_the_serial_result():
     """Parallelism must be an optimisation, not a semantic change: same results, same order.
 
-    Order matters as much as values — results are joined against instance ground truth by
+    Order matters as much as values -- results are joined against instance ground truth by
     position, so a pool that returned them out of order would silently mis-score everything.
     """
     from registration.ppf import match_many
@@ -599,9 +599,9 @@ def test_match_many_matches_the_serial_result():
     assert match_many(model, [], workers=4) == []
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 5. The benchmark harness that ships with the package
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _sym_group_tless_like():
     """A models_info entry shaped like BOP's: one discrete C2 plus a continuous z axis."""
@@ -635,7 +635,7 @@ def test_metrics_agree_with_bop_toolkit():
     """Our MSSD/ADD/ADI are written here rather than imported, to keep the dependency surface
     at numpy/scipy/open3d. That is only defensible if they agree with the reference.
 
-    Skipped where ``bop_toolkit_lib`` is not installed — it is not a dependency of this
+    Skipped where ``bop_toolkit_lib`` is not installed -- it is not a dependency of this
     package, and must never become one.
     """
     bop_pose = pytest.importorskip("bop_toolkit_lib.pose_error")
@@ -701,7 +701,7 @@ def test_evaluate_pose_and_summarise_round_trip():
 
 
 def test_benchmark_harness_is_importable_and_tolerates_a_missing_scene_root():
-    """The harness ships inside the package, so it has to survive being pointed at nothing —
+    """The harness ships inside the package, so it has to survive being pointed at nothing --
     a fresh checkout has no scenes until the generator has been run."""
     from registration.ppf.bench import run as bench_run
     from registration.ppf.bench.dataset import list_parts, list_scenes

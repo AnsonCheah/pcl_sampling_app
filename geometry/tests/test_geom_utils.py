@@ -91,15 +91,15 @@ def test_face_facet_map_curved_is_all_singletons():
     assert (face_to_facet == -1).all()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# pcd_geocenter — the model frame MechVision's rotationStrategy is aimed at
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# pcd_geocenter -- the model frame MechVision's rotationStrategy is aimed at
+# -----------------------------------------------------------------------------
 
 def _box_cloud(dims=(0.100, 0.030, 0.020), n=20000, seed=0):
     """Long box surface, AABB-centred. PCA-1 is X, PCA-2 Y, PCA-3 Z.
 
     Sampled here rather than via ``sample_points_uniformly``, which takes no seed in this
-    Open3D build — and these tests assert on a frame that must be reproducible. Deliberately
+    Open3D build -- and these tests assert on a frame that must be reproducible. Deliberately
     not a regular lattice either: a lattice is self-similar under a lattice-vector shift, so
     it would understate what ``reference_frames_agree`` sees on a real cloud.
     """
@@ -143,7 +143,7 @@ def _axis_distance(query, direction, point):
 
 
 def test_geocenter_translation_is_in_column_three():
-    """The convention `SaveStage` reads. It used to read row 3, which is always [0,0,0,1] —
+    """The convention `SaveStage` reads. It used to read row 3, which is always [0,0,0,1] --
     so `geocenter_x/y/z` was 0.0 in every PLY ever exported, whatever the frame."""
     T = pcd_geocenter(_box_cloud())
     assert T.shape == (4, 4)
@@ -217,7 +217,7 @@ def test_no_shortcut_when_the_pca_frame_nearly_agrees():
 
     It fired whenever a PCA axis sat within 5 deg of the ambiguity axis and the axis passed
     within 1% of the extent of the PCA origin, and returned the PCA frame instead. Measured on
-    exactly this input, that put the axis in frame **X** sitting **0.83 mm off the origin** —
+    exactly this input, that put the axis in frame **X** sitting **0.83 mm off the origin** --
     so a rotation search about frame Z swept a completely different line.
     """
     pcd = _box_cloud()                                   # extent diagonal ~106 mm -> 1% ~1.06 mm
@@ -249,9 +249,9 @@ def test_ambiguity_frame_is_idempotent():
     assert moved.max() < 1e-9, f"second recentre moved points by {moved.max() * 1000:.6f} mm"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# reference_frames_agree — the stale-scene guard
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# reference_frames_agree -- the stale-scene guard
+# -----------------------------------------------------------------------------
 
 def test_identical_clouds_agree():
     pcd = _box_cloud(n=4000)
@@ -276,7 +276,7 @@ def test_a_rotated_cloud_is_rejected():
 
 
 def test_a_different_point_count_is_rejected_outright():
-    """Not the same export at all — no geometric comparison is meaningful."""
+    """Not the same export at all -- no geometric comparison is meaningful."""
     pcd = _box_cloud(n=4000)
     why = reference_frames_agree(_box_cloud(n=3960), pcd)
     assert why is not None and "point counts differ" in why

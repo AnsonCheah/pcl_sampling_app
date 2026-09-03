@@ -71,7 +71,7 @@ def test_no_parts_escape_after_settle(scenes):
 
 
 def test_tray_parts_rest_above_pocket_floor(scenes):
-    # Every part centre must sit at/above the pocket floor (z = TRAY_BASE) — i.e. inside the pocket,
+    # Every part centre must sit at/above the pocket floor (z = TRAY_BASE) -- i.e. inside the pocket,
     # not sunk through the tray base.
     state = scenes["tray"].extract_scene_state()
     zs = np.array([bd["position"][2] for bd in state.values()])
@@ -86,7 +86,7 @@ def test_export_records_structure_metadata(scenes):
 
 
 def test_none_is_static_no_freejoint(scenes):
-    # Structured/none stays static (no freejoint) — qpos has only the bin's 0 DOFs + no part joints.
+    # Structured/none stays static (no freejoint) -- qpos has only the bin's 0 DOFs + no part joints.
     assert scenes["none"].model.njnt == 0
 
 
@@ -116,7 +116,7 @@ def test_custom_face_up_pose_drives_structured_grid():
 
 
 def _lshape_with_hull_collision():
-    """Concave L part whose collision is its single convex hull — the worst-case bulge. The hull fills
+    """Concave L part whose collision is its single convex hull -- the worst-case bulge. The hull fills
     the L's notch, so a pocket traced from the MESH silhouette would overlap it and eject the part; a
     pocket traced from the convex-collision footprint must not."""
     base = trimesh.creation.box(extents=[0.14, 0.14, 0.03])
@@ -132,7 +132,7 @@ def _lshape_with_hull_collision():
 
 def _asymmetric_wedge():
     """Right-triangular prism centred at its centroid, so its footprint AABB centre does NOT
-    coincide with the body origin (nonzero cx/cy) — the case the divider-centering fix targets.
+    coincide with the body origin (nonzero cx/cy) -- the case the divider-centering fix targets.
     A prism is convex, so its collision hull equals the mesh."""
     from shapely.geometry import Polygon
     wedge = trimesh.creation.extrude_polygon(Polygon([(0, 0), (0.10, 0), (0, 0.05)]), height=0.05)
@@ -260,4 +260,4 @@ def test_concave_part_stays_seated_in_tray():
     post = {k: v["position"].copy() for k, v in sc.extract_scene_state().items()}
     drift = max(np.linalg.norm(post[k][:2] - pre[k][:2]) for k in pre)
     assert sc.n_parts > 0
-    assert drift < 0.003, f"concave part drifted {1000 * drift:.1f} mm — pocket is ejecting the part"
+    assert drift < 0.003, f"concave part drifted {1000 * drift:.1f} mm -- pocket is ejecting the part"

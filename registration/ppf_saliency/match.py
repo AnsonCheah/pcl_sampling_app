@@ -101,7 +101,7 @@ def downsample(points: np.ndarray, normals: np.ndarray, voxel: float
 
     Open3D does the binning (12x faster than doing it here with ``np.unique(axis=0)`` plus
     ``np.add.at``, both of which are slow paths in NumPy). What Open3D does *not* do is
-    renormalise the averaged normals — they come back up to ~0.2% off unit — and PPF's
+    renormalise the averaged normals -- they come back up to ~0.2% off unit -- and PPF's
     features are angles between normals, so that is left to us.
     """
     pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
@@ -251,14 +251,14 @@ def match(model: PPFModel,
 
     Parameters
     ----------
-    points, normals : the cluster, in scene coordinates. Raw resolution is fine — see
+    points, normals : the cluster, in scene coordinates. Raw resolution is fine -- see
         ``do_downsample``.
     top_k : hypotheses to return, best first. The ambiguity study wants >1 so that a
         symmetry flip and the true pose can both be seen.
     weight_mode : how a pair's two endpoint weights combine (``ref`` / ``product`` /
         ``geometric_mean``). Ignored when the model carries no weights.
     vote_budget, accumulator_cells : memory budgets in elements. Hardware policy shared by
-        every part, not per-part tuning — they bound peak RAM on degenerate (planar) parts
+        every part, not per-part tuning -- they bound peak RAM on degenerate (planar) parts
         where one feature bin holds a large share of the model's pairs.
     """
     import time
@@ -474,8 +474,8 @@ def _budget_batches(counts: np.ndarray, budget: int) -> List[Tuple[int, int]]:
     """Contiguous index ranges over ``counts`` whose sums stay under ``budget``.
 
     Cut points come from ``searchsorted`` on the cumulative sum rather than a Python loop
-    over ``counts``. This only fires on degenerate parts — where the total blows the budget
-    — but those are exactly the parts with the most pairs, so the loop was slowest precisely
+    over ``counts``. This only fires on degenerate parts -- where the total blows the budget
+    -- but those are exactly the parts with the most pairs, so the loop was slowest precisely
     when it ran: 43 ms over 250 k pairs.
 
     A single bucket larger than the budget still becomes its own batch rather than failing;

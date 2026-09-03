@@ -1,11 +1,11 @@
 """
-mesh_analysis.py  —  Phase 0: Geometry-derived warm start
+mesh_analysis.py  --  Phase 0: Geometry-derived warm start
 ----------------------------------------------------------
 Derives heuristic starting parameters from the reference point cloud.
 Wraps geometry/geom_utils.py and adds regime + symmetry detection.
 
 Returns a WarmStart dataclass consumed by optimizer.py Phase 0.
-No MechVision calls — pure geometry.
+No MechVision calls -- pure geometry.
 """
 
 import sys
@@ -45,7 +45,7 @@ class WarmStart:
     maxNumOfPointPairsPerFeature:  int   = 5000
     outputNum:                     int   = 1       # overridden to N_instances
 
-    # Voxel verification bounds (mm) — geometry-derived, 0.5%/2% of diameter
+    # Voxel verification bounds (mm) -- geometry-derived, 0.5%/2% of diameter
     minVoxelLength_mm: float = 1.0
     maxVoxelLength_mm: float = 15.0
 
@@ -57,13 +57,13 @@ class WarmStart:
     normal_concentration: float = 0.0
 
     # Regime preference
-    prefer_edge: bool = False     # True → test edge combos first
+    prefer_edge: bool = False     # True -> test edge combos first
 
-    # Symmetry — basic hint (preserved for backward compat)
+    # Symmetry -- basic hint (preserved for backward compat)
     sym_order: Optional[int]   = None    # 2, 3, 4, 6 if detected, else None
     sym_axis:  Optional[str]   = None    # 'x', 'y', 'z' if detected
 
-    # Symmetry — full classification (new)
+    # Symmetry -- full classification (new)
     symmetry_class: str = SYM_ASYMMETRIC   # one of the SYM_* constants above
 
     # Extended geometry features (for experience bank + LLM prompt)
@@ -98,8 +98,8 @@ def analyze_mesh(ref_pcd: o3d.geometry.PointCloud,
     #  Basic geometry                                                      #
     # ------------------------------------------------------------------ #
     # NOTE: `model_diameter` is the exact max pairwise distance (convex hull), replacing
-    # the old longest-minimal-OBB-extent measure. It reads larger — 109.7 mm vs 94.4 mm on
-    # the Stanford bunny, ~16% — so the voxel bounds below shift with it. These are warm
+    # the old longest-minimal-OBB-extent measure. It reads larger -- 109.7 mm vs 94.4 mm on
+    # the Stanford bunny, ~16% -- so the voxel bounds below shift with it. These are warm
     # starts for the optimiser rather than hard limits, but a re-tune baseline taken before
     # this change is not directly comparable to one taken after.
     D  = model_diameter(ref_pcd)
@@ -154,9 +154,9 @@ def analyze_mesh(ref_pcd: o3d.geometry.PointCloud,
     return ws
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Extended feature extraction
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _populate_extended_features(
     ws: WarmStart,
@@ -179,7 +179,7 @@ def _populate_extended_features(
     # Volume estimate via convex hull
     try:
         hull_mesh, _ = pcd.compute_convex_hull()
-        hull_vol = hull_mesh.get_volume()  # m³
+        hull_vol = hull_mesh.get_volume()  # m^3
     except Exception:
         hull_vol = float(dims[0] * dims[1] * dims[2])  # bounding box fallback
 
@@ -203,7 +203,7 @@ def _populate_extended_features(
         for i in idx:
             nn_idx = tree.query(pts[i], k=min(10, len(pts)))[1]
             nn_normals = normals[nn_idx]
-            # Curvature ≈ variance of normals in neighbourhood
+            # Curvature ~ variance of normals in neighbourhood
             curv_vals.append(float(1.0 - np.abs(nn_normals @ normals[i]).mean()))
         ws.curvature_mean = float(np.mean(curv_vals))
         ws.curvature_std  = float(np.std(curv_vals))
@@ -238,15 +238,15 @@ def _count_normal_clusters(normals: np.ndarray, threshold: float = 0.85) -> int:
             continue
         dot = np.abs(sample @ sample[i])
         mask = dot > threshold
-        if mask.sum() > len(sample) * 0.05:  # at least 5% of points → real cluster
+        if mask.sum() > len(sample) * 0.05:  # at least 5% of points -> real cluster
             n_clusters += 1
         used[mask] = True
     return n_clusters
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Symmetry classification
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _classify_symmetry(
     pcd: "o3d.geometry.PointCloud",
@@ -274,14 +274,14 @@ def _classify_symmetry(
     obb      = pcd.get_minimal_oriented_bounding_box()
     obb_axes = obb.R.T  # rows are OBB principal axes; used only for axis labelling
 
-    # ── Stage 1: PCA eigenvalue analysis — SO2/SO3 candidates ────────────
+    # -- Stage 1: PCA eigenvalue analysis -- SO2/SO3 candidates ------------
     # Use eigenvectors (not OBB axes) so the rotation axis is the actual symmetry axis,
     # not the nearest OBB principal axis (they may differ by a few degrees).
     cov = np.cov(centered.T)
     eigvals, eigvecs = np.linalg.eigh(cov)   # ascending; eigvecs[:,i] = i-th eigenvector
 
     # PCA axes sorted descending by eigenvalue (most-spread first).
-    # Used for the N-fold test: more reliable than minimal OBB axes — for asymmetric
+    # Used for the N-fold test: more reliable than minimal OBB axes -- for asymmetric
     # parts the OBB can return diagonal axes that accidentally pass the Chamfer test.
     sort_idx = np.argsort(eigvals)[::-1]
     pca_axes = eigvecs[:, sort_idx].T        # rows are principal axes, descending variance
@@ -304,7 +304,7 @@ def _classify_symmetry(
                 so2_candidate_lbl = _nearest_axis_label(so2_candidate_vec, obb_axes)
                 break
 
-    # ── Stage 2: geometric confirmation via Chamfer rotation test ────────
+    # -- Stage 2: geometric confirmation via Chamfer rotation test --------
 
     # SO3 candidate: an arbitrary rotation should leave the surface unchanged
     if so3_candidate:
@@ -313,7 +313,7 @@ def _classify_symmetry(
         if _chamfer_distance(centered, _rotate_points(centered, test_axis, 73.0)) < thresh:
             return SYM_SO3, None, None
 
-    # SO2 candidate: 90° AND 45° rotations must both pass (continuous = any angle passes)
+    # SO2 candidate: 90deg AND 45deg rotations must both pass (continuous = any angle passes)
     if so2_candidate_vec is not None:
         rot90 = _rotate_points(centered, so2_candidate_vec, 90.0)
         rot45 = _rotate_points(centered, so2_candidate_vec, 45.0)
@@ -324,15 +324,15 @@ def _classify_symmetry(
     # N-fold test: combine PCA + OBB axes (deduplicated).
     # PCA axes handle asymmetric parts where OBB may be diagonal.
     # OBB axes handle degenerate eigenvalue shapes (cube) where PCA is arbitrary.
-    # ALL multiples of 360/n must pass — prevents false positives from rectangular
-    # cross-section aliasing (e.g. rotating a box 60° about its long axis maps
-    # top-face points near the side wall, but 120° fails and exposes the non-symmetry).
+    # ALL multiples of 360/n must pass -- prevents false positives from rectangular
+    # cross-section aliasing (e.g. rotating a box 60deg about its long axis maps
+    # top-face points near the side wall, but 120deg fails and exposes the non-symmetry).
     nfold_candidates = SC.SYM_NFOLD_CANDIDATES
     sym_map = {6: SYM_C6, 4: SYM_C4, 3: SYM_C3, 2: SYM_C2}
 
     # OBB axes go first so they are preferred over PCA axes during deduplication.
     # PCA axes of an asymmetric part are tilted by the shape asymmetry; that tilt
-    # can cause 180° rotation to reflect points near an adjacent face (geometric
+    # can cause 180deg rotation to reflect points near an adjacent face (geometric
     # coincidence, not symmetry), producing false positives even with multi-angle
     # confirmation.  OBB axes are aligned with the dominant geometric extents and
     # avoid this aliasing.  PCA axes are kept for shapes where OBB is diagonal.
@@ -362,7 +362,7 @@ def _rotate_points(pts: np.ndarray, axis: np.ndarray, angle_deg: float) -> np.nd
     axis = axis / (np.linalg.norm(axis) + 1e-9)
     theta = np.deg2rad(angle_deg)
     c, s = np.cos(theta), np.sin(theta)
-    # Rodrigues: v_rot = v*cos + (axis×v)*sin + axis*(axis·v)*(1-cos)
+    # Rodrigues: v_rot = v*cos + (axisxv)*sin + axis*(axis*v)*(1-cos)
     dot = (pts @ axis)[:, None]
     cross = np.cross(pts, axis)
     return pts * c - cross * s + axis * dot * (1.0 - c)
@@ -376,7 +376,7 @@ def _chamfer_distance(a: np.ndarray, b: np.ndarray) -> float:
     return float((d_ab + d_ba) / 2)
 
 
-# kept for backward compatibility — wraps _classify_symmetry
+# kept for backward compatibility -- wraps _classify_symmetry
 def _check_rotation_symmetry(pcd: "o3d.geometry.PointCloud",
                               threshold_m: float = 0.005) -> Optional[str]:  # noqa: ARG001
     """Return OBB axis label if any symmetry detected, else None. (Legacy wrapper.)"""
@@ -386,14 +386,14 @@ def _check_rotation_symmetry(pcd: "o3d.geometry.PointCloud",
     return None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Natural-language geometry summary (for LLM prompt)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def generate_geometry_summary(ws: WarmStart) -> str:
     """Deterministic natural-language description of part geometry for LLM prompt.
 
-    All interpretive clauses are rule-derived — not LLM-generated — so they
+    All interpretive clauses are rule-derived -- not LLM-generated -- so they
     are auditable and stable across runs.
     """
     lines = []
@@ -411,7 +411,7 @@ def generate_geometry_summary(ws: WarmStart) -> str:
         shape = "prismatic"
 
     lines.append(
-        f"Part shape: {shape}, bounding box {ws.bbox_x_mm:.0f}×{ws.bbox_y_mm:.0f}×{ws.bbox_z_mm:.0f} mm "
+        f"Part shape: {shape}, bounding box {ws.bbox_x_mm:.0f}x{ws.bbox_y_mm:.0f}x{ws.bbox_z_mm:.0f} mm "
         f"(diameter {ws.diameter_mm:.0f} mm, aspect ratio {ws.aspect_ratio:.1f})."
     )
 
@@ -440,11 +440,11 @@ def generate_geometry_summary(ws: WarmStart) -> str:
 
     # Symmetry
     sym_desc = {
-        SYM_ASYMMETRIC: "No rotational symmetry — all orientations are distinct.",
-        SYM_C2:  f"2-fold (180°) rotational symmetry about the {ws.sym_axis}-axis.",
-        SYM_C3:  f"3-fold (120°) rotational symmetry about the {ws.sym_axis}-axis.",
-        SYM_C4:  f"4-fold (90°) rotational symmetry about the {ws.sym_axis}-axis.",
-        SYM_C6:  f"6-fold (60°) rotational symmetry about the {ws.sym_axis}-axis.",
+        SYM_ASYMMETRIC: "No rotational symmetry -- all orientations are distinct.",
+        SYM_C2:  f"2-fold (180deg) rotational symmetry about the {ws.sym_axis}-axis.",
+        SYM_C3:  f"3-fold (120deg) rotational symmetry about the {ws.sym_axis}-axis.",
+        SYM_C4:  f"4-fold (90deg) rotational symmetry about the {ws.sym_axis}-axis.",
+        SYM_C6:  f"6-fold (60deg) rotational symmetry about the {ws.sym_axis}-axis.",
         SYM_SO2: f"Continuous rotational symmetry about the {ws.sym_axis}-axis (cylinder/disc). "
                  "Angular error about this axis is physically meaningless.",
         SYM_SO3: "Spherical symmetry (all rotations equivalent). "
@@ -455,18 +455,18 @@ def generate_geometry_summary(ws: WarmStart) -> str:
     # PPF distQ hint based on surface character
     if ws.curvature_mean < 0.1 and ws.n_flat_clusters >= 2:
         lines.append(
-            "Feature density: smooth/flat surfaces → few distinctive PPF features → "
-            "favor finer distQuantification (lower value, e.g. 0.5–1.0)."
+            "Feature density: smooth/flat surfaces -> few distinctive PPF features -> "
+            "favor finer distQuantification (lower value, e.g. 0.5-1.0)."
         )
     elif ws.curvature_mean > 0.3:
         lines.append(
-            "Feature density: high curvature → rich PPF features → "
-            "coarser distQuantification (1.0–2.0) sufficient."
+            "Feature density: high curvature -> rich PPF features -> "
+            "coarser distQuantification (1.0-2.0) sufficient."
         )
 
     # Holes
     if ws.has_holes:
-        lines.append("Note: mesh has open boundaries / holes — visible surface matching may be unreliable.")
+        lines.append("Note: mesh has open boundaries / holes -- visible surface matching may be unreliable.")
 
     return " ".join(lines)
 
@@ -484,7 +484,7 @@ def get_feature_vector(ws: WarmStart) -> list:
     }.get(ws.symmetry_class, [0,0,0,0,0,0,0])
 
     return [
-        float(ws.diameter_mm / 1000.0),           # normalised to ~[0,1] for ≤1000mm parts
+        float(ws.diameter_mm / 1000.0),           # normalised to ~[0,1] for <=1000mm parts
         float(ws.aspect_ratio / 10.0),
         float(ws.flatness_ratio / 10.0),
         float(ws.normal_concentration),
@@ -494,20 +494,20 @@ def get_feature_vector(ws: WarmStart) -> list:
         float(ws.curvature_std),
         float(ws.n_flat_clusters / 10.0),
         float(1.0 if ws.has_holes else 0.0),
-        float(ws.surface_area_mm2 / 1e6),         # normalised to ~[0,1] for ≤1m² parts
+        float(ws.surface_area_mm2 / 1e6),         # normalised to ~[0,1] for <=1m^2 parts
         float(ws.volume_mm3 / 1e6),
     ] + [float(x) for x in sym_onehot]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # I/O helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def load_reference_pcd(model_path: str) -> o3d.geometry.PointCloud:
     """Load a PLY point cloud, estimating normals if the file carries none."""
     # Open3D returns an EMPTY cloud for a missing path, which then fails several frames
     # later inside orient_normals_consistent_tangent_plane with "No normals in the
-    # PointCloud" — naming the real problem here saves that hunt.
+    # PointCloud" -- naming the real problem here saves that hunt.
     if not os.path.isfile(model_path):
         raise FileNotFoundError(f"reference cloud not found: {model_path}")
     pcd = o3d.io.read_point_cloud(model_path)
@@ -539,7 +539,7 @@ if __name__ == "__main__":
     print(f"\n--- WarmStart for {part} ---")
     print(f"  diameter         = {ws.diameter_m*1e3:.1f} mm")
     print(f"  longest_extent   = {ws.longest_extent_m*1e3:.1f} mm")
-    print(f"  surface_area     = {ws.surface_area_m2*1e6:.0f} mm²")
+    print(f"  surface_area     = {ws.surface_area_m2*1e6:.0f} mm^2")
     print(f"  flatness_ratio   = {ws.flatness_ratio:.2f}")
     print(f"  normal_conc      = {ws.normal_concentration:.2f}")
     print(f"  prefer_edge      = {ws.prefer_edge}")
@@ -549,9 +549,9 @@ if __name__ == "__main__":
     print(f"  sym_order        = {ws.sym_order}")
     print(f"  sym_axis         = {ws.sym_axis}")
     print(f"  symmetry_class   = {ws.symmetry_class}")
-    print(f"\n  bbox             = {ws.bbox_x_mm:.0f}×{ws.bbox_y_mm:.0f}×{ws.bbox_z_mm:.0f} mm")
+    print(f"\n  bbox             = {ws.bbox_x_mm:.0f}x{ws.bbox_y_mm:.0f}x{ws.bbox_z_mm:.0f} mm")
     print(f"  aspect_ratio     = {ws.aspect_ratio:.2f}")
-    print(f"  volume           = {ws.volume_mm3:.0f} mm³")
+    print(f"  volume           = {ws.volume_mm3:.0f} mm^3")
     print(f"  convexity        = {ws.convexity:.3f}")
     print(f"  curvature        = mean={ws.curvature_mean:.3f}  std={ws.curvature_std:.3f}")
     print(f"  n_flat_clusters  = {ws.n_flat_clusters}")

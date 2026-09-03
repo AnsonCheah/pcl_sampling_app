@@ -8,14 +8,14 @@ Run::
 Until now the module has only been tested against synthetic primitives whose answers we
 wrote ourselves, which cannot catch a shared misconception between the test and the code.
 BOP ships per-object ``symmetries_discrete`` and ``symmetries_continuous`` in
-``models_info.json`` — independently authored ground truth for 30 industrial parts — so this
+``models_info.json`` -- independently authored ground truth for 30 industrial parts -- so this
 is the first external check it has had.
 
 Profiles are computed here, straight from the BOP meshes in ``mesh_raw/``.  This script needs
 no scene generation and no exported bundle, so it runs immediately after
 ``bench/fetch_dataset.py``.  That is sound because the comparison reads only ``is_global`` and
 ``fold``, both of which are frame-independent, and ``analyse_ambiguity`` centres its input
-itself — so a mesh in BOP's own coordinates, in millimetres, is fine once unit-scaled.
+itself -- so a mesh in BOP's own coordinates, in millimetres, is fine once unit-scaled.
 
 The verdict moves with sampling density
     ``analyse_ambiguity`` is deterministic for a fixed (mesh, cloud, cfg, seed) but **not**
@@ -29,7 +29,7 @@ Reading the result
     The comparison is only meaningful on **global** symmetry. BOP annotates symmetries of
     the whole object; ``AmbiguityProfile`` additionally reports *view-dependent* axes, which
     map a visible patch elsewhere without mapping the model onto itself. A part BOP calls
-    asymmetric can legitimately carry view-dependent axes — that is the capability the module
+    asymmetric can legitimately carry view-dependent axes -- that is the capability the module
     exists for and precisely what the BOP annotation cannot express. So a disagreement in the
     ``is_global`` column is a bug; a view-dependent axis on an "asymmetric" part is not.
 """
@@ -58,7 +58,7 @@ def bop_expectation(rec: dict) -> tuple:
     """``(class, fold)`` implied by a BOP entry.
 
     ``symmetries_discrete`` lists the non-identity members of the group, so N entries means
-    a C(N+1) rotation — a single 180-degree transform is C2, not C1.
+    a C(N+1) rotation -- a single 180-degree transform is C2, not C1.
     """
     if rec.get("symmetries_continuous"):
         return "continuous", 0
@@ -147,7 +147,7 @@ def main() -> None:
                 for k, rec in json.load(f).items():
                     info[f"obj_{int(k):06d}"] = rec
     if not info:
-        sys.exit("no models_info.json under mesh_raw/ — run bench/fetch_dataset.py first")
+        sys.exit("no models_info.json under mesh_raw/ -- run bench/fetch_dataset.py first")
 
     wanted = sorted(info) if args.parts is None else list(args.parts)
     unknown = [p for p in wanted if p not in info]
@@ -161,7 +161,7 @@ def main() -> None:
 
     shared = sorted(set(info) & set(profiles))
     if not shared:
-        sys.exit("no parts could be analysed — check that mesh_raw/ holds the meshes named "
+        sys.exit("no parts could be analysed -- check that mesh_raw/ holds the meshes named "
                  "in models_info.json (run bench/fetch_dataset.py)")
 
     print(f"\n{len(shared)} parts with both a BOP annotation and a computed profile\n")

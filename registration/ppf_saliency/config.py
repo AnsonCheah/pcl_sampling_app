@@ -10,19 +10,19 @@ Three groups:
   * **Eliminated by design.**  The scene reference-point step disappears because we match
     one segmented instance at a time and the cluster is small enough to use every point.
     The hypothesis count disappears because one cluster yields one pose.
-    (The per-bucket cap does *not* disappear — see ``max_bucket_entries``. Vote dedup fixes
+    (The per-bucket cap does *not* disappear -- see ``max_bucket_entries``. Vote dedup fixes
     the bias that cap was patching, but not the cost, so the cap survives as a derived
     compute budget rather than a tuned number.)
   * **Derived from part geometry.**  Sampling distance, pair-distance bounds, and the pose
     clustering tolerances.
   * **Derived from a one-time sensor calibration.**  The angular binning and the
     verification tolerance follow from depth noise.  This is a per-*camera* constant, not a
-    per-part one, so it does not break the scale constraint — it is the same kind of
+    per-part one, so it does not break the scale constraint -- it is the same kind of
     absolute sensor-physics floor that ``AmbiguityConfig`` already documents ("The absolute
     floors exist for sensor-physics reasons, not as size rules").
 
-What is left is two *application* policies — ``model_target_points`` (a compute budget) and
-the acceptance threshold — both shared across every part.
+What is left is two *application* policies -- ``model_target_points`` (a compute budget) and
+the acceptance threshold -- both shared across every part.
 
 ``PPFConfig.derive`` records which bound actually bound each value in ``.provenance``, so
 "why is tau 4.6 mm" has an answer without re-deriving it by hand.
@@ -43,8 +43,8 @@ __all__ = ["SensorProfile", "PPFConfig", "MECHVISION_NAMES"]
 MECHVISION_NAMES = {
     "tau": "distQuantification (x model diameter)",
     "n_alpha": "angleQuantification",
-    "scene_step": "referredStep  (eliminated here — see module docstring)",
-    "vote_cap": "maxNumOfPointPairsPerFeature  (kept, but derived — see max_bucket_entries)",
+    "scene_step": "referredStep  (eliminated here -- see module docstring)",
+    "vote_cap": "maxNumOfPointPairsPerFeature  (kept, but derived -- see max_bucket_entries)",
     "verify_tol": "voxelLengthRange",
 }
 
@@ -127,7 +127,7 @@ class PPFConfig:
         ``tau`` is the one that matters, because cost scales as its inverse *square* on both
         the model and the scene side.  Measured on the bunny at 100 instances: 3.6 M scene
         pair-evaluations at tau = 8% of diameter, but 305 M at 2%.  So tau cannot simply be
-        "as fine as the sensor allows" — it is bracketed:
+        "as fine as the sensor allows" -- it is bracketed:
 
             lower   sensor/cloud resolution; below it the bins quantise noise
             upper   the smallest discriminative feature (if known), else a fraction of D
@@ -137,10 +137,10 @@ class PPFConfig:
         not from a surface-area estimate.  The obvious closed form, ``tau = sqrt(SA/M)`` with
         ``SA ~ N*s^2``, is wrong by a large constant: for a Poisson-sampled cloud the median
         nearest-neighbour distance is ``0.4697/sqrt(density)``, not ``1/sqrt(density)``, so
-        that formula understates area by ~4.5x — measured 4.63x on a box whose true area is
+        that formula understates area by ~4.5x -- measured 4.63x on a box whose true area is
         known.  Since ``M`` scales as ``tau^-2`` and cost as ``M^2``, a 2x error in tau is a
         ~20x error in work.
-        Bisecting on the real count is regime-independent — it does not care whether the
+        Bisecting on the real count is regime-independent -- it does not care whether the
         cloud is Poisson-sampled, gridded, or already decimated.
 
         In practice the compute budget binds and the bounds are slack, which is the honest
@@ -149,7 +149,7 @@ class PPFConfig:
 
         Parameters
         ----------
-        model : PointCloud / TriangleMesh / (N,3) array — the reference model
+        model : PointCloud / TriangleMesh / (N,3) array -- the reference model
         min_feature_size : smallest feature that must stay resolved (m).  Optional; when it
             is not supplied the upper bound falls back to ``max_tau_frac * diameter``, which
             is a coverage bound rather than a feature bound.
@@ -240,7 +240,7 @@ def _voxel_count(pts: np.ndarray, tau: float) -> int:
     """Points surviving a voxel downsample at ``tau``. Cheap enough to bisect on.
 
     Uses Open3D's binning so the bisection converges on the count the matcher will actually
-    get — ``np.unique(axis=0)`` on floor-divided keys anchors the grid at the world origin
+    get -- ``np.unique(axis=0)`` on floor-divided keys anchors the grid at the world origin
     while Open3D anchors it at the cloud's own bounding box, and those disagree by a couple
     of points. Small, but it is free to just measure the real thing.
     """

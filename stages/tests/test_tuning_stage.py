@@ -1,10 +1,10 @@
 """
-test_tuning_stage.py — headless tests for the TUNING stage's button custom functions
+test_tuning_stage.py -- headless tests for the TUNING stage's button custom functions
 -------------------------------------------------------------------------------------
 Run:  python -m pytest stages/tests/test_tuning_stage.py -q
 
 Every check runs headless (MeshSamplingApp(headless=True)) and touches no live
-MechVision — temp dirs, tiny point clouds, and in-memory optuna studies stand in.
+MechVision -- temp dirs, tiny point clouds, and in-memory optuna studies stand in.
 Module-level path constants (_SYNTH_ROOT, _RESULTS_DIR) are monkeypatched to tmp
 dirs so nothing under the real output/ tree is created or deleted.
 """
@@ -27,7 +27,7 @@ def tuning(headless_app):
     return headless_app.stages[Stage.TUNING]
 
 
-# ── scene enumeration / deletion ────────────────────────────────────────────
+# -- scene enumeration / deletion --------------------------------------------
 
 def test_scan_scenes_sorted(tuning, tmp_path, monkeypatch):
     monkeypatch.setattr(ts, "_SYNTH_ROOT", str(tmp_path))
@@ -53,7 +53,7 @@ def test_delete_scene(tuning, tmp_path):
     assert not scene.exists()
 
 
-# ── tuning-artifact deletion (Clear Tuning Result) ──────────────────────────
+# -- tuning-artifact deletion (Clear Tuning Result) --------------------------
 
 def _write_artifacts(tuning):
     db = tuning._db_path()
@@ -76,7 +76,7 @@ def test_delete_tuning_artifacts(tuning, tmp_path, monkeypatch):
 
 
 def test_ordinary_clear_keeps_artifacts(tuning, tmp_path, monkeypatch):
-    """clear_downstream() (an ordinary state clear) must NOT delete the DB/cache —
+    """clear_downstream() (an ordinary state clear) must NOT delete the DB/cache --
     only reset() (the Clear button) does."""
     monkeypatch.setattr(ts, "_RESULTS_DIR", str(tmp_path))
     db, cache = _write_artifacts(tuning)
@@ -92,7 +92,7 @@ def test_reset_deletes_artifacts(tuning, tmp_path, monkeypatch):
 
 
 def test_delete_happy_path_does_not_kill_lockers(tuning, tmp_path, monkeypatch):
-    """No lock → unlink succeeds first try; the blunt locker-kill is never invoked."""
+    """No lock -> unlink succeeds first try; the blunt locker-kill is never invoked."""
     monkeypatch.setattr(ts, "_RESULTS_DIR", str(tmp_path))
     called = []
     monkeypatch.setattr(tuning, "_release_db_lockers", lambda: called.append(1))
@@ -102,7 +102,7 @@ def test_delete_happy_path_does_not_kill_lockers(tuning, tmp_path, monkeypatch):
 
 
 def test_delete_retries_after_releasing_lockers(tuning, monkeypatch):
-    """A locked DB → _release_db_lockers() is called, then the retry succeeds."""
+    """A locked DB -> _release_db_lockers() is called, then the retry succeeds."""
     monkeypatch.setattr(ts.time, "sleep", lambda *_: None)
     calls = {"unlink": 0, "release": 0}
 
@@ -120,7 +120,7 @@ def test_delete_retries_after_releasing_lockers(tuning, monkeypatch):
     assert calls["unlink"] >= 2
 
 
-# ── Pareto options ──────────────────────────────────────────────────────────
+# -- Pareto options ----------------------------------------------------------
 
 def test_pareto_options_empty_without_optimizer(tuning):
     assert tuning._optimizer is None
@@ -142,7 +142,7 @@ def test_pareto_options_from_stub_optimizer(tuning):
     assert opts[0][1] == {"c": 0} and opts[1][2] == {"f": 1}
 
 
-# ── overlay assembly ────────────────────────────────────────────────────────
+# -- overlay assembly --------------------------------------------------------
 
 def _write_scene(scene_dir, n=8):
     scene_dir = str(scene_dir)
@@ -177,7 +177,7 @@ def test_build_overlay_one_ref_per_pose(tuning, tmp_path, monkeypatch):
     assert all(len(g[2]) == 3 for g in geoms)
 
 
-# ── trial progress ──────────────────────────────────────────────────────────
+# -- trial progress ----------------------------------------------------------
 
 def test_trial_progress(tuning):
     study = optuna.create_study(directions=["maximize", "minimize"])
@@ -195,12 +195,12 @@ def test_trial_progress_caps_at_one(tuning):
     study = optuna.create_study(directions=["maximize", "minimize"])
     for _ in range(5):
         study.add_trial(optuna.trial.create_trial(params={}, distributions={}, values=[0.5, 1.0]))
-    tuning._total_trials = 2   # fewer than actual → fraction must clamp to 1.0
+    tuning._total_trials = 2   # fewer than actual -> fraction must clamp to 1.0
     frac, _ = tuning._trial_progress(study, study.trials[-1])
     assert frac == 1.0
 
 
-# ── resume budget / progress total ──────────────────────────────────────────
+# -- resume budget / progress total ------------------------------------------
 
 def test_resolve_trial_budget():
     assert ts.TuningStage._resolve_trial_budget("restart", 200, 50) == 50
@@ -212,7 +212,7 @@ def test_extended_total_drives_progress(tuning):
     """Extend +50 on a 200-trial study: total=250, so 201 done reads Trial 201/250 (~80%),
     not the old 201/50 overflow."""
     budget = ts.TuningStage._resolve_trial_budget("extend", n_prior=200, slider=50)
-    tuning._total_trials = max(1, budget)   # n_rounds=1 → no refine term
+    tuning._total_trials = max(1, budget)   # n_rounds=1 -> no refine term
     study = optuna.create_study(directions=["maximize", "minimize"])
     for _ in range(201):
         study.add_trial(optuna.trial.create_trial(params={}, distributions={}, values=[0.5, 1.0]))
@@ -221,14 +221,14 @@ def test_extended_total_drives_progress(tuning):
     assert 0.79 < frac < 0.81
 
 
-# ── current-eval detail line ────────────────────────────────────────────────
+# -- current-eval detail line ------------------------------------------------
 
 def test_eval_detail_perfect_match(tuning):
     poses = [[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
              [0.1, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]]
-    detail = tuning._eval_detail(poses, poses)      # identical → 0 error, all matched
+    detail = tuning._eval_detail(poses, poses)      # identical -> 0 error, all matched
     assert "avg trans 0.0mm" in detail
-    assert "rot 0.0°" in detail
+    assert "rot 0.0deg" in detail
     assert "matched 2/2" in detail
 
 
@@ -240,7 +240,7 @@ def test_eval_detail_no_match(tuning):
     assert "0/1" in detail
 
 
-# ── Stop toggle → study.stop() ──────────────────────────────────────────────
+# -- Stop toggle -> study.stop() ----------------------------------------------
 
 class _StopStudy:
     def __init__(self):
@@ -255,15 +255,15 @@ def test_stop_flag_calls_study_stop(tuning):
     study = _StopStudy()
     tuning._stop_requested = False
     tuning._on_trial_complete(study, None)
-    assert not study.stopped              # no stop requested → study keeps running
+    assert not study.stopped              # no stop requested -> study keeps running
     tuning._stop_requested = True
     tuning._on_trial_complete(study, None)
-    assert study.stopped                  # Stop requested → graceful study.stop()
+    assert study.stopped                  # Stop requested -> graceful study.stop()
 
 
 def test_worker_done_clears_run_state(tuning):
     """After a (stopped) run finishes, the flags reset so the Run/Stop toggle returns to
-    'Run Tuning' instead of getting stuck on 'Stopping…'."""
+    'Run Tuning' instead of getting stuck on 'Stopping...'."""
     tuning._running = tuning._tuning_active = tuning._stop_requested = True
     tuning._on_worker_done()
     assert tuning._running is False
@@ -271,7 +271,7 @@ def test_worker_done_clears_run_state(tuning):
     assert tuning._stop_requested is False
 
 
-# ── selection-preserving repopulate ─────────────────────────────────────────
+# -- selection-preserving repopulate -----------------------------------------
 
 class _StubCombo:
     def __init__(self):
@@ -292,7 +292,7 @@ def test_repopulate_preserves_selection():
         combo.add_item(n)
     combo.selected_text = "b"
     ts.TuningStage._repopulate(combo, ["a", "b", "c"])
-    assert combo.selected_text == "b"    # still present → preserved
+    assert combo.selected_text == "b"    # still present -> preserved
 
 
 def test_repopulate_resets_when_gone():
@@ -304,7 +304,7 @@ def test_repopulate_resets_when_gone():
     assert combo.selected_text == "a"    # falls back to default (first item)
 
 
-# ── navigation lock while a worker runs (general BaseStage behaviour) ─────────
+# -- navigation lock while a worker runs (general BaseStage behaviour) ---------
 
 class _FakeThread:
     def __init__(self, alive):
@@ -315,14 +315,14 @@ class _FakeThread:
 
 def test_nav_enabled_locks_while_worker_runs(tuning):
     tuning.worker_thread = None
-    assert tuning.nav_enabled() is True            # idle → nav free
+    assert tuning.nav_enabled() is True            # idle -> nav free
     tuning.worker_thread = _FakeThread(alive=True)
-    assert tuning.nav_enabled() is False           # worker running → nav locked
+    assert tuning.nav_enabled() is False           # worker running -> nav locked
     tuning.worker_thread = _FakeThread(alive=False)
-    assert tuning.nav_enabled() is True            # worker finished → nav free
+    assert tuning.nav_enabled() is True            # worker finished -> nav free
 
 
-# ── model-frame staleness guard ──────────────────────────────────────────────
+# -- model-frame staleness guard ----------------------------------------------
 
 def _ref_cloud(n=600, seed=0, shift=(0.0, 0.0, 0.0)):
     rng = np.random.default_rng(seed)

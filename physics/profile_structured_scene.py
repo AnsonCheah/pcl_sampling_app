@@ -38,7 +38,7 @@ MODES = {                       # label -> (arrangement, structure_type)
 
 
 def _mesh_from_shape(shape):
-    """Reuse the synthetic primitives from the bin-scene tests — no STL required."""
+    """Reuse the synthetic primitives from the bin-scene tests -- no STL required."""
     from physics.tests.test_bin_scene import generate_test_mesh
     return generate_test_mesh(shape)
 
@@ -128,7 +128,7 @@ def main():
     for mode in args.modes:
         runs = [run_one(part_mesh, convex_meshes, mode, args.n_parts, args.settle_time)
                 for _ in range(args.repeat)]
-        # Median by wall-clock settle time — robust to a single noisy run.
+        # Median by wall-clock settle time -- robust to a single noisy run.
         runs.sort(key=lambda r: r["settle_s"])
         rows.append(runs[len(runs) // 2])
 

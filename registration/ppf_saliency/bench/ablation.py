@@ -12,7 +12,7 @@ hide the thing the sweep exists to find: the mission is that a method works for 
 as well as for part #1, so an arm that wins on cylinders and loses on brackets is a failure
 of exactly that claim, and pooling would report it as a modest win.
 
-Every recall figure is printed with a 95% confidence interval. That is not decoration — at
+Every recall figure is printed with a 95% confidence interval. That is not decoration -- at
 26 instances the half-width is +/- 19 points, wider than any arm difference measured so far.
 Reading a 4-point gap as a result at that sample size is the single easiest mistake to make
 here, so the interval is carried all the way to the summary table.
@@ -142,7 +142,7 @@ def run_part(part: str, arm_names: List[str], models_info: Dict[str, dict],
 
     ``max_instances`` caps the per-part budget, and matters more than it looks. Instance
     count per scene scales with how many copies fit in the bin, so a 63 mm part yields ~160
-    per scene while a 190 mm part yields ~20 — an 8x imbalance. Left uncapped, the pooled
+    per scene while a 190 mm part yields ~20 -- an 8x imbalance. Left uncapped, the pooled
     table becomes a weighted average dominated by whichever parts happen to be small, which
     is precisely the "works on part #1 but not part #5000" failure the sweep is meant to
     detect. Capping equalises the contribution per part.
@@ -341,7 +341,7 @@ def main() -> None:
         res = run_part(part, arm_names, models_info, args.scenes, args.model_points,
                        args.max_instances, args.ambiguity)
         if not res:
-            print("    no scenes — skipped")
+            print("    no scenes -- skipped")
             continue
         raw[part] = res
         for arm, rows in res.items():
@@ -352,7 +352,7 @@ def main() -> None:
     print(f"\n{'=' * 100}")
     for cls in sorted(by_class):
         _print_table(f"SYMMETRY CLASS: {cls}", by_class[cls])
-    _print_table("POOLED (all parts — read the per-class tables first)", pooled)
+    _print_table("POOLED (all parts -- read the per-class tables first)", pooled)
 
     n_tot = max((len(v) for v in pooled.values()), default=0)
     half = 1.96 * float(np.sqrt(0.25 / n_tot)) if n_tot else float("nan")

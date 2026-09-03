@@ -114,8 +114,8 @@ class ImportMeshStage(BaseStage):
         self._pending = None
 
         # Validate before anything reads the bounding box. Export debris skews the AABB, which
-        # otherwise drives the unit heuristic below, the camera framing, and — through the convex
-        # hulls — the partition/tray cell sizing in MujocoBinScene.
+        # otherwise drives the unit heuristic below, the camera framing, and -- through the convex
+        # hulls -- the partition/tray cell sizing in MujocoBinScene.
         cleaned, report = analyze_mesh(mesh, bin_limit=MAX_BIN_DIM[:3])
         print(f"[MESH] {self.file_path.name}\n{report.summary()}")
         if report.errors:
@@ -155,7 +155,7 @@ class ImportMeshStage(BaseStage):
         if report.has_findings():
             self._pending = (cleaned, report)
             # Headless has no _refresh_ui to hang the prompt off, and choice_dialog resolves to
-            # its first option without a dialog — so batch runs auto-remove and log here.
+            # its first option without a dialog -- so batch runs auto-remove and log here.
             if self.app.headless:
                 self._resolve_pending()
         print(f"mesh loaded")
@@ -164,7 +164,7 @@ class ImportMeshStage(BaseStage):
     # Import findings
     # ===============================
     def _resolve_pending(self):
-        """Surface the import report. Debris is a choice (GUI) — `app.choice_dialog` runs the
+        """Surface the import report. Debris is a choice (GUI) -- `app.choice_dialog` runs the
         first option with no dialog when headless, so batch runs auto-remove and log.
 
         `_pending` is cleared up front, so the prompt fires once per import: `_refresh_ui` runs
@@ -182,7 +182,7 @@ class ImportMeshStage(BaseStage):
                  ("Keep as-is", self._keep_original)],
                 title="Mesh Import Check")
         else:
-            # Warnings only (oversize, or debris removal refused) — informational.
+            # Warnings only (oversize, or debris removal refused) -- informational.
             self.app.confirm_dialog(report.summary(), on_ok=lambda: None,
                                     title="Mesh Import Check")
 
@@ -202,7 +202,7 @@ class ImportMeshStage(BaseStage):
     def center_mesh(self):
         """Translate mesh (and all downstream clouds) so the mesh AABB centre is at the world
         origin. Anchored on the bounding-box midpoint rather than get_center() (the vertex mean),
-        which is biased by tessellation density — a densely meshed fillet drags it off-centre."""
+        which is biased by tessellation density -- a densely meshed fillet drags it off-centre."""
         if self.app.target_mesh is None:
             return
         center = np.asarray(self.app.target_mesh.get_axis_aligned_bounding_box().get_center())

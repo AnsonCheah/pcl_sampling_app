@@ -2,11 +2,11 @@
 
 A part flips during matching when the surface patch visible from one viewpoint fits the
 model in more than one place.  Global symmetry is the special case where *every* viewpoint
-is ambiguous, so this module detects both with one mechanism — there is no separate
+is ambiguous, so this module detects both with one mechanism -- there is no separate
 "symmetric part" code path.
 
 The search is restricted to **rotations about an arbitrary axis** (direction ``a``, point
-``p``, angle ``theta``) rather than general SE(3) — exactly the family MechVision's
+``p``, angle ``theta``) rather than general SE(3) -- exactly the family MechVision's
 ``rotationStrategy`` + ``angleStep`` can act on.  It is Mitra/Guibas/Pauly
 transformation-space voting (SIGGRAPH 2006) specialised to rotations, in three stages:
 
@@ -18,7 +18,7 @@ transformation-space voting (SIGGRAPH 2006) specialised to rotations, in three s
      against that same measure (``_explains``, ``_refine_axis``)
 
 Because ``p`` is voted for rather than assumed, the recovered axis need not pass through
-the centroid — which is the whole point, since a feature's symmetry axis generally does
+the centroid -- which is the whole point, since a feature's symmetry axis generally does
 not.  On a cylinder joined to an off-axis block, the axis is recovered to 0.4 degrees and
 0.11 mm while sitting 7.8 mm from the centroid and 19 mm from the AABB centre.
 
@@ -31,7 +31,7 @@ Two formulations were tried and rejected; both fail on precisely the parts this 
     vanishes exactly on the true correspondences: the construction is degenerate on the
     symmetric case.
   * Ranking directions by the autocorrelation of the projected normal-angle histogram.
-    Vacuous for 2-fold symmetry — any closed body has its faces in +/- normal pairs, so
+    Vacuous for 2-fold symmetry -- any closed body has its faces in +/- normal pairs, so
     that histogram is 180-degree symmetric about every direction.  Measured on a
     100x30x20 box, an arbitrary tilted direction scored 0.9997 against 0.9989 / 0.9894 /
     0.9992 for the three true axes.
@@ -77,9 +77,9 @@ __all__ = [
 ]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Configuration
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @dataclass
 class AmbiguityConfig:
@@ -137,7 +137,7 @@ class AmbiguityConfig:
     # An axis is global if it preserves the whole model, OR is ambiguous from essentially
     # every viewpoint while still explaining most of the surface. Coverage alone is too
     # strict for manufactured parts; view_fraction alone is too permissive. The two classes
-    # are separated by only 0.006 of area_fraction — read the README before retuning, and
+    # are separated by only 0.006 of area_fraction -- read the README before retuning, and
     # prefer a published annotation where one exists.
     global_area_frac: float = 0.95        # coverage above which an axis preserves the whole model
     global_view_frac: float = 0.98
@@ -154,6 +154,17 @@ class AmbiguityConfig:
     axis_pt_tol_frac: float = 0.03
     fold_candidates: Tuple[int, ...] = (2, 3, 4, 6, 8, 12)
     continuous_probes: int = 5
+    # A candidate fold order is accepted once a STRICT MAJORITY of its non-trivial wanted
+    # angles pass the explains-probe, not all of them. A part can have a genuine,
+    # exploitable periodicity (e.g. 3 of 4 quadrants around a feature carrying an
+    # identical flat plane) without being a true global symmetry -- requiring every angle
+    # to pass reports those as fold 1 / angleStep 360, which is MechVision's "off" and
+    # leaves the real ambiguity unsearched. Calibrated on 25333MB000's disc axis: 90/270
+    # explain 0.489/0.481 against a bar of 0.440 while 180 explains only 0.317 -- 2 of 3
+    # passing is enough to justify a 90-degree search step even though the axis is not
+    # globally 4-fold symmetric. This is a strict relaxation of the old all-pass rule, so
+    # every case that already passed strictly (hex prism, box, ...) is unaffected.
+    fold_pass_fraction: float = 0.5
     # An axis is "significant" if it affects enough viewpoints to matter. This is a
     # frequency test on view_fraction, deliberately independent of the ranking score, so
     # retuning the exponent below cannot silently change how many axes a part is said to
@@ -166,14 +177,14 @@ class AmbiguityConfig:
     # per-axis metrics, so `rank_axes` can retune it without re-running the analysis.
     rank_area_exponent: float = 2.0
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Result types
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @dataclass
 class AmbiguityAxis:
     direction: np.ndarray            # (3,) unit
-    point: np.ndarray                # (3,) a point ON the axis — NOT a centroid
+    point: np.ndarray                # (3,) a point ON the axis -- NOT a centroid
     fold: int                        # 2,3,4,6,...; 0 = continuous
     angles_deg: List[float]          # supported rotation angles
     is_global: bool                  # preserves the whole model, not just some views
@@ -257,9 +268,9 @@ class AmbiguityProfile:
                        per_view=views)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Visibility sweep
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _visibility_masks(mesh: o3d.geometry.TriangleMesh,
                       pts: np.ndarray,
@@ -320,12 +331,12 @@ def _visibility_masks(mesh: o3d.geometry.TriangleMesh,
     return visible, view_dirs
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Rotation-axis voting
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _local_descriptor(pts: np.ndarray, k: int) -> np.ndarray:
-    """PCA surface variation lambda0 / sum(lambda) per point — cheap rotation-invariant signature."""
+    """PCA surface variation lambda0 / sum(lambda) per point -- cheap rotation-invariant signature."""
     tree = cKDTree(pts)
     _, idx = tree.query(pts, k=min(k, len(pts)))
     nbrs = pts[idx]                                    # (N, k, 3)
@@ -353,7 +364,7 @@ def _candidate_directions(normals: np.ndarray,
     criterion.  That test is vacuous for 2-fold symmetry: any closed body has its faces
     in +/- normal pairs, so the projected normal-angle histogram is 180-degree symmetric
     about *every* direction.  Measured on a 100x30x20 box, the exact axes score 0.9989 /
-    0.9894 / 0.9992 while an arbitrary tilted direction scores 0.9997 — the criterion
+    0.9894 / 0.9992 while an arbitrary tilted direction scores 0.9997 -- the criterion
     ranks a bogus direction above all three true ones.
 
     So generate, don't rank.  Structured directions come first because the rotation axes
@@ -486,7 +497,7 @@ def _vote_centres(u: np.ndarray,
 
         p = (I - R_theta)^-1 (u_j - R_theta u_i)
 
-    There is no degeneracy here — which is the point of splitting direction from centre.
+    There is no degeneracy here -- which is the point of splitting direction from centre.
     The centre is voted, never assumed, so an axis that misses the centroid is found
     exactly as easily as one through it.
 
@@ -511,7 +522,7 @@ def _vote_centres(u: np.ndarray,
     out: List[Tuple[np.ndarray, float, int]] = []
 
     for ang in angles_deg:
-        # The in-plane normal rotation must equal the rotation angle — a strong, cheap
+        # The in-plane normal rotation must equal the rotation angle -- a strong, cheap
         # correspondence test that costs one comparison per pair.
         sel = np.abs((dpsi - ang + 180.0) % 360.0 - 180.0) < cfg.theta_bin_deg
         if sel.sum() < cfg.min_votes:
@@ -549,7 +560,7 @@ def _vote_rotation_axes(pts: np.ndarray,
 
     Stage A fixes the axis *direction* from the normal distribution (centre-free);
     stage B votes the axis *point* with the angle known.  Recall matters far more than
-    precision here — every candidate is verified against the full cloud afterwards.
+    precision here -- every candidate is verified against the full cloud afterwards.
 
     Returns ``(direction, point, angle_deg, n_votes)`` candidates, best first.
     """
@@ -589,9 +600,9 @@ def _vote_rotation_axes(pts: np.ndarray,
     return out[: cfg.max_candidates]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Verification
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _rotation_about(direction: np.ndarray, point: np.ndarray, angle_deg: float
                     ) -> Tuple[np.ndarray, np.ndarray]:
@@ -612,7 +623,7 @@ def _explains(pts: np.ndarray,
 
     ``pts``/``normals`` are the query set (which may be a subsample); ``tree`` and
     ``tree_normals`` describe the full surface being matched against, so the two must be
-    kept separate — indices returned by the tree address ``tree_normals``.
+    kept separate -- indices returned by the tree address ``tree_normals``.
 
     Geometry alone is not enough: a point can land near the surface with an inverted
     normal (a thin plate maps onto its own back face).  Normal agreement is required too.
@@ -625,16 +636,16 @@ def _explains(pts: np.ndarray,
     return ok & (cos > normal_cos_tol)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Fold fitting and grouping
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _is_global(view_fraction: float, area_fraction: float, cfg: AmbiguityConfig) -> bool:
     """Does this axis map the whole model onto itself, for practical purposes?
 
     Either it preserves nearly all the surface, **or** it is ambiguous from essentially
     every viewpoint. See ``AmbiguityConfig.global_view_frac`` for why the second clause is
-    needed — coverage alone missed 10 of the 27 symmetric T-LESS parts.
+    needed -- coverage alone missed 10 of the 27 symmetric T-LESS parts.
     """
     return bool(area_fraction > cfg.global_area_frac
                 or (view_fraction >= cfg.global_view_frac
@@ -646,7 +657,7 @@ def reclassify_global(profile: "AmbiguityProfile",
     """Recompute ``is_global`` in place from each axis's recorded metrics.
 
     Both inputs are already held per axis, so the classification can be revised on an existing
-    profile without re-running the analysis — which costs minutes per part. Same reasoning as
+    profile without re-running the analysis -- which costs minutes per part. Same reasoning as
     ``rank_axes``: keep anything derivable from the recorded metrics re-derivable.
     """
     cfg = cfg or AmbiguityConfig()
@@ -662,7 +673,7 @@ def rank_axes(profile: "AmbiguityProfile",
     """(Re)rank a profile's axes in place and pick the dominant one.
 
     Ranking is a pure function of three already-recorded per-axis numbers, so the exponent
-    can be retuned on an existing profile without re-running the analysis — which takes
+    can be retuned on an existing profile without re-running the analysis -- which takes
     minutes on a large cloud.
 
         score = view_fraction * area_fraction ** area_exponent
@@ -677,7 +688,7 @@ def rank_axes(profile: "AmbiguityProfile",
     profile.axes.sort(key=lambda ax: -ax.score)
 
     # Score decides the order; fold breaks ties among GLOBAL axes only. The window is a
-    # fraction of the leading score, never absolute — an absolute one promotes fold to the
+    # fraction of the leading score, never absolute -- an absolute one promotes fold to the
     # primary key for view-dependent axes. See geometry/README.md.
     if profile.axes:
         lead = profile.axes[0].score
@@ -703,26 +714,45 @@ def _fit_fold(angles: List[float], cfg: AmbiguityConfig,
     resulting MechVision ``angleStep`` of 180 would leave two thirds of the ambiguity
     unmitigated.
 
-    Continuous is tested by requiring several *arbitrary* angles to pass, not just the ones
-    the vote happened to find — otherwise an axis is called continuous whenever the vote
-    was thorough rather than whenever the geometry is.
+    A candidate order is accepted on a **strict majority** of its wanted angles passing
+    (``cfg.fold_pass_fraction``), not all of them.  An axis need not be a true global
+    symmetry to be worth searching: 3 of 4 quadrants around a feature can carry an
+    identical flat plane while the 4th does not, which makes exactly the angles that skip
+    the odd quadrant (here 90/270, not 180) genuinely ambiguous without the whole model
+    being 4-fold symmetric.  Requiring every angle to pass reports that as fold 1 --
+    MechVision's angleStep 360, i.e. "off" -- and leaves the real ambiguity unsearched.
+    Majority is a strict relaxation of the old all-pass rule (all-pass implies majority),
+    so a genuinely global axis (hex prism, box, ...) is completely unaffected; the only
+    cases this changes are ones that used to fall through to fold 1.
+
+    Continuous (fold 0) stays on the old all-pass rule, deliberately not relaxed:
+    misreporting a partially-ambiguous axis as continuous would tell MechVision to skip
+    orientation scoring on it entirely, which is worse than under-reporting its fold.  It
+    is tested by requiring several *arbitrary* angles to pass, not just the ones the vote
+    happened to find -- otherwise an axis is called continuous whenever the vote was
+    thorough rather than whenever the geometry is.
     """
     rng = np.random.default_rng(0)
     if all(probe(float(x)) for x in rng.uniform(5.0, 175.0, cfg.continuous_probes)):
         return 0, []
 
-    # Highest fold first, so the *smallest* angle step that still fully explains the axis
-    # wins: a hex prism must come back C6 (step 60), not C2 (step 180), even though 180
-    # also passes.
+    def majority(results) -> bool:
+        results = list(results)
+        return sum(results) > cfg.fold_pass_fraction * len(results)
+
+    # Highest fold first, so the *smallest* angle step that still explains a majority of
+    # the axis wins: a hex prism must come back C6 (step 60), not C2 (step 180), even
+    # though 180 also passes.
     for n in sorted(cfg.fold_candidates, reverse=True):
         wanted = [360.0 * k / n for k in range(1, n)]
-        if all(probe(w) for w in wanted):
+        if majority(probe(w) for w in wanted):
             return n, wanted
 
     tol = cfg.theta_bin_deg
     for n in sorted(cfg.fold_candidates, reverse=True):
         wanted = [360.0 * k / n for k in range(1, n)]
-        if all(any(abs((w - a + 180.0) % 360.0 - 180.0) < tol for a in angles) for w in wanted):
+        if majority(any(abs((w - a + 180.0) % 360.0 - 180.0) < tol for a in angles)
+                    for w in wanted):
             return n, wanted
     return 1, sorted(angles)
 
@@ -733,16 +763,16 @@ def _same_axis(d1, p1, d2, p2, cfg: AmbiguityConfig, diameter: float) -> bool:
     return float(np.linalg.norm(p1 - p2)) < cfg.axis_pt_tol_frac * diameter
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # PPF degeneracy diagnostic (reported, not acted on)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _ppf_degeneracy(pts: np.ndarray, normals: np.ndarray, diameter: float,
                     rng: np.random.Generator, n_sample: int = 600) -> Dict[str, float]:
     """Entropy of the PPF feature histogram.
 
     PPF's 4-tuple is near-constant over a planar patch, so all pairs hash to a few buckets
-    and the vote argmax becomes noise-determined — a failure mode that occurs *even when
+    and the vote argmax becomes noise-determined -- a failure mode that occurs *even when
     the patch is geometrically unambiguous*.  Diagnostic only; nothing consumes this.
     """
     if len(pts) < 16:
@@ -765,9 +795,9 @@ def _ppf_degeneracy(pts: np.ndarray, normals: np.ndarray, diameter: float,
     return {"entropy": entropy, "max_bucket_frac": float(p.max()), "n_buckets": float(len(p))}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Entry point
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _restore_origin(profile: "AmbiguityProfile", analysis_origin: np.ndarray) -> "AmbiguityProfile":
     """Put axis points back into the caller's frame after the analysis-time centring.
@@ -801,6 +831,11 @@ def analyse_ambiguity(mesh: o3d.geometry.TriangleMesh,
       * three sample densities (6000 / 7000 / 9000 points, n_views=100) gave dominant folds
         C4 / C1 / C2, the third on an axis 45 degrees away from the other two;
       * the same cloud at n_views=200 gave C4 / C3 / C3 across seeds 0 / 1 / 2.
+
+    Both sweeps predate `cfg.fold_pass_fraction` and have not been re-measured against it;
+    the *fold* spread in particular should narrow, since the majority rule no longer drops an
+    order to C1 over a single failing angle. Which axis wins is unaffected -- `rank_axes`
+    scores on view/area fraction, and fold only breaks ties among global axes.
 
     Two consequences, neither of them fixed here. `fold` bounds an angleStep *search range*
     (360/fold down to a ~5 degree floor) rather than fixing an answer, so its instability
@@ -857,7 +892,7 @@ def analyse_ambiguity(mesh: o3d.geometry.TriangleMesh,
         profile.ppf_degeneracy = _ppf_degeneracy(pts, normals, diameter, rng)
         return profile
 
-    # ── verify, screen by per-view survival, then refine the survivors ────────
+    # -- verify, screen by per-view survival, then refine the survivors --------
     # The screen MUST be per-view, not global.  A view-dependent ambiguity maps the
     # patch visible from one viewpoint onto the model; it need not map the model onto
     # itself, so it can explain an arbitrarily small fraction of the whole surface.
@@ -914,7 +949,7 @@ def analyse_ambiguity(mesh: o3d.geometry.TriangleMesh,
     if progress_cb is not None:
         progress_cb(0.85)
 
-    # ── per-view intersection with the soft tau threshold ─────────────────────
+    # -- per-view intersection with the soft tau threshold ---------------------
     survives, patch_frac = per_view_survival(explained)
     per_view: List[ViewAmbiguity] = []
     for k in range(len(view_dirs)):
@@ -935,7 +970,7 @@ def analyse_ambiguity(mesh: o3d.geometry.TriangleMesh,
     if not alive.any():
         return empty_profile()
 
-    # ── group surviving candidates into axes, fit fold order ──────────────────
+    # -- group surviving candidates into axes, fit fold order ------------------
     groups: List[List[int]] = []
     for i in np.flatnonzero(alive):
         d, p, _, _ = candidates[i]
@@ -975,14 +1010,14 @@ def analyse_ambiguity(mesh: o3d.geometry.TriangleMesh,
                                       lambda a, _d=d, _p=p: probe_at(_d, _p, a))
         # UNION over the group's members, not the best single one. A group holds several
         # rotations about one axis (a C3's 120 and 240, say), and they need not bite in the
-        # same viewpoints — `max` reports only the strongest member and under-states how
+        # same viewpoints -- `max` reports only the strongest member and under-states how
         # often the axis is a problem. `any(axis=0)` is the set of viewpoints where *some*
         # rotation about this axis survives, which is what "this axis makes the pose
         # ambiguous here" actually means.
         vf = float(survives[g].any(axis=0).mean())
         # area_fraction stays per-hypothesis (max, not union). It answers a different
-        # question — whether a *single* wrong pose still overlaps the model enough to
-        # survive MechVision's verification — and unioning across the fold angles would
+        # question -- whether a *single* wrong pose still overlaps the model enough to
+        # survive MechVision's verification -- and unioning across the fold angles would
         # overstate that for every axis with more than one rotation.
         af = float(area_fraction[g].max())
         # Median over the (member, view) cells where that member actually survives.
@@ -1003,7 +1038,7 @@ def analyse_ambiguity(mesh: o3d.geometry.TriangleMesh,
     profile.axes = axes
     rank_axes(profile, cfg.rank_area_exponent, cfg.significant_score)
 
-    # ── discriminative scoring ────────────────────────────────────────────────
+    # -- discriminative scoring ------------------------------------------------
     live = np.flatnonzero(alive)
     weights = view_fraction[live]
     covered = (explained[live] * weights[:, None]).sum(axis=0) / max(weights.sum(), 1e-12)
@@ -1016,9 +1051,9 @@ def analyse_ambiguity(mesh: o3d.geometry.TriangleMesh,
     return _restore_origin(profile, analysis_origin)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Visualisation
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 # Perceptually-ordered dark -> hot ramp (inferno-like), defined inline so the base
 # geometry layer stays free of a matplotlib dependency.
@@ -1078,7 +1113,7 @@ def ambiguity_geometries(pcd: "o3d.geometry.PointCloud",
     if len(pts) == 0:
         return geoms, []
 
-    # Points only — deliberately no normals.  Open3D shades a cloud whenever it carries
+    # Points only -- deliberately no normals.  Open3D shades a cloud whenever it carries
     # normals, which modulates every colour by the surface orientation and destroys the
     # colour-to-score mapping the heat map exists to convey: two points with the same
     # discriminative score would render differently just for facing different ways.

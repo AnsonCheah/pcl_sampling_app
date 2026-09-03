@@ -17,13 +17,13 @@ folder, not by having several:
         pick_points.json  pick_points_labels.json  poses.poses
 
 The folder is rewritten per regime evaluated, so **regimes must be evaluated sequentially**.
-That holds today — the Phase 1 gate is a sequential loop and the regime is frozen before the
-joint Optuna study starts — but a parallel gate would corrupt the library.
+That holds today -- the Phase 1 gate is a sequential loop and the regime is frozen before the
+joint Optuna study starts -- but a parallel gate would corrupt the library.
 
 `sync_regime_model` now refuses to deploy a bundle whose model frame disagrees with the scenes
 it will be evaluated against (`assert_scene_frames`). The stale copy above was one way to reach
 that state; the other is re-exporting a part, since the model frame is only reproducible while
-the mesh *and* the sampling settings are unchanged — a different voxel size or view count can
+the mesh *and* the sampling settings are unchanged -- a different voxel size or view count can
 change which ambiguity axis wins, which moved 25333MB000's frame by 60.6 degrees and 28.3 mm.
 Neither failure raises anything on its own: a stale scene still loads and still has a `T_gt`.
 """
@@ -33,7 +33,7 @@ from __future__ import annotations
 import glob
 import os
 import shutil
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.abspath(os.path.join(_DIR, ".."))
@@ -77,6 +77,32 @@ def available_types(part: str, candidates=("surface", "edge")) -> List[str]:
             if os.path.isfile(os.path.join(source_dir(part, t), f"{part}_{t}.ply"))]
 
 
+def symmetry_metadata(part: str, cloud_type: Optional[str] = None) -> Tuple[int, bool]:
+    """`(fold, aligned)` from the exported bundle's PLY header.
+
+    `fold` follows SaveStage's convention: 0 = continuous, 1 = C1 (no rotational symmetry),
+    N = N-fold. `aligned` says the cloud was recentred so the dominant ambiguity axis is frame
+    Z through the origin -- the precondition for pointing MechVision's `rotationStrategy` at Z.
+
+    Asked of the **source** bundle rather than the library, for the same reason as
+    `available_types`: the library holds only whichever regime was synced last.
+
+    A bundle exported before these keys existed carries neither, and reads as `(1, False)` --
+    the symmetry search stays off rather than sweeping a line nobody verified. Both cloud types
+    carry identical values, so either answers for the part.
+    """
+    from geometry.file_utils import read_ply_comments
+
+    types = [cloud_type] if cloud_type else available_types(part)
+    for t in types:
+        ply = os.path.join(source_dir(part, t), f"{part}_{t}.ply")
+        comments = read_ply_comments(ply)
+        if "ambiguity_fold" in comments:
+            return (int(comments["ambiguity_fold"]),
+                    comments.get("ambiguity_aligned") == "1")
+    return 1, False
+
+
 class StaleModelFrameError(RuntimeError):
     """A part's scenes and its reference cloud are in different model frames."""
 
@@ -99,7 +125,7 @@ def check_scene_frames(part: str, model_ply_path: str,
     points written in the same run, so on a matching pair this is an exact comparison. When
     they disagree, the scenes' ``T_gt`` values are expressed against a model frame that is
     not the one MechVision will be matching with, and every pose gets scored against the
-    wrong reference — silently, because a stale scene still loads and still has a pose.
+    wrong reference -- silently, because a stale scene still loads and still has a pose.
 
     That is not hypothetical. The model frame is only reproducible while the mesh AND the
     settings are unchanged; a different voxel size or view count can change which ambiguity
@@ -155,7 +181,7 @@ def sync_regime_model(part: str, cloud_type: str, check_frames: bool = True) -> 
     if not os.path.isfile(src_ply):
         raise FileNotFoundError(
             f"no {cloud_type} cloud for '{part}' at {src_ply}; "
-            f"available: {available_types(part) or 'none'} — re-run sampling for this part")
+            f"available: {available_types(part) or 'none'} -- re-run sampling for this part")
 
     if check_frames:
         # Against the SURFACE bundle, not `src_ply`: scenes write `reference_cloud.ply` from
