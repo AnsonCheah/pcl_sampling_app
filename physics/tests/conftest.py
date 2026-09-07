@@ -1,8 +1,8 @@
 """Shared fixtures for the physics test suite.
 
-Mirrors `stages/tests/conftest.py`: registers the `slow` marker (previously only registered
-there, so `pytestmark = pytest.mark.slow` under `physics/tests/` emitted PytestUnknownMarkWarning)
-and performs the repo-root `sys.path` insert every physics test module repeats.
+Mirrors `stages/tests/conftest.py`: performs the repo-root `sys.path` insert every physics test
+module repeats, and re-registers the `slow` marker so a module here still runs standalone from
+another working directory, where pytest.ini's own `markers` entry is not necessarily picked up.
 
 Run the fast subset:   python -m pytest physics/tests -q -m "not slow"
 Run everything:        python -m pytest physics/tests -q

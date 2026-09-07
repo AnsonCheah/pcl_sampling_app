@@ -36,12 +36,18 @@ def test_dynamic_bin_shrinks_for_small_part(headless_app, small_part):
 
     assert bin_dim[0] < MAX_BIN_DIM[0] and bin_dim[1] < MAX_BIN_DIM[1]
     assert bin_dim[2] < MAX_BIN_DIM[2]
-    assert n == 48                      # closed-form worked example, see physics/tests
+    assert n == 30                      # closed-form worked example, see physics/tests
     assert stage.num_targets == n       # worker() hands this to MujocoBinScene
 
 
 def test_dynamic_bin_checkbox_off_uses_max_bin(headless_app, small_part):
-    """The escape hatch must reproduce today's behaviour exactly: max bin, legacy count."""
+    """The escape hatch restores the max bin and the legacy count.
+
+    Scope note: this is about SIZING only. Settling is NOT identical to the pre-branch
+    pipeline even with the checkbox off, because MAX_RELEASE_BATCHES caps release waves for
+    every bin (a 500-part max-bin scene: 50 waves of 10 -> 8 of 63). See
+    bench/validate_bin_equivalence.py --batch-cap.
+    """
     stage = _scene_stage(headless_app)
     stage.dynamic_bin = False
     bin_dim, n = stage._resolve_bin_and_count(small_part)

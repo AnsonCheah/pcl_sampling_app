@@ -6,7 +6,38 @@ MuJoCo-based rigid-body simulation of parts settling in a bin. Produces collisio
 
 | File | Description |
 |------|-------------|
-| `mujoco_bin_scene.py` | `MujocoBinScene` class -- scene construction, gravity settling, pose extraction |
+| `mujoco_bin_scene.py` | `MujocoBinScene` class -- scene construction, gravity settling, pose extraction; `solve_bin_dim()` dynamic bin sizing |
+| `profile_structured_scene.py` | Profile build + settle across random / partition / tray to find where the time goes |
+
+## MuJoCo version floor
+
+`mujoco >= 3.8` is enforced at import (`MIN_MUJOCO_VERSION`); `environment.yaml` pins 3.12.0.
+Multi-point mesh contacts (multiccd) became default-on in 3.8.0 and the opt-in
+`mjENBL_MULTICCD` was removed from the enable set, so this module sets nothing. On an older
+MuJoCo that same silence means multiccd is **off** -- flat-faced parts get single-point contacts
+and the pile settles wrong, with no error anywhere. Hence the hard failure rather than a
+fallback. Sleeping islands (`mjENBL_SLEEP`, 3.4+) are a separate flag and stay **off**; see
+`physics/tests/test_sleep_equivalence.py` for the measurements and the gate to re-run.
+
+## Dynamic bin sizing
+
+`solve_bin_dim(part_mesh, fill_rate)` derives the bin from the part instead of the part count
+from a fixed bin, and returns `(bin_dim, n_parts, layers_at_fill)`. The bin is solved first and
+is authoritative: every lower bound is expressed as a bin dimension, the largest wins, and the
+count is read off the final bin with the unchanged fill formula.
+
+`packing` (`obb_packing_factor`) is a **volume** fraction and is spent in exactly two places:
+`h_eff = layer_h / packing` (vertical bridging) and the count formula. It must **not** enter the
+footprint term -- `a_parts = MIN_PARTS_PER_LAYER * obb_vol / layer_h`, no packing. Dividing there
+as well made the realised parts-per-layer `MIN_PARTS_PER_LAYER / packing`, which is
+shape-dependent and worst for low-packing parts: a 50x40x5 plate was handed ~128 footprints per
+layer instead of 25 and its bin barely shrank. Locked by
+`physics/tests/test_dynamic_bin.py::test_parts_per_layer_is_shape_independent`.
+
+`MAX_RELEASE_BATCHES` caps release waves. It fires on the **unshrunken** bin too, where it is a
+change to settling dynamics rather than a rescue (500 parts: 50 waves of 10 -> 8 of 63, 25 s of
+staged release down to 4 s). The `max_release_batches` constructor argument and
+`bench/validate_bin_equivalence.py --batch-cap` exist so that change can be measured.
 
 ## `MujocoBinScene`
 

@@ -13,12 +13,26 @@ from rich import print as rp
 from scipy.spatial.transform import Rotation as R
 import copy
 from geometry.geom_utils import (o3d_to_trimesh, trimesh_to_o3d, camera_view_matrix, o3d_display,
-                                 init_open3d, O3DSceneObject, decimate_mesh_to_resolution,
-                                 mat_to_wxyz, pose_to_matrix, make_transform)
+                                 init_open3d, O3DSceneObject, mat_to_wxyz,
+                                 pose_to_matrix, make_transform)
 import trimesh
 from trimesh.collision import CollisionManager
 from pathlib import Path
 
+
+# MuJoCo >= 3.8 is a hard requirement, not a preference. Multi-point mesh contacts (multiccd)
+# became default-on in 3.8.0 and the opt-in `mjENBL_MULTICCD` was removed from the enable set,
+# so this module deliberately sets nothing. On an older MuJoCo that same silence means multiccd
+# is OFF: flat-faced parts get single-point contacts and the pile settles wrong, with no error
+# anywhere. Fail loudly instead -- a stale env is otherwise indistinguishable from a physics bug.
+MIN_MUJOCO_VERSION = (3, 8)
+_mj_version = tuple(int(p) for p in mujoco.__version__.split(".")[:2])
+if _mj_version < MIN_MUJOCO_VERSION:
+    raise RuntimeError(
+        f"mujoco {mujoco.__version__} is too old: this module requires "
+        f">= {'.'.join(map(str, MIN_MUJOCO_VERSION))} (environment.yaml pins 3.12.0). Below 3.8 "
+        f"multi-point mesh contacts are opt-in and would be silently disabled here. "
+        f"Rebuild the `autotune` env from environment.yaml.")
 
 JITTER_DEG = [3,3,3]
 HOPPER_INWARD_OFFSET = 0.02   # hopper walls inset this far inside the bin wall plane
@@ -59,8 +73,11 @@ MIN_USEFUL_LAYERS     = 2      # below this the scene is a near-monolayer; calle
 MIN_BIN_DIM           = (0.10, 0.077, 0.04, 0.003)  # absolute floor; w/l ratio held to ~1.30
 MIN_WALL_THICKNESS    = 0.003  # 3x o_margin and 4x per-step displacement (vel_cap*dt = 0.75 mm);
 #                                matches PARTITION_THICKNESS/TRAY_WALL, proven in this solver
-MIN_PARTS_PER_LAYER   = 25     # ~5x5 footprint span -- lateral support, so interior parts rest
-#                                on neighbours rather than only on walls
+MIN_PARTS_PER_LAYER   = 25     # part FOOTPRINTS the bin floor must fit, i.e. a ~5x5 span --
+#                                lateral support, so interior parts rest on neighbours rather
+#                                than only on walls. Shape-independent by construction: it is
+#                                counted in units of obb_vol/layer_h and never divided by
+#                                `packing` (see solve_bin_dim's footprint block).
 FOOTPRINT_SPAN_FACTOR = 1.5    # spawn band must be at least (r_bs + t) wide
 ESCAPE_TOL_FRAC       = 0.25   # verify_parts_in_bin x/y tolerance, bin-relative
 OVERSHOOT_TOL_LAYERS  = 1.0    # allowed pile crown above the rim, in h_eff units (spill test)
@@ -138,8 +155,8 @@ def solve_bin_dim(part_mesh, fill_rate: float, packing_factor: float = None,
     r_bs = float(part_mesh.bounding_sphere.primitive.radius)
 
     # Effective layer height: parts tilt and bridge in a random pile, so one part occupies more
-    # vertical extent than its flat stable-pose thickness. In-plane voids (below) and vertical
-    # bridging are different effects -- only the vertical one divides by packing.
+    # vertical extent than its flat stable-pose thickness. This is the ONE place `packing` is
+    # spent on geometry -- the footprint below must not spend it again (see there).
     h_eff = layer_h / packing
 
     # Height: LAYERS_AT_FULL_FILL effective layers at 100% fill, plus spill headroom.
@@ -148,14 +165,27 @@ def solve_bin_dim(part_mesh, fill_rate: float, packing_factor: float = None,
                           lz_min / 0.9),
                       min_bin_dim[2], H0))
 
-    # Footprint: enough floor for MIN_PARTS_PER_LAYER side by side (in-plane voids included via
-    # packing), then floored by the absolute minimum bin and by spawn-band feasibility.
-    a_parts = MIN_PARTS_PER_LAYER * obb_vol / (packing * layer_h)
+    # Footprint: floor area for MIN_PARTS_PER_LAYER part footprints, then floored by the
+    # absolute minimum bin and by spawn-band feasibility.
+    #
+    # Do NOT divide by `packing` here. `packing` is a VOLUME fraction and it is already spent
+    # twice over: once in h_eff above, and once in the count formula below. The identity that
+    # ties them together is n == layers_at_fill * (a_bin / a_part), so the parts-per-layer this
+    # area actually buys is a_bin*layer_h/obb_vol with no packing term. Dividing by it here
+    # inflated the target to MIN_PARTS_PER_LAYER/packing -- shape-dependent, and worst for the
+    # low-packing parts: a 50x40x5 plate was handed 128 footprints per layer instead of 25,
+    # which is why flat and elongated parts barely shrank at all.
+    a_part = obb_vol / layer_h                        # footprint of one part, stable-pose down
+    a_parts = MIN_PARTS_PER_LAYER * a_part
     s_raw = float(np.sqrt(a_parts / (W0 * L0)))
-    t = float(np.clip(s_raw * T0, MIN_WALL_THICKNESS, T0))
+    # s_min's spawn-band term needs a wall thickness, but t is itself a function of the scale
+    # s_min helps decide. Break the circularity with the ceiling T0 rather than a provisional t
+    # from s_raw: T0 bounds every t the bin can ship with, so the band stays feasible whichever
+    # scale wins. It costs at most FOOTPRINT_SPAN_FACTOR*2*(T0 - MIN_WALL_THICKNESS)/L0 ~ 1% of
+    # scale, and only for parts whose bounding sphere is what binds.
     s_min = max(min_bin_dim[0] / W0,
                 min_bin_dim[1] / L0,
-                FOOTPRINT_SPAN_FACTOR * 2.0 * (r_bs + t) / L0)   # short side binds first
+                FOOTPRINT_SPAN_FACTOR * 2.0 * (r_bs + T0) / L0)  # short side binds first
     s_xy = float(np.clip(s_raw, s_min, 1.0))
     w, l = s_xy * W0, s_xy * L0
     t = float(np.clip(s_xy * T0, MIN_WALL_THICKNESS, T0))
@@ -188,6 +218,11 @@ class _SimProfile:
     installed -- WITHOUT set_mjcb_time() every mjData.timer entry reads zero, which would make a
     profiling run silently report that everything is free. There is no mj_resetTimer; the
     accumulators are zeroed in place so sim state is preserved (unlike mj_resetData).
+
+    `set_mjcb_time` is PROCESS-GLOBAL and it is a Python callable, which means MuJoCo cannot
+    thread across it -- so leaving it installed both slows every later scene in the process and
+    distorts the very numbers being measured. `release()` takes it back off, and `report()`
+    calls it once the timers have been read, so the callback lives only for the run it profiles.
     """
 
     _TIMERS = ("mjTIMER_STEP", "mjTIMER_POS_COLLISION", "mjTIMER_COL_BROAD",
@@ -198,7 +233,18 @@ class _SimProfile:
         self.series = []      # (sim_time, ncon, nefc, step, wall_per_step)
         self.census = {}
         self.steps = 0
+        self._cb_installed = False
+        self._install_cb()
+
+    def _install_cb(self):
         mujoco.set_mjcb_time(lambda: time.perf_counter() * 1000.0)   # units are ours: ms
+        self._cb_installed = True
+
+    def release(self):
+        """Uninstall the global timer callback. Idempotent; read the timers first."""
+        if self._cb_installed:
+            mujoco.set_mjcb_time(None)
+            self._cb_installed = False
 
     @contextlib.contextmanager
     def phase(self, name):
@@ -251,13 +297,15 @@ class _SimProfile:
         }
         if data is not None:
             rep["timers_ms"] = self.timer_ms(data)
+        self.release()      # timers are read; stop taxing every later scene in this process
         return rep
 
 class MujocoBinScene:
     def __init__(self, part_mesh, part_convex_meshes, n_parts=1, bin_dim=MAX_BIN_DIM, settle_time=5.0, render=True, arrangement: str = "random", stable_pose_R: np.ndarray = None, timestep: float = 0.001,
                  structure_type: str = "none", structure_height_frac: float = 0.75, clearance_mode: str = "medium",
                  body_offset=None, bin_transform=None,
-                 enable_sleep: bool = False, profile: bool = False):
+                 enable_sleep: bool = False, profile: bool = False,
+                 max_release_batches: int = None):
         # Timestep is the primary anti-tunneling lever: MuJoCo has no continuous collision
         # detection, so per-step displacement (~vel_cap*dt) must stay under ~o_margin. With
         # vel_cap=1.5 m/s and o_margin=1 mm the hard-safe bound is dt <= 6.7e-4; the stiff
@@ -330,10 +378,11 @@ class MujocoBinScene:
         self.spec.option.iterations = 200
         self.spec.option.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST  # stable for stiff multi-contact
         self.spec.option.cone = mujoco.mjtCone.mjCONE_ELLIPTIC                  # pile stability
-        # Multi-point mesh contacts. Opt-in via mjENBL_MULTICCD up to MuJoCo 3.5; from 3.12 the
-        # flag moved to the DISABLE set (mjDSBL_MULTICCD) and multi-CCD is on by default, so
-        # setting nothing here preserves the old behaviour. Left explicit because pile
-        # stability for flat-faced parts depends on it.
+        # Multi-point mesh contacts: nothing is set here ON PURPOSE. multiccd became default-on
+        # in MuJoCo 3.8.0, and by 3.12 `mjENBL_MULTICCD` no longer exists (the knob is now
+        # `mjDSBL_MULTICCD`, i.e. opt-OUT), so the old enable line would raise AttributeError.
+        # Pile stability for flat-faced parts depends on multiccd being on -- the module-level
+        # MIN_MUJOCO_VERSION check is what guarantees that, since silence means "off" pre-3.8.
         # Sleeping islands (mjENBL_SLEEP, MuJoCo >= 3.4). OFF by default: measured on a 48-part
         # random scene it gave NO speedup (27.3 s vs 28.0 s) and left zero trees asleep, because
         # the batched release keeps the pile moving and simulate() exits as soon as is_settled()
@@ -368,6 +417,10 @@ class MujocoBinScene:
         self.hopper_offset = hopper_inward_offset(bin_dim)
         self.batch_drop_offset = float(np.clip(0.2 * bin_dim[2], 0.01, BATCH_DROP_OFFSET))
         self._n_demoted = 0   # batch-0 placements that fell through to a later wave
+        # Cap on batched-release waves; None keeps the module default. Overridable so the
+        # legacy 10-per-wave behaviour stays reachable for A/B measurement.
+        self.max_release_batches = (MAX_RELEASE_BATCHES if max_release_batches is None
+                                    else int(max_release_batches))
         self.hx = self.bin_dim[0] / 2
         self.hy = self.bin_dim[1] / 2
         self.hh = self.bin_dim[2] / 2
@@ -852,7 +905,14 @@ class MujocoBinScene:
         cells = int((2 * self.hx) // (2 * radius)) * int((2 * self.hy) // (2 * radius))
         # A shrunken footprint fits fewer parts per wave; without a floor the wave count -- and
         # with it the fixed BATCH_RELEASE_INTERVAL_S paid per wave -- grows without bound.
-        batch_size = max(1, int(np.ceil(self.n_parts / MAX_RELEASE_BATCHES)), min(10, cells))
+        #
+        # NOTE this floor also fires on the UNSHRUNKEN bin, where it is a real change to
+        # settling dynamics rather than a rescue: a 500-part max-bin scene goes from 50 waves of
+        # 10 to 8 waves of 63, i.e. 25 s of staged release down to 4 s. `max_release_batches` is
+        # a constructor knob so that change can be measured rather than assumed -- see
+        # bench/validate_bin_equivalence.py --batch-cap.
+        batch_size = max(1, int(np.ceil(self.n_parts / self.max_release_batches)),
+                         min(10, cells))
         n_batches  = int(np.ceil(self.n_parts / batch_size))
 
         valid_poses_for_rotation = self._compute_valid_stable_poses()
@@ -1588,13 +1648,6 @@ def load_part(mesh_path=None, verbose: bool = True):
         if verbose:
             rp("  Converting mm -> m")
         mesh_o3d.scale(0.001, center=(0, 0, 0))
-
-    # Same resolution-based decimation the GUI import applies, so headless/CLI runs see the
-    # same geometry. Must follow the mm->m conversion: the voxel clamps are in metres.
-    mesh_o3d, dec = decimate_mesh_to_resolution(mesh_o3d)
-    if verbose and not dec["skipped"]:
-        rp(f"  Decimated {dec['tri_before']:,} -> {dec['tri_after']:,} triangles "
-           f"@ voxel {dec['voxel_size'] * 1000:.3f} mm")
 
     mesh_o3d.compute_vertex_normals()
     mesh_o3d.translate(-mesh_o3d.get_center())

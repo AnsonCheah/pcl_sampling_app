@@ -5,7 +5,6 @@ import numpy as np
 from tkinter import Tk, filedialog
 from pathlib import Path
 from stages.stage_base import BaseStage
-from geometry.geom_utils import decimate_mesh_to_resolution
 from geometry.mesh_repair import analyze_mesh
 from physics.mujoco_bin_scene import MAX_BIN_DIM
 from enums import Stage
@@ -129,25 +128,14 @@ class ImportMeshStage(BaseStage):
             mesh.scale(report.unit_scale, center=(0, 0, 0))
             cleaned.scale(report.unit_scale, center=(0, 0, 0))
 
-        # Decimate to a target resolution AFTER the unit conversion (the voxel clamps are in
-        # metres) and BEFORE compute_vertex_normals (the helper recomputes them, so normals on
-        # the dense mesh would be wasted work). A dense STL otherwise costs time in the Open3D
-        # viewport, in VHACD, and in the raycast with no downstream benefit.
-        #
-        # BOTH variants are decimated, for the same reason the unit scale is applied to both:
-        # `_apply_cleaned` installs `cleaned` as target_mesh, and headless auto-removes debris,
-        # so decimating only `mesh` would silently restore a full-resolution mesh on the common
-        # path. The target is derived from the debris-free variant and reused, because debris
-        # inflates the OBB diagonal and would otherwise coarsen the raw mesh's voxel.
-        cleaned, dec = decimate_mesh_to_resolution(cleaned)
-        mesh, _ = decimate_mesh_to_resolution(mesh, voxel_m=dec["voxel_size"] or None)
-        if dec["skipped"]:
-            print(f"[INFO] Decimation skipped ({dec['reason']}): {dec['tri_before']:,} triangles")
-        else:
-            print(f"[INFO] Decimated {dec['tri_before']:,} -> {dec['tri_after']:,} triangles "
-                  f"@ voxel {dec['voxel_size'] * 1000:.3f} mm "
-                  f"(volume drift {dec['volume_err'] * 100:.2f}%)")
-
+        # NO decimation here, deliberately. `app.target_mesh` is the GT model: SaveStage writes
+        # it out as the exported .stl and the MechVision reference cloud, so decimating it means
+        # tuning the matcher against geometry the production CAD does not have. It also
+        # re-tessellates faces, which moves face_facet_map -> geometry/ambiguity.py -> the
+        # ppf_saliency arms. Decimation buys nothing for MuJoCo (which sees VHACD hulls, not
+        # this mesh) and only BVH build time for the raycast (queries are logarithmic); the one
+        # place it pays is the GUI preview union, which decimates its own copy -- see
+        # SceneStage.worker's `scene_mesh` block.
         mesh.compute_vertex_normals()
         cleaned.compute_vertex_normals()
         self.app.target_mesh = mesh

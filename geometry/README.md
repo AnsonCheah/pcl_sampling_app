@@ -6,7 +6,7 @@ Base layer for 3D math, file I/O, and the shared `O3DSceneObject` dataclass. No 
 
 | File | Description |
 |------|-------------|
-| `geom_utils.py` | `O3DSceneObject`, transform/quaternion helpers, normals, diameter and spacing, Open3D<->trimesh conversion |
+| `geom_utils.py` | `O3DSceneObject`, transform/quaternion helpers, normals, diameter and spacing, Open3D<->trimesh conversion, `decimate_mesh_to_resolution` |
 | `file_utils.py` | PLY export with the comment protocol, scene/sample listing, file dialogs |
 | `math_utils.py` | `find_cdf_knee` -- CDF knee split, used for adaptive downsampling |
 | `ambiguity.py` | Ambiguity-axis search, fold fitting, per-point heat map |
@@ -14,6 +14,20 @@ Base layer for 3D math, file I/O, and the shared `O3DSceneObject` dataclass. No 
 | `tray_utils.py` | Footprint polygons, tray collision frames and conforming height fields |
 | `convex_decomp.py` | VHACD convex decomposition wrapper |
 | `visualize_ambiguity.py` | Standalone viewer for an ambiguity profile |
+
+## `decimate_mesh_to_resolution` is DISPLAY-ONLY
+
+It targets a resolution (a voxel edge, a fraction of the OBB diagonal, clamped in metres), not
+a triangle budget, so it is scale-invariant across parts. It has exactly one caller:
+`SceneStage`'s GUI preview-union block, which is the only place whose cost is linear in
+`triangles x n_parts`.
+
+It must **not** be applied to `app.target_mesh`. That is the GT model -- `SaveStage` exports it
+as the `.stl` and the MechVision reference cloud, so decimating it tunes the matcher against
+geometry the production CAD does not have, and its re-tessellation moves `face_facet_map` ->
+`ambiguity.py` -> the `ppf_saliency` arms. It buys nothing for MuJoCo (which sees VHACD hulls,
+not this mesh) and only BVH build time for the raycast, whose queries are logarithmic in
+triangle count.
 
 ## `O3DSceneObject`
 

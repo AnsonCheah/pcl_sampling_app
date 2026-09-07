@@ -6,7 +6,9 @@ import open3d.visualization.rendering as rendering
 import trimesh
 from enums import Stage
 from stages.stage_base import BaseStage
-from geometry.geom_utils import o3d_to_trimesh, trimesh_to_o3d, O3DSceneObject, rotation_aligning_vector_to_axis, face_facet_map
+from geometry.geom_utils import (o3d_to_trimesh, trimesh_to_o3d, O3DSceneObject,
+                                 rotation_aligning_vector_to_axis, face_facet_map,
+                                 decimate_mesh_to_resolution)
 from geometry.file_utils import list_scene_dirs
 from physics.mujoco_bin_scene import (
     MujocoBinScene, MAX_BIN_DIM, LAYERS_AT_FULL_FILL, MIN_USEFUL_LAYERS,
@@ -623,12 +625,28 @@ class SceneStage(BaseStage):
         self.num_targets = n
         rp(f"[BIN] {bin_dim[0]:.3f} x {bin_dim[1]:.3f} x {bin_dim[2]:.3f} m, "
            f"wall {bin_dim[3] * 1000:.1f} mm, n_parts={n}, "
-           f"~{layers:.1f} layers @ fill {self.fill_rate:.0%}")
+           f"~{layers:.2f} layers @ fill {self.fill_rate:.0%}")
         if layers < MIN_USEFUL_LAYERS:
             # Stacking depth is fill x LAYERS_AT_FULL_FILL and does NOT depend on bin size, so
             # this is equally true of the fixed max bin -- the operator just could not see it.
-            rp(f"[BIN] near-monolayer ({layers:.1f} layers): raise fill rate to "
-               f"{MIN_USEFUL_LAYERS / LAYERS_AT_FULL_FILL:.0%}+ for part-on-part stacking")
+            #
+            # Round the suggested fill UP to the next whole percent. The exact ratio is 2/6 =
+            # 33.3%, and printing that as "33%" named a fill that still trips this very warning
+            # (0.33 * 6 = 1.98 layers) -- advice the operator could follow and stay warned.
+            suggested = np.ceil(100.0 * MIN_USEFUL_LAYERS / LAYERS_AT_FULL_FILL) / 100.0
+            rp(f"[BIN] near-monolayer ({layers:.2f} layers): raise fill rate to "
+               f"{suggested:.0%}+ for part-on-part stacking")
+        if n >= MAX_AUTO_PARTS:
+            # The count clipped, so the realised fill is BELOW what was asked and the scene is
+            # sparser than the operator specified. Silent before; it is the small-part regime
+            # (a 2 mm cube wants ~3800 parts at 20% fill) and it changes what the scene means.
+            w, l, h, _ = bin_dim
+            obb_vol = max(float(part_mesh.bounding_box_oriented.volume), 1e-12)
+            wanted = (self.fill_rate * obb_packing_factor(part_mesh)
+                      * w * l * h * (1.0 - BIN_TOP_MARGIN_FRAC) / obb_vol)
+            rp(f"[BIN] count clipped at MAX_AUTO_PARTS={MAX_AUTO_PARTS} (formula wanted "
+               f"{wanted:.0f}): realised fill is ~{self.fill_rate * n / wanted:.1%}, not the "
+               f"requested {self.fill_rate:.0%}")
         return bin_dim, n
 
     def _show_scene_mesh(self):
@@ -810,9 +828,23 @@ class SceneStage(BaseStage):
         # The boolean union can degenerate on the non-manifold tray bin mesh, so guard it and fall back
         # to a plain concatenation (which always renders) rather than leaving the scene blank.
         if not self.app.headless:
+            # Display LOD. This union is the one place in the pipeline whose cost is LINEAR in
+            # triangles x n_parts -- every instance is processed and booleaned individually --
+            # so a dense STL is felt here and nowhere else that matters. Decimate ONCE and reuse
+            # the result for every instance; doing it per instance would pay the clustering cost
+            # n_parts times over. The LOD never leaves this block: app.o3d_scene, app.target_mesh
+            # and everything exported stay full-resolution.
+            lod_cache = {}
             mesh_list = []
             for obj in self.o3d_scene.values():
-                mesh = copy.deepcopy(obj.geom)
+                key = id(obj.geom)
+                if key not in lod_cache:
+                    lod, dec = decimate_mesh_to_resolution(obj.geom)
+                    if not dec["skipped"]:
+                        rp(f"[SCENE] preview LOD {dec['tri_before']:,} -> {dec['tri_after']:,} "
+                           f"triangles @ voxel {dec['voxel_size'] * 1000:.3f} mm")
+                    lod_cache[key] = lod
+                mesh = copy.deepcopy(lod_cache[key])
                 tri_mesh = o3d_to_trimesh(mesh.transform(obj.T_gt))
                 tri_mesh.process(validate=True)
                 mesh_list.append(tri_mesh)

@@ -23,6 +23,7 @@ What stayed here is what genuinely cannot move.
 | `fetch_dataset.py` | Download benchmark meshes into `mesh_raw/` (T-LESS: 30 objects + symmetry GT, CC BY 4.0) |
 | `generate_scenes.py` | Batch-drive the app pipeline over a mesh directory to produce scenes with GT poses |
 | `validate_ambiguity.py` | Check `geometry/ambiguity.py` against BOP's published symmetry annotations |
+| `validate_bin_equivalence.py` | Check a dynamically-sized bin against the max bin: floor-contact fraction, tilt distribution, neighbour count, pile depth |
 
 Reserved for an **Optuna tuning benchmark** (deferred): scoring MechVision parameter searches
 from `MM_Optimizer/`. That is what this directory is for -- driving a black box that is not

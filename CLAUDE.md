@@ -14,6 +14,11 @@ Parametric model first, learned model targets the residual. The CVAE+Flow is not
 **One env: `autotune`**, defined by `environment.yaml`. (`pcd-sampling` is obsolete -- if you
 find it named anywhere, that reference is stale.)
 
+**`mujoco >= 3.8` is a hard floor, enforced at `physics/mujoco_bin_scene.py` import time**
+(pinned to 3.12.0). Below it, multi-point mesh contacts are opt-in and the module's deliberate
+silence would disable them -- degraded pile physics with no error. Rebuild the env rather than
+working around the check.
+
 **Never hardcode an interpreter path in code, docs or docstrings.** The install location is
 user- and OS-specific, and Windows and Linux do not even agree on the shape
 (`<env>\python.exe` vs `<env>/bin/python`), so a literal path cannot be correct in both. Use
@@ -66,7 +71,8 @@ MM_Optimizer/      <- geometry; drives MechVision through the mm_adapter pip pac
                      Imported by stages/tuning_stage.py and bench/generate_scenes.py.
 
 bench/             <- top tier; may import everything. Scene GENERATION, dataset fetch, and
-                     ambiguity validation only -- matcher benchmarking lives in the packages.
+                     MODEL validation (ambiguity vs BOP, dynamic bin vs max bin) only --
+                     matcher benchmarking lives in the packages.
 ```
 
 `DecomposeStage` runs VHACD in a `ProcessPoolExecutor` and blocks on the result -- a normal

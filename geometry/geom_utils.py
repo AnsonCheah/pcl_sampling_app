@@ -158,10 +158,15 @@ def decimate_mesh_to_resolution(mesh,
 
     stats: {voxel_size, tri_before, tri_after, volume_err, skipped, reason}
 
+    DISPLAY USE ONLY. The single caller is SceneStage's GUI preview-union block; that union is
+    the one step whose cost is linear in triangles x n_parts. Do NOT apply this to
+    `app.target_mesh`: it is the GT model that SaveStage exports as the .stl and the MechVision
+    reference cloud, and its tessellation feeds face_facet_map -> ambiguity.py -> ppf_saliency.
+    See geometry/README.md.
+
     `voxel_m` overrides the diagonal-derived target. Pass it when two variants of the same part
-    must be decimated identically -- e.g. ImportMeshStage decimates both the raw mesh and the
-    debris-free `cleaned` mesh, and export debris would otherwise inflate the raw mesh's OBB
-    diagonal and coarsen its voxel relative to the cleaned one.
+    must be decimated identically, so that a difference between them (debris, say) cannot
+    inflate one OBB diagonal and coarsen its voxel relative to the other.
 
     On skip or revert the ORIGINAL object is returned (identity, not a copy), so a caller can
     test `out is mesh` to tell that nothing happened.

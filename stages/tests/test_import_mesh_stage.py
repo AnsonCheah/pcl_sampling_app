@@ -45,15 +45,17 @@ def test_worker_keeps_metre_scale(headless_app, make_box_mesh):
     assert np.isclose(extent, 0.05, atol=1e-6)  # unchanged
 
 
-def test_worker_decimates_after_unit_conversion(headless_app):
-    """Decimation must run AFTER the mm->m conversion. Its absolute voxel clamps are in metres,
-    so on a still-in-mm mesh the target would clamp to the 2 mm ceiling and destroy the part
-    (a 150-unit diagonal x 0.4% = 0.6 "mm-units", i.e. 0.6 m once converted).
+def test_worker_does_not_decimate(headless_app):
+    """`app.target_mesh` is the GT model -- SaveStage exports it as the .stl and the MechVision
+    reference cloud, and its tessellation feeds face_facet_map -> geometry/ambiguity.py. Import
+    must hand it on at full resolution.
 
-    Feeds a dense 50 mm sphere: the final mesh must be BOTH converted to metres and decimated.
+    Decimation lives in SceneStage's GUI preview-union block instead, where the cost is
+    genuinely linear in triangles x n_parts. Feeds a dense 50 mm sphere (in mm, so the unit
+    conversion runs too) and asserts the triangle count survives intact.
     """
     import trimesh
-    tri = trimesh.creation.icosphere(subdivisions=7, radius=25.0)   # 50 mm diameter, in mm
+    tri = trimesh.creation.icosphere(subdivisions=6, radius=25.0)   # 50 mm diameter, in mm
     dense = o3d.geometry.TriangleMesh(
         vertices=o3d.utility.Vector3dVector(tri.vertices),
         triangles=o3d.utility.Vector3iVector(tri.faces))
@@ -65,10 +67,9 @@ def test_worker_decimates_after_unit_conversion(headless_app):
     stage.worker(mesh=dense)
 
     extent = headless_app.target_mesh.get_axis_aligned_bounding_box().get_extent().max()
-    # 0.05 m, not 50: the conversion ran. Tolerance is one voxel, since vertex clustering pulls
-    # extreme vertices inward by up to ~voxel/2 (bounded tightly by test_preserves_extents).
-    assert np.isclose(extent, 0.05, atol=1e-3), "unit conversion lost"
-    assert len(headless_app.target_mesh.triangles) < n_before, "mesh was not decimated"
+    assert np.isclose(extent, 0.05, atol=1e-9), "unit conversion lost"
+    assert len(headless_app.target_mesh.triangles) == n_before, (
+        "target_mesh was decimated -- the GT model and the exported .stl must stay full-res")
 
 
 def test_worker_empty_mesh_no_crash(headless_app):

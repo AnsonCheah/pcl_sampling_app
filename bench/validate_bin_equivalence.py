@@ -106,10 +106,11 @@ def ks_statistic(a, b):
                                - np.searchsorted(b, grid, "right") / len(b))))
 
 
-def run_arm(part_mesh, convex, bin_dim, n_parts, settle_time, h_eff, seed=17):
+def run_arm(part_mesh, convex, bin_dim, n_parts, settle_time, h_eff, seed=17, batch_cap=None):
     np.random.seed(seed)
     scene = MujocoBinScene(part_mesh, convex, n_parts=n_parts, bin_dim=bin_dim,
-                           settle_time=settle_time, render=False)
+                           settle_time=settle_time, render=False,
+                           max_release_batches=batch_cap)
     scene.simulate()
     stats = analyse(scene, h_eff)
     stats["escaped"] = scene.verify_parts_in_bin()["n_out"]
@@ -125,6 +126,12 @@ def main():
     src.add_argument("--shape", type=str, default="cube")
     ap.add_argument("--fill", type=float, default=0.2)
     ap.add_argument("--settle-time", type=float, default=5.0)
+    ap.add_argument("--batch-cap", type=int, default=None,
+                    help="override MAX_RELEASE_BATCHES for BOTH arms. The batch-wave floor "
+                         "fires on the max bin too (500 parts: 50 waves of 10 -> 8 of 63), so "
+                         "the default max-bin arm is NOT the historical baseline. Pass a large "
+                         "value (e.g. 999) to restore the old 10-per-wave release and A/B the "
+                         "settling change on its own.")
     ap.add_argument("--save", type=str, default=None)
     args = ap.parse_args()
 
@@ -147,8 +154,10 @@ def main():
        f"  n={dyn_n}   (~{dyn_layers:.2f} layers)\n")
 
     rows = {
-        "max_bin": run_arm(part_mesh, convex, MAX_BIN_DIM, leg_n, args.settle_time, h_eff),
-        "solved_bin": run_arm(part_mesh, convex, dyn_bin, dyn_n, args.settle_time, h_eff),
+        "max_bin": run_arm(part_mesh, convex, MAX_BIN_DIM, leg_n, args.settle_time, h_eff,
+                           batch_cap=args.batch_cap),
+        "solved_bin": run_arm(part_mesh, convex, dyn_bin, dyn_n, args.settle_time, h_eff,
+                              batch_cap=args.batch_cap),
     }
 
     fields = [("n_parts", "{:.0f}"), ("floor_frac", "{:.3f}"), ("wall_frac", "{:.3f}"),

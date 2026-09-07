@@ -27,6 +27,7 @@ from physics.mujoco_bin_scene import (
     MujocoBinScene,
     obb_packing_factor,
     solve_bin_dim,
+    stable_layer_heights,
     hopper_inward_offset,
 )
 
@@ -95,28 +96,70 @@ def test_packing_factor_is_rotation_invariant(make_box_part):
 def test_large_part_keeps_max_bin(make_box_part):
     """A part that clips on every axis returns MAX_BIN_DIM -- today's behaviour, unchanged.
 
-    A 120 mm cube exceeds both the height requirement (h_eff*X/(1-margin) > H0) and the
-    footprint requirement (A_parts > W0*L0), so every clamp binds.
+    A 150 mm cube exceeds both the height requirement (h_eff*X/(1-margin) > H0) and the
+    footprint requirement (A_parts = MIN_PARTS_PER_LAYER*a^2 > W0*L0, i.e. a > 133 mm), so
+    every clamp binds. A 120 mm cube used to qualify only because the footprint target was
+    inflated by 1/packing; with that removed it lands at 0.684 x 0.526 and no longer clips.
     """
-    part, _ = make_box_part((0.12, 0.12, 0.12))
+    part, _ = make_box_part((0.15, 0.15, 0.15))
     bin_dim, n, layers = solve_bin_dim(part, fill_rate=0.2)
     assert bin_dim == pytest.approx(MAX_BIN_DIM, abs=1e-6)
     assert MIN_AUTO_PARTS <= n <= MAX_AUTO_PARTS
 
 
 def test_small_part_shrinks_bin(cube_part):
-    """The 20 mm cube worked example: a much smaller bin and ~10x fewer parts than today."""
+    """The 20 mm cube worked example: a much smaller bin and ~17x fewer parts than today.
+
+    Closed form, all of it: A = MIN_PARTS_PER_LAYER * obb_vol/layer_h = 25 * 0.02^2 = 0.01 m^2,
+    so s = sqrt(0.01/(W0*L0)) = 0.15 and (w, l) = (0.1140, 0.0877). Height is
+    LAYERS_AT_FULL_FILL * h_eff / (1 - margin) with h_eff = 0.02/0.62.
+    """
     part, _ = cube_part
     bin_dim, n, layers = solve_bin_dim(part, fill_rate=0.2)
     w, l, h, t = bin_dim
 
-    assert (w, l, h) == pytest.approx((0.1448, 0.1114, 0.2419), abs=1e-3)
+    assert (w, l, h) == pytest.approx((0.1140, 0.0877, 0.2419), abs=1e-3)
     assert t == pytest.approx(MIN_WALL_THICKNESS, abs=1e-9)
-    assert n == 48
+    assert n == 30
     assert layers == pytest.approx(1.2, abs=0.05)
 
     # The point of the exercise: far less bin, far fewer parts.
-    assert w * l < 0.1 * (W0 * L0)
+    assert w * l < 0.05 * (W0 * L0)
+
+
+def test_parts_per_layer_is_shape_independent(make_box_part):
+    """Regression: the footprint must buy MIN_PARTS_PER_LAYER part footprints for EVERY shape.
+
+    `a_parts` used to divide by `packing`, which is a volume fraction already spent in h_eff
+    and again in the count formula. That made the realised parts-per-layer 25/packing --
+    shape-dependent, and worst exactly where it hurt: a 50x40x5 plate (packing ~0.20) was
+    handed ~128 footprints per layer instead of 25, so its bin barely shrank at all.
+
+    Checked only where the parts-per-layer term is what binds; MIN_BIN_DIM, the spawn-band
+    span and the max bin legitimately override it (covered by their own tests).
+    """
+    for extents in [(0.02, 0.02, 0.02), (0.05, 0.04, 0.005), (0.03, 0.03, 0.002)]:
+        part, _ = make_box_part(extents)
+        (w, l, _, _), _, _ = solve_bin_dim(part, fill_rate=0.2)
+        layer_h, _ = stable_layer_heights(part)
+        obb_vol = float(part.bounding_box_oriented.volume)
+        parts_per_layer = w * l * layer_h / obb_vol
+        assert parts_per_layer == pytest.approx(MIN_PARTS_PER_LAYER, rel=1e-6), (
+            f"{extents}: {parts_per_layer:.1f} footprints per layer, expected "
+            f"{MIN_PARTS_PER_LAYER} -- `packing` has crept back into the footprint term")
+
+
+def test_footprint_target_does_not_scale_with_packing(make_box_part):
+    """Two parts with the same footprint and stable-pose height but very different packing
+    factors must get the SAME floor area. Locks the fix at the level of the decision, not the
+    arithmetic: a cube and a plate of equal a_part must not diverge."""
+    cube, _ = make_box_part((0.01, 0.01, 0.01))          # a_part = 1e-4 m^2, packing 0.62
+    plate, _ = make_box_part((0.02, 0.005, 0.01))        # a_part = 1e-4 m^2, packing ~0.44
+    assert obb_packing_factor(plate) < obb_packing_factor(cube)
+
+    (wc, lc, _, _), _, _ = solve_bin_dim(cube, fill_rate=0.2)
+    (wp, lp, _, _), _, _ = solve_bin_dim(plate, fill_rate=0.2)
+    assert wc * lc == pytest.approx(wp * lp, rel=1e-6)
 
 
 def test_bin_floor_takes_priority(make_box_part):

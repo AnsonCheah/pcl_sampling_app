@@ -6,6 +6,7 @@ comparable triangle density) and deliberately NOT scale-invariant at the clamps.
 
 Run:  python -m pytest geometry/tests/test_decimate.py
 """
+import functools
 import os
 import sys
 
@@ -26,8 +27,8 @@ from geometry.geom_utils import (
 )
 
 
-def _sphere(radius, subdivisions=5):
-    """A dense watertight icosphere -- stands in for a high-resolution scanned/CAD part."""
+@functools.lru_cache(maxsize=None)
+def _sphere_cached(radius, subdivisions):
     tri = trimesh.creation.icosphere(subdivisions=subdivisions, radius=radius)
     mesh = o3d.geometry.TriangleMesh(
         vertices=o3d.utility.Vector3dVector(tri.vertices),
@@ -35,6 +36,17 @@ def _sphere(radius, subdivisions=5):
     )
     mesh.compute_vertex_normals()
     return mesh
+
+
+def _sphere(radius, subdivisions=5):
+    """A dense watertight icosphere -- stands in for a high-resolution scanned/CAD part.
+
+    Built once per (radius, subdivisions) and copied per call. Four tests want the subdiv-7
+    sphere (~328k faces); regenerating it each time dominated this module's runtime, and
+    `decimate_mesh_to_resolution` may return the input by identity, so every caller needs its
+    own copy rather than a shared one.
+    """
+    return o3d.geometry.TriangleMesh(_sphere_cached(radius, subdivisions))
 
 
 def _obb_diagonal(mesh):
@@ -101,6 +113,7 @@ def test_voxel_follows_obb_diagonal():
 # -- quality guarantees --------------------------------------------------------
 
 
+@pytest.mark.slow
 def test_reduces_triangle_count():
     """A genuinely over-resolved mesh must be cut down by the SHIPPED defaults.
 
@@ -116,12 +129,34 @@ def test_reduces_triangle_count():
     assert len(out.triangles) == stats["tri_after"]
 
 
+@pytest.mark.slow
+def test_does_not_mutate_input():
+    """The result is a display LOD; the caller keeps a full-resolution mesh it still exports.
+
+    So decimation must return a NEW object and leave the input untouched. If it ever mutated in
+    place, `SceneStage`'s preview block would silently coarsen `app.o3d_scene` -- and from there
+    the exported .stl and the MechVision reference cloud.
+    """
+    mesh = _sphere(0.05, subdivisions=7)
+    tris_before = len(mesh.triangles)
+    verts_before = np.asarray(mesh.vertices).copy()
+
+    out, stats = decimate_mesh_to_resolution(mesh)
+
+    assert not stats["skipped"]
+    assert out is not mesh
+    assert len(mesh.triangles) == tris_before
+    assert np.array_equal(np.asarray(mesh.vertices), verts_before)
+
+
+@pytest.mark.slow
 def test_preserves_volume_within_tolerance():
     out, stats = decimate_mesh_to_resolution(_sphere(0.05, subdivisions=7))
     assert stats["volume_err"] <= DECIMATE_MAX_VOLUME_ERR
     assert not out.is_empty()
 
 
+@pytest.mark.slow
 def test_preserves_extents():
     """Bin sizing reads the part's extents, so decimation must not shrink the part materially.
     Asserted on the AABB, which is exact -- trimesh's OBB is unreliable for rounded shapes
@@ -135,6 +170,7 @@ def test_preserves_extents():
     assert np.all(np.abs(after - before) / before < 0.02)
 
 
+@pytest.mark.slow
 def test_output_is_vhacd_ready():
     """The result feeds VHACD, whose fillMode="flood" wants a clean watertight mesh."""
     out, _ = decimate_mesh_to_resolution(_sphere(0.05, subdivisions=7))
