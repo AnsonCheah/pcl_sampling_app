@@ -74,7 +74,7 @@ def test_batch0_placement_does_not_mass_demote(cube_part):
 
 @pytest.mark.parametrize("extents,use_max_bin", [
     ((0.02, 0.02, 0.02), False),      # shrunken bin
-    ((0.12, 0.12, 0.12), True),       # clips to the max bin -- exercises both ends
+    ((0.15, 0.15, 0.15), True),       # clips to the max bin -- exercises both ends
 ])
 def test_pile_does_not_overspill_rim(make_box_part, extents, use_max_bin):
     """A crowned pile is expected -- BIN_TOP_MARGIN_FRAC reserves headroom and parts stack -- but
